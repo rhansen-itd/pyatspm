@@ -1,0 +1,36 @@
+# --- Python & Environment ---
+__pycache__/
+*.pyc
+.venv/
+venv/
+env/
+.env
+.ipynb_checkpoints/
+
+# --- IDE Settings ---
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# --- ATSPM Data Workspace ---
+# Ignore EVERYTHING in the intersections folder
+intersections/*
+
+# ...But keep the folder itself so the structure exists when cloning
+!intersections/.gitkeep
+
+# --- Safety Nets ---
+# Just in case you accidentally create these files outside the ignored folder
+*.db
+*.db-wal
+*.db-shm
+*.datZ
+*.zip
+*.gz
+*.log
+
+# --- Documentation ---
+# (Optional) If you build Sphinx docs later
+docs/_build/
