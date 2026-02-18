@@ -5,10 +5,11 @@ This package handles all I/O operations, database management,
 and resource handling for the ATSPM system.
 
 Modules:
-- manager: Database initialization and configuration import
-- ingestion: Event data ingestion from .datZ files
+- manager:    Database initialization and configuration import
+- ingestion:  Event data ingestion from .datZ files
 - processing: Cycle detection processing
-- reader: Legacy adapter for reading data in flat format
+- reader:     Legacy adapter for reading data in flat format
+- counts:     Vehicle and pedestrian count orchestration
 """
 
 from .manager import DatabaseManager, init_db, import_config
@@ -24,6 +25,18 @@ from .reader import (
     check_data_quality,
     preview_data,
     convert_to_datetime,
+)
+
+from .counts import (
+    CountEngine,
+    get_vehicle_counts,
+    get_ped_counts,
+    get_combined_counts,
+)
+
+from .phases import (
+    PhaseEngine,
+    get_phase_splits,
 )
 
 __all__ = [
@@ -47,4 +60,12 @@ __all__ = [
     'check_data_quality',
     'preview_data',
     'convert_to_datetime',
+    # Counts
+    'CountEngine',
+    'get_vehicle_counts',
+    'get_ped_counts',
+    'get_combined_counts',
+    # Phases
+    'PhaseEngine',
+    'get_phase_splits',
 ]

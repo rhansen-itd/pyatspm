@@ -21,7 +21,8 @@ def get_legacy_dataframe(
     db_path: Path,
     start: datetime,
     end: datetime,
-    event_codes: Optional[List[int]] = None
+    event_codes: Optional[List[int]] = None,
+    timezone: Optional[str] = None
 ) -> pd.DataFrame:
     """
     Query events and cycles, returning a legacy-format DataFrame.
@@ -70,7 +71,11 @@ def get_legacy_dataframe(
     
     # Step 4: Format columns for legacy compatibility
     result_df = _format_legacy_columns(result_df)
-    
+
+    if timezone:
+        result_df['TS_start'] = pd.to_datetime(result_df['TS_start'], unit='s', utc=True).dt.tz_convert(timezone)
+        result_df['Cycle_start'] = pd.to_datetime(result_df['Cycle_start'], unit='s', utc=True).dt.tz_convert(timezone)
+
     return result_df
 
 

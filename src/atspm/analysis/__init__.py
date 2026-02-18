@@ -7,8 +7,8 @@ return transformed data.
 
 Modules:
 - decoders: Binary file parsing (DatZ format)
-- cycles: Cycle detection and barrier logic
-- moes: MOE calculations (planned)
+- cycles:   Cycle detection and barrier logic
+- counts:   Vehicle and pedestrian count aggregations
 """
 
 from .decoders import (
@@ -29,6 +29,17 @@ from .cycles import (
     assign_events_to_cycles,
 )
 
+from .counts import (
+    vehicle_counts,
+    ped_counts,
+    parse_movements_from_config,
+    parse_exclusions_from_config,
+)
+
+from .phases import (
+    phase_splits,
+)
+
 __all__ = [
     # Decoders
     'DatZDecodingError',
@@ -44,4 +55,11 @@ __all__ = [
     'validate_cycles',
     'get_cycle_stats',
     'assign_events_to_cycles',
+    # Counts
+    'vehicle_counts',
+    'ped_counts',
+    'parse_movements_from_config',
+    'parse_exclusions_from_config',
+    # Phases
+    'phase_splits',
 ]

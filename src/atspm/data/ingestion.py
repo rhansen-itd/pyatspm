@@ -1,14 +1,24 @@
 """
 ATSPM Data Ingestion Engine (Imperative Shell)
 
-This module handles ingestion of .datZ files into the SQLite database.
-It manages file I/O, state tracking, timezone conversions, and gap detection.
+Handles ingestion of .datZ files into the SQLite database.
+Manages file I/O, state tracking, timezone conversions, and gap detection.
+
+ingestion_log schema (span-based):
+    span_start  REAL PRIMARY KEY  -- UTC epoch of first file in span
+    span_end    REAL NOT NULL     -- UTC epoch of last file in span
+    processed_at TEXT NOT NULL    -- ISO timestamp of last write to this span
+    row_count   INTEGER NOT NULL  -- total events ingested for the span
+
+A "span" is a maximal run of consecutive files with no gap between them.
+When a gap is detected, the current span is closed and a new one begins.
+The gap marker event (-1, -1) in the events table remains the authoritative
+record of discontinuity; the log is purely for ingestion-state bookkeeping.
 
 Package Location: src/atspm/data/ingestion.py
 """
 
 import re
-import math
 import sqlite3
 from pathlib import Path
 from datetime import datetime, timedelta
@@ -23,327 +33,384 @@ from .manager import DatabaseManager
 
 class IngestionEngine:
     """
-    Manages incremental ingestion of .datZ files into SQLite database.
-    
+    Manages incremental ingestion of .datZ files into the SQLite database.
+
     Responsibilities:
-    - File scanning and timestamp parsing
-    - Timezone conversion (local → UTC)
-    - State tracking via ingestion_log table
-    - Gap detection and marker insertion
+    - File scanning and filename-timestamp parsing (local â†’ UTC)
+    - Gap detection and gap-marker insertion into events
+    - Continuous-span tracking in ingestion_log
     - Batch processing with transaction safety
     """
-    
+
     def __init__(
-        self, 
-        db_path: Path, 
-        raw_data_dir: Path, 
+        self,
+        db_path: Path,
+        raw_data_dir: Path,
         timezone: str = None
     ):
         """
-        Initialize the ingestion engine.
-        
         Args:
-            db_path: Path to SQLite database
-            raw_data_dir: Directory containing .datZ files
-            timezone: Local timezone for controller (e.g., 'US/Mountain')
-                     If None, will attempt to read from metadata table
+            db_path: Path to the SQLite database.
+            raw_data_dir: Directory containing .datZ files.
+            timezone: Controller local timezone (e.g. 'US/Mountain').
+                      If None, reads from the metadata table.
         """
         self.db_path = Path(db_path)
         self.raw_data_dir = Path(raw_data_dir)
-        
-        # Try to get timezone from metadata if not provided
-        if timezone is None:
-            timezone = self._get_timezone_from_metadata()
-            if timezone is None:
-                timezone = 'US/Mountain'
-                print(f"Warning: No timezone specified, using default: {timezone}")
-        
-        self.tz = pytz.timezone(timezone)
-    
-    def _get_timezone_from_metadata(self) -> Optional[str]:
-        """
-        Try to read timezone from metadata table.
-        
-        Returns:
-            Timezone string or None if not found
-        """
+        self.tz = pytz.timezone(self._resolve_timezone(timezone))
+
+        # Running counters for summary output
+        self._files_processed: int = 0
+        self._total_events: int = 0
+        self._gap_markers: int = 0
+
+    # ------------------------------------------------------------------
+    # Initialisation helpers
+    # ------------------------------------------------------------------
+
+    def _resolve_timezone(self, timezone: Optional[str]) -> str:
+        if timezone is not None:
+            return timezone
         try:
-            with DatabaseManager(self.db_path) as manager:
-                metadata = manager.get_metadata()
-                if metadata and metadata.get('timezone'):
-                    print(f"Using timezone from metadata: {metadata['timezone']}")
-                    return metadata['timezone']
+            with DatabaseManager(self.db_path) as m:
+                meta = m.get_metadata()
+                if meta and meta.get('timezone'):
+                    print(f"IngestionEngine: using timezone from metadata: {meta['timezone']}")
+                    return meta['timezone']
         except Exception:
             pass
-        return None
-    
+        print("IngestionEngine: no timezone found, defaulting to US/Mountain")
+        return 'US/Mountain'
+
+    # ------------------------------------------------------------------
+    # Public interface
+    # ------------------------------------------------------------------
+
     def run(self, incremental: bool = True, batch_size: int = 50) -> None:
         """
         Execute the ingestion process.
-        
+
         Args:
-            incremental: If True, only process files newer than last ingestion
-            batch_size: Number of files to process before committing transaction
+            incremental: If True, skip files already covered by ingestion_log spans.
+            batch_size: Number of files to buffer before committing a transaction.
         """
-        # Step 1: Get last processed timestamp
-        last_timestamp = self._get_last_timestamp() if incremental else None
-        
-        if last_timestamp:
-            print(f"Resuming from timestamp: {datetime.fromtimestamp(last_timestamp, self.tz)}")
+        last_ts = self._get_last_ingested_timestamp() if incremental else None
+
+        if last_ts:
+            print(f"Resuming from: {datetime.fromtimestamp(last_ts, self.tz)}")
         else:
-            print("Starting fresh ingestion (no prior state)")
-        
-        # Step 2: Scan and parse filenames
-        file_list = self._scan_files(last_timestamp)
-        
+            print("Starting fresh ingestion")
+
+        file_list = self._scan_files(last_ts)
+
         if not file_list:
             print("No new files to process")
             return
-        
+
         print(f"Found {len(file_list)} files to process")
-        
-        # Step 3: Process in batches
         self._process_batches(file_list, batch_size)
-    
-    def _get_last_timestamp(self) -> Optional[float]:
+
+    def get_ingestion_stats(self) -> Dict[str, Any]:
         """
-        Get the maximum file timestamp from ingestion log.
-        
+        Return summary statistics from the current run and the full log.
+
         Returns:
-            UTC epoch float or None if table is empty
+            Dict with keys: files_processed, total_events, gap_markers,
+            date_range {start, end}, span_count.
         """
-        with DatabaseManager(self.db_path) as manager:
-            cursor = manager.conn.cursor()
-            cursor.execute("SELECT MAX(file_timestamp) FROM ingestion_log")
-            result = cursor.fetchone()
-            
-            return result[0] if result[0] is not None else None
-    
+        with DatabaseManager(self.db_path) as m:
+            cursor = m.conn.cursor()
+            cursor.execute(
+                "SELECT COUNT(*), MIN(span_start), MAX(span_end) FROM ingestion_log"
+            )
+            span_count, min_ts, max_ts = cursor.fetchone()
+
+            cursor.execute("SELECT COUNT(*) FROM events WHERE event_code = -1")
+            gap_count = cursor.fetchone()[0]
+
+        return {
+            'files_processed': self._files_processed,
+            'total_events': self._total_events,
+            'gap_markers': gap_count,
+            'span_count': span_count or 0,
+            'date_range': {
+                'start': (
+                    datetime.fromtimestamp(min_ts, self.tz).isoformat()
+                    if min_ts else None
+                ),
+                'end': (
+                    datetime.fromtimestamp(max_ts, self.tz).isoformat()
+                    if max_ts else None
+                ),
+            }
+        }
+
+    # ------------------------------------------------------------------
+    # State helpers
+    # ------------------------------------------------------------------
+
+    def _get_last_ingested_timestamp(self) -> Optional[float]:
+        """
+        Return the span_end of the most recently ingested span.
+
+        Returns:
+            UTC epoch float or None if log is empty.
+        """
+        with DatabaseManager(self.db_path) as m:
+            cursor = m.conn.cursor()
+            cursor.execute("SELECT MAX(span_end) FROM ingestion_log")
+            row = cursor.fetchone()
+            return row[0] if row and row[0] is not None else None
+
+    def _get_current_span(self) -> Optional[Tuple[float, float, int]]:
+        """
+        Return (span_start, span_end, row_count) for the most recent span,
+        or None if no spans exist.
+        """
+        with DatabaseManager(self.db_path) as m:
+            cursor = m.conn.cursor()
+            cursor.execute("""
+                SELECT span_start, span_end, row_count
+                FROM ingestion_log
+                ORDER BY span_start DESC
+                LIMIT 1
+            """)
+            row = cursor.fetchone()
+            return tuple(row) if row else None
+
+    # ------------------------------------------------------------------
+    # File scanning
+    # ------------------------------------------------------------------
+
     def _scan_files(
-        self, 
+        self,
         min_timestamp: Optional[float]
     ) -> List[Tuple[Path, float]]:
         """
-        Scan directory for .datZ files and extract timestamps.
-        
+        Scan raw_data_dir for .datZ files newer than min_timestamp.
+
         Args:
-            min_timestamp: Minimum UTC timestamp to include (or None for all)
-        
+            min_timestamp: Exclude files at or before this UTC epoch.
+
         Returns:
-            List of (filepath, utc_timestamp) tuples, sorted by timestamp
+            List of (filepath, utc_epoch) sorted by timestamp.
         """
         file_list = []
-        
-        for file_path in self.raw_data_dir.glob('*.datZ'):
-            # Parse filename timestamp
-            utc_ts = self._parse_filename_timestamp(file_path.name)
-            
-            if utc_ts is None:
-                print(f"Warning: Could not parse timestamp from {file_path.name}")
+        for fp in self.raw_data_dir.glob('*.datZ'):
+            ts = self._parse_filename_timestamp(fp.name)
+            if ts is None:
+                print(f"Warning: cannot parse timestamp from {fp.name}")
                 continue
-            
-            # Filter by minimum timestamp
-            if min_timestamp is not None and utc_ts <= min_timestamp:
+            if min_timestamp is not None and ts <= min_timestamp:
                 continue
-            
-            file_list.append((file_path, utc_ts))
-        
-        # Sort by timestamp
+            file_list.append((fp, ts))
+
         file_list.sort(key=lambda x: x[1])
-        
         return file_list
-    
+
     def _parse_filename_timestamp(self, filename: str) -> Optional[float]:
         """
-        Extract timestamp from filename and convert to UTC epoch.
-        
+        Extract the local datetime from the filename and convert to UTC epoch.
+
         Expected format: *_YYYY_MM_DD_HHMM.datZ
-        Example: ECON_10.70.10.51_2025_01_15_1430.datZ
-        
+
         Args:
-            filename: Name of .datZ file
-        
+            filename: .datZ filename.
+
         Returns:
-            UTC epoch float or None if parsing fails
+            UTC epoch float, or None on parse failure.
         """
-        # Extract YYYY_MM_DD_HHMM pattern
-        pattern = r'(\d{4})_(\d{2})_(\d{2})_(\d{4})'
-        match = re.search(pattern, filename)
-        
+        match = re.search(r'(\d{4})_(\d{2})_(\d{2})_(\d{4})', filename)
         if not match:
             return None
-        
         try:
             year, month, day, hhmm = match.groups()
-            hour = int(hhmm[:2])
-            minute = int(hhmm[2:])
-            
-            # Create naive datetime (controller local time)
-            naive_dt = datetime(
-                int(year), int(month), int(day), 
-                hour, minute
-            )
-            
-            # Localize to controller timezone
+            naive_dt = datetime(int(year), int(month), int(day),
+                                int(hhmm[:2]), int(hhmm[2:]))
             aware_dt = self.tz.localize(naive_dt)
-            
-            # Convert to UTC epoch
-            utc_ts = aware_dt.timestamp()
-            
-            return utc_ts
-            
-        except (ValueError, pytz.exceptions.AmbiguousTimeError, 
+            return aware_dt.timestamp()
+        except (ValueError,
+                pytz.exceptions.AmbiguousTimeError,
                 pytz.exceptions.NonExistentTimeError) as e:
-            print(f"Warning: Error parsing {filename}: {e}")
+            print(f"Warning: error parsing {filename}: {e}")
             return None
-    
+
+    # ------------------------------------------------------------------
+    # Batch processing
+    # ------------------------------------------------------------------
+
     def _process_batches(
-        self, 
-        file_list: List[Tuple[Path, float]], 
+        self,
+        file_list: List[Tuple[Path, float]],
         batch_size: int
     ) -> None:
         """
-        Process files in batches with transaction safety.
-        
+        Process file_list in batches, committing every batch_size files.
+
+        Maintains a running span state so that consecutive files collapse
+        into a single ingestion_log row and gaps open a new span.
+
         Args:
-            file_list: List of (filepath, utc_timestamp) tuples
-            batch_size: Files per transaction
+            file_list: Sorted list of (filepath, utc_epoch) tuples.
+            batch_size: Max files per transaction.
         """
-        total_files = len(file_list)
-        events_buffer = []
-        logs_buffer = []
-        
+        total = len(file_list)
+
+        # Seed the active span from the last committed span in the log.
+        # This lets us correctly determine whether the first new file is
+        # continuous with what was previously ingested.
+        existing_span = self._get_current_span()
+        # active_span: (span_start, span_end, accumulated_row_count, last_event_ts)
+        # last_event_ts is the UTC epoch of the final real event in the span,
+        # used to place gap markers at last_event_ts + 0.1 rather than at a
+        # computed boundary.  For spans seeded from the DB we have no event-level
+        # detail, so we fall back to span_end as an approximation.
+        # None means no open span yet this run.
+        active_span: Optional[Tuple[float, float, int, float]] = (
+            (existing_span[0], existing_span[1], existing_span[2], existing_span[1])
+            if existing_span is not None else None
+        )
+
+        events_buffer: List[pd.DataFrame] = []
+        span_updates: List[Tuple[float, float, int]] = []  # (start, end, rows)
+
         for i, (file_path, utc_start) in enumerate(file_list):
-            # Determine next file timestamp for gap detection
-            next_file_utc = file_list[i + 1][1] if i + 1 < len(file_list) else None
-            
-            # Process file
-            result = self._process_file(file_path, utc_start, next_file_utc)
-            
+            next_file_utc = file_list[i + 1][1] if i + 1 < total else None
+
+            # Pass the previous span's last_event_ts so _process_file can place
+            # the gap marker at last_event_ts + 0.1 rather than a computed boundary.
+            prev_last_event_ts = active_span[3] if active_span is not None else None
+
+            result = self._process_file(file_path, utc_start, next_file_utc,
+                                        active_span, prev_last_event_ts)
             if result is None:
-                # File failed to process - skip
                 continue
-            
-            events_df, log_entry = result
-            
-            # Add to buffers
+
+            events_df, row_count, gap_opened, new_span = result
+
+            self._files_processed += 1
+            self._total_events += row_count
+
             if not events_df.empty:
                 events_buffer.append(events_df)
-            logs_buffer.append(log_entry)
-            
-            # Commit when batch is full or at end of list
-            should_commit = (
-                len(logs_buffer) >= batch_size or 
-                i == len(file_list) - 1
-            )
-            
-            if should_commit and logs_buffer:
-                self._commit_batch(events_buffer, logs_buffer)
-                
-                # Progress report
-                processed_count = i + 1
-                print(f"Processed {processed_count}/{total_files} files...")
-                
-                # Clear buffers
+
+            if gap_opened and active_span is not None:
+                # Close the current span before this file's gap marker.
+                # Only the first three fields are stored in the DB.
+                span_updates.append(active_span[:3])
+                active_span = new_span
+            elif active_span is None:
+                active_span = new_span
+            else:
+                # Extend active span: update end, accumulate rows, keep last_event_ts
+                # from new_span (index 3) so it always reflects the most recent file.
+                active_span = (
+                    active_span[0],
+                    utc_start,
+                    active_span[2] + row_count,
+                    new_span[3],
+                )
+
+            should_commit = (len(span_updates) + 1 >= batch_size or
+                             i == total - 1)
+
+            if should_commit and (events_buffer or span_updates or
+                                  active_span is not None):
+                # Include the currently-open span in this commit.
+                # _commit_batch expects 3-tuples; strip last_event_ts (index 3).
+                all_spans = span_updates[:]
+                if active_span is not None:
+                    all_spans.append(active_span[:3])
+
+                self._commit_batch(events_buffer, all_spans)
+                print(f"  Committed {i + 1}/{total} files...")
+
                 events_buffer = []
-                logs_buffer = []
-    
+                span_updates = []
+                # active_span persists â€” it may still grow
+
+    # ------------------------------------------------------------------
+    # Per-file processing
+    # ------------------------------------------------------------------
+
     def _process_file(
         self,
         file_path: Path,
         utc_start: float,
-        next_file_utc: Optional[float]
-    ) -> Optional[Tuple[pd.DataFrame, Dict[str, Any]]]:
+        next_file_utc: Optional[float],
+        active_span: Optional[Tuple[float, float, int, float]],
+        prev_last_event_ts: Optional[float],
+    ) -> Optional[Tuple[pd.DataFrame, int, bool, Tuple[float, float, int, float]]]:
         """
-        Process a single .datZ file.
-        
+        Decode a single .datZ file and decide whether a gap precedes it.
+
         Args:
-            file_path: Path to .datZ file
-            utc_start: File start timestamp (UTC epoch)
-            next_file_utc: Next file's start timestamp (or None)
-        
+            file_path:          Path to the .datZ file.
+            utc_start:          UTC epoch of this file.
+            next_file_utc:      UTC epoch of the next file (for duration inference).
+            active_span:        Current open span (start, end, row_count,
+                                last_event_ts) or None.
+            prev_last_event_ts: UTC epoch of the last real event in the
+                                preceding file (or span_end for DB-seeded spans).
+                                Used to position the gap marker at
+                                prev_last_event_ts + 0.1 s.
+
         Returns:
-            Tuple of (events_df, log_entry_dict) or None on error
+            (events_df, row_count, gap_opened, new_span_tuple) or None on error.
+            new_span_tuple is a 4-tuple (span_start, span_end, row_count,
+            last_event_ts).
+            gap_opened is True when the file follows a gap that closes
+            active_span.
         """
         try:
-            # Read file bytes (Imperative I/O)
             raw_bytes = file_path.read_bytes()
-            
-        except (IOError, OSError) as e:
+        except OSError as e:
             print(f"Error reading {file_path.name}: {e}")
             return None
-        
-        # Decode using Functional Core
+
         try:
             df = decoders.parse_datz_bytes(raw_bytes, utc_start)
         except decoders.DatZDecodingError as e:
             print(f"Error decoding {file_path.name}: {e}")
             return None
-        
-        # Calculate statistics
-        if not df.empty:
-            last_event_ts = df['timestamp'].max()
-            row_count = len(df)
-        else:
-            last_event_ts = utc_start
-            row_count = 0
-        
-        # Gap detection
-        df = self._handle_gaps(
-            df, 
-            utc_start, 
-            last_event_ts, 
-            next_file_utc
+
+        row_count = len(df)
+        last_event_ts = df['timestamp'].max() if not df.empty else utc_start
+
+        # Gap detection: does this file start a new span?
+        gap_opened = False
+        if active_span is not None:
+            prev_end = active_span[1]
+            duration = self._calculate_duration(utc_start, last_event_ts,
+                                                next_file_utc)
+            expected_next = prev_end + duration
+
+            gap_seconds = utc_start - expected_next
+            if gap_seconds > 5.0:
+                # Place the gap marker 0.1 s after the last real event of the
+                # preceding file.  This correctly handles the case where a file
+                # ends early (e.g. power loss at minute 3 of a 15-min bin) and
+                # the controller restarts mid-bin: the marker lands immediately
+                # after meaningful data rather than at the hypothetical bin end,
+                # which would silently absorb valid events from the recovery file.
+                gap_marker_ts = (
+                    prev_last_event_ts + 0.1
+                    if prev_last_event_ts is not None
+                    else prev_end + 0.1
+                )
+                df = decoders.insert_gap_marker(df, gap_marker_ts)
+                self._gap_markers += 1
+                gap_opened = True
+
+        new_span: Tuple[float, float, int, float] = (
+            utc_start, utc_start, row_count, last_event_ts
         )
-        
-        # Create log entry
-        log_entry = {
-            'filename': file_path.name,
-            'file_timestamp': utc_start,
-            'processed_at': datetime.utcnow().isoformat(),
-            'row_count': row_count
-        }
-        
-        return df, log_entry
-    
-    def _handle_gaps(
-        self,
-        df: pd.DataFrame,
-        utc_start: float,
-        last_event_ts: float,
-        next_file_utc: Optional[float]
-    ) -> pd.DataFrame:
-        """
-        Detect gaps and insert markers if needed.
-        
-        Args:
-            df: Events DataFrame
-            utc_start: File start timestamp
-            last_event_ts: Last event timestamp in file
-            next_file_utc: Next file's start timestamp
-        
-        Returns:
-            DataFrame with gap marker inserted (if applicable)
-        """
-        # Calculate expected file duration
-        duration = self._calculate_duration(
-            utc_start, 
-            last_event_ts, 
-            next_file_utc
-        )
-        
-        expected_end = utc_start + duration
-        
-        # Check for gap
-        if next_file_utc is not None:
-            gap_seconds = next_file_utc - expected_end
-            
-            if gap_seconds > 5.0:  # 5-second tolerance
-                # Insert gap marker at expected end
-                df = decoders.insert_gap_marker(df, expected_end)
-        
-        return df
-    
+        return df, row_count, gap_opened, new_span
+
+    # ------------------------------------------------------------------
+    # Duration inference
+    # ------------------------------------------------------------------
+
     def _calculate_duration(
         self,
         start_ts: float,
@@ -351,214 +418,121 @@ class IngestionEngine:
         next_file_start_ts: Optional[float]
     ) -> float:
         """
-        Determine file duration for gap detection.
-        
-        Uses multiple signals to detect if file is in "Grid Mode" (15-min)
-        or "1-Minute Mode".
-        
+        Infer file duration (seconds) to determine the expected end of a file.
+
+        Three signals favour Grid Mode (15-min boundary):
+        1. Data span > 61 s
+        2. Gap to next file > 90 s
+        3. Start minute aligns with 0/15/30/45
+
+        Falls back to 60 s (1-Minute Mode) if none apply.
+
         Args:
-            start_ts: File start timestamp (UTC epoch)
-            last_event_ts: Last event timestamp (UTC epoch)
-            next_file_start_ts: Next file timestamp (UTC epoch, or None)
-        
+            start_ts: UTC epoch of file start.
+            last_event_ts: UTC epoch of last event in file.
+            next_file_start_ts: UTC epoch of next file, or None.
+
         Returns:
-            Duration in seconds (float)
+            Duration in seconds.
         """
-        # Evidence 1: Data span > 61 seconds → Grid Mode
-        data_span = last_event_ts - start_ts
-        if data_span > 61.0:
+        if last_event_ts - start_ts > 61.0:
             return self._grid_duration(start_ts)
-        
-        # Evidence 2: Next file > 90 seconds away → Grid Mode
+
         if next_file_start_ts is not None:
-            sequence_span = next_file_start_ts - start_ts
-            if sequence_span > 90.0:
+            if next_file_start_ts - start_ts > 90.0:
                 return self._grid_duration(start_ts)
-        
-        # Evidence 3: Start time aligns with 15-min grid → Grid Mode
+
         local_dt = datetime.fromtimestamp(start_ts, self.tz)
-        if local_dt.minute in [0, 15, 30, 45]:
+        if local_dt.minute in (0, 15, 30, 45):
             return self._grid_duration(start_ts)
-        
-        # Fallback: 1-Minute Mode
+
         return 60.0
-    
+
     def _grid_duration(self, start_ts: float) -> float:
         """
-        Calculate seconds until next 15-minute boundary.
-        
+        Compute seconds from start_ts to the next 15-minute boundary in local time.
+
         Args:
-            start_ts: Start timestamp (UTC epoch)
-        
+            start_ts: UTC epoch.
+
         Returns:
-            Seconds to next quarter-hour mark
+            Seconds to the next quarter-hour mark.
         """
-        # Convert to local time
         local_dt = datetime.fromtimestamp(start_ts, self.tz)
-        
-        # Calculate next 15-minute boundary
         current_minute = local_dt.minute
-        current_second = local_dt.second
-        
-        # Find next quarter-hour mark
-        quarter_hours = [0, 15, 30, 45]
-        next_quarter = None
-        
-        for qh in quarter_hours:
-            if current_minute < qh:
-                next_quarter = qh
-                break
-        
+
+        next_quarter = next(
+            (qh for qh in (0, 15, 30, 45) if current_minute < qh),
+            None
+        )
+
         if next_quarter is None:
-            # Roll over to next hour
-            next_dt = local_dt.replace(minute=0, second=0, microsecond=0)
-            next_dt += timedelta(hours=1)
+            next_dt = (local_dt.replace(minute=0, second=0, microsecond=0)
+                       + timedelta(hours=1))
         else:
-            # Same hour, next quarter
-            next_dt = local_dt.replace(minute=next_quarter, second=0, microsecond=0)
-        
-        # Calculate duration
-        duration = (next_dt - local_dt).total_seconds()
-        
-        return duration
-    
+            next_dt = local_dt.replace(minute=next_quarter, second=0,
+                                       microsecond=0)
+
+        return (next_dt - local_dt).total_seconds()
+
+    # ------------------------------------------------------------------
+    # DB commit
+    # ------------------------------------------------------------------
+
     def _commit_batch(
         self,
         events_buffer: List[pd.DataFrame],
-        logs_buffer: List[Dict[str, Any]]
+        span_updates: List[Tuple[float, float, int]]
     ) -> None:
         """
-        Commit buffered events and logs in a single transaction.
-        
+        Commit events and span log rows in a single transaction.
+
+        For each span in span_updates, upsert into ingestion_log using
+        INSERT OR REPLACE so that an existing open span gets its span_end
+        and row_count updated in place rather than creating a duplicate.
+
         Args:
-            events_buffer: List of event DataFrames
-            logs_buffer: List of log entry dictionaries
+            events_buffer: List of event DataFrames to insert.
+            span_updates:  List of (span_start, span_end, row_count) tuples.
         """
-        # Combine all events
+        event_tuples = []
         if events_buffer:
             all_events = pd.concat(events_buffer, ignore_index=True)
-            # Convert to list of tuples for insertion
-            event_tuples = [
-                (row['timestamp'], row['event_code'], row['parameter'])
-                for _, row in all_events.iterrows()
-            ]
-        else:
-            event_tuples = []
-        
-        # Use DatabaseManager connection directly for transaction
-        with DatabaseManager(self.db_path) as manager:
-            cursor = manager.conn.cursor()
-            
+            event_tuples = list(all_events.itertuples(index=False, name=None))
+
+        now_iso = datetime.utcnow().isoformat()
+
+        with DatabaseManager(self.db_path) as m:
+            cursor = m.conn.cursor()
             try:
-                # Start transaction (implicit with first statement)
-                
-                # Insert events
                 if event_tuples:
                     cursor.executemany(
-                        "INSERT OR IGNORE INTO events (timestamp, event_code, parameter) VALUES (?, ?, ?)",
+                        "INSERT OR IGNORE INTO events "
+                        "(timestamp, event_code, parameter) VALUES (?, ?, ?)",
                         event_tuples
                     )
-                
-                # Insert logs
-                for log in logs_buffer:
-                    cursor.execute(
-                        """
-                        INSERT OR REPLACE INTO ingestion_log 
-                        (filename, file_timestamp, processed_at, row_count)
+
+                for span_start, span_end, row_count in span_updates:
+                    cursor.execute("""
+                        INSERT INTO ingestion_log
+                            (span_start, span_end, processed_at, row_count)
                         VALUES (?, ?, ?, ?)
-                        """,
-                        (
-                            log['filename'],
-                            log['file_timestamp'],
-                            log['processed_at'],
-                            log['row_count']
-                        )
-                    )
-                
-                # Commit transaction
-                manager.conn.commit()
-                
+                        ON CONFLICT(span_start) DO UPDATE SET
+                            span_end     = excluded.span_end,
+                            processed_at = excluded.processed_at,
+                            row_count    = row_count + excluded.row_count
+                    """, (span_start, span_end, now_iso, row_count))
+
+                m.conn.commit()
             except sqlite3.Error as e:
-                # Rollback on error
-                manager.conn.rollback()
+                m.conn.rollback()
                 print(f"Error committing batch: {e}")
                 raise
-    
-    def get_ingestion_stats(self) -> Dict[str, Any]:
-        """
-        Get statistics about ingested data.
-        
-        Returns:
-            Dictionary with ingestion statistics
-        """
-        with DatabaseManager(self.db_path) as manager:
-            cursor = manager.conn.cursor()
-            
-            # Files processed
-            cursor.execute("SELECT COUNT(*) FROM ingestion_log")
-            file_count = cursor.fetchone()[0]
-            
-            # Total events
-            cursor.execute("SELECT COUNT(*) FROM events")
-            event_count = cursor.fetchone()[0]
-            
-            # Date range
-            cursor.execute("SELECT MIN(file_timestamp), MAX(file_timestamp) FROM ingestion_log")
-            min_ts, max_ts = cursor.fetchone()
-            
-            # Gap count
-            cursor.execute("SELECT COUNT(*) FROM events WHERE event_code = -1")
-            gap_count = cursor.fetchone()[0]
-            
-            return {
-                'files_processed': file_count,
-                'total_events': event_count,
-                'gap_markers': gap_count,
-                'date_range': {
-                    'start': datetime.fromtimestamp(min_ts, self.tz).isoformat() if min_ts else None,
-                    'end': datetime.fromtimestamp(max_ts, self.tz).isoformat() if max_ts else None,
-                }
-            }
-    
-    def reprocess_file(self, filename: str) -> bool:
-        """
-        Reprocess a single file (useful for fixing corrupted ingestion).
-        
-        Args:
-            filename: Name of file to reprocess
-        
-        Returns:
-            True if successful, False otherwise
-        """
-        file_path = self.raw_data_dir / filename
-        
-        if not file_path.exists():
-            print(f"File not found: {filename}")
-            return False
-        
-        # Parse timestamp
-        utc_start = self._parse_filename_timestamp(filename)
-        if utc_start is None:
-            print(f"Could not parse timestamp from {filename}")
-            return False
-        
-        # Process file
-        result = self._process_file(file_path, utc_start, None)
-        
-        if result is None:
-            return False
-        
-        events_df, log_entry = result
-        
-        # Commit
-        self._commit_batch(
-            [events_df] if not events_df.empty else [],
-            [log_entry]
-        )
-        
-        print(f"Reprocessed {filename}: {log_entry['row_count']} events")
-        return True
 
+
+# ---------------------------------------------------------------------------
+# Convenience entry-point
+# ---------------------------------------------------------------------------
 
 def run_ingestion(
     db_path: Path,
@@ -568,23 +542,26 @@ def run_ingestion(
     batch_size: int = 50
 ) -> None:
     """
-    Convenience function to run ingestion process.
-    
+    Run ingestion of .datZ files into the database.
+
     Args:
-        db_path: Path to SQLite database
-        data_dir: Directory containing .datZ files
-        timezone: Local timezone (e.g., 'US/Mountain'). If None, reads from metadata table.
-        incremental: Only process new files
-        batch_size: Files per transaction
+        db_path:     Path to SQLite database.
+        data_dir:    Directory containing .datZ files.
+        timezone:    Controller timezone. If None, reads from metadata table.
+        incremental: Only process files newer than the last ingested span_end.
+        batch_size:  Files per transaction commit.
     """
     engine = IngestionEngine(db_path, data_dir, timezone)
     engine.run(incremental=incremental, batch_size=batch_size)
-    
-    # Print statistics
+
     stats = engine.get_ingestion_stats()
     print("\nIngestion Complete!")
-    print(f"  Files processed: {stats['files_processed']}")
-    print(f"  Total events: {stats['total_events']}")
-    print(f"  Gap markers: {stats['gap_markers']}")
+    print(f"  Files processed : {stats['files_processed']}")
+    print(f"  Total events    : {stats['total_events']:,}")
+    print(f"  Gap markers     : {stats['gap_markers']}")
+    print(f"  Log spans       : {stats['span_count']}")
     if stats['date_range']['start']:
-        print(f"  Date range: {stats['date_range']['start']} to {stats['date_range']['end']}")
+        print(
+            f"  Date range      : {stats['date_range']['start']} "
+            f"â†’ {stats['date_range']['end']}"
+        )

@@ -128,18 +128,20 @@ class DatabaseManager:
             )
         """)
         
-        # 4. Create ingestion_log table (Control Table)
+        # 4. Create ingestion_log table (span-based control table)
+        # Each row represents a maximal continuous run of ingested files.
+        # A new span begins whenever a gap is detected between files.
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS ingestion_log (
-                filename TEXT PRIMARY KEY,
-                file_timestamp REAL NOT NULL,
-                processed_at TEXT NOT NULL,
-                row_count INTEGER NOT NULL
+                span_start   REAL PRIMARY KEY,   -- UTC epoch of first file in span
+                span_end     REAL NOT NULL,       -- UTC epoch of last file in span
+                processed_at TEXT NOT NULL,       -- ISO timestamp of last write
+                row_count    INTEGER NOT NULL     -- total events in span
             )
         """)
         cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_ingestion_timestamp
-            ON ingestion_log (file_timestamp)
+            CREATE INDEX IF NOT EXISTS idx_ingestion_span_end
+            ON ingestion_log (span_end)
         """)
         
         self.conn.commit()
@@ -649,6 +651,29 @@ class DatabaseManager:
         columns = [desc[0] for desc in cursor.description]
         return dict(zip(columns, row))
 
+    def get_ingestion_spans(self) -> pd.DataFrame:
+        """
+        Return all ingestion spans from the log, sorted by span_start.
+
+        Useful for:
+        - Determining the full date range of ingested data
+        - Identifying gaps (timestamps not covered by any span)
+        - Validating retroactive data insertions
+
+        Returns:
+            DataFrame with columns [span_start, span_end, processed_at, row_count].
+            span_start / span_end are UTC epoch floats.
+        """
+        import pandas as pd
+
+        if not self.conn:
+            raise RuntimeError("Database connection not established.")
+
+        return pd.read_sql_query(
+            "SELECT span_start, span_end, processed_at, row_count "
+            "FROM ingestion_log ORDER BY span_start",
+            self.conn
+        )
 
 def init_db(db_path: Path) -> None:
     """
