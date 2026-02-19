@@ -14,6 +14,14 @@ Gap Marker Rule:
     assign_events_to_cycles explicitly preserves gap marker rows with
     NaT / NaN cycle assignments so that downstream consumers are never
     handed a gap marker silently attributed to a real cycle.
+
+Ring/Phase Assignment (Task 0):
+    assign_ring_phases() adds r1_phases and r2_phases columns to a cycles
+    DataFrame.  Assignment priority:
+        1. RB_* columns in config (authoritative ring-barrier definition).
+        2. Concurrency-based fallback matching legacy add_r1r2() behaviour.
+    The raw comma-separated phase sequence string (e.g. "2,6") is stored
+    directly – one string per cycle row – matching the schema target.
 """
 
 import pandas as pd
@@ -21,6 +29,12 @@ import numpy as np
 from typing import Dict, Any, List, Tuple, Optional
 
 _GAP_CODE: int = -1  # event_code value used for discontinuity markers
+
+# ---------------------------------------------------------------------------
+# Default legacy ring membership (mirrors add_r1r2 defaults in misc_tools.py)
+# ---------------------------------------------------------------------------
+_DEFAULT_R1: List[int] = [1, 2, 3, 4, 9, 10, 11, 12]
+_DEFAULT_R2: List[int] = [5, 6, 7, 8, 13, 14, 15, 16]
 
 
 class CycleDetectionError(Exception):
@@ -31,30 +45,45 @@ class CycleDetectionError(Exception):
     pass
 
 
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
 def calculate_cycles(
     events_df: pd.DataFrame,
     config: Dict[str, Any]
 ) -> pd.DataFrame:
     """
-    Calculate cycle start times and coordination plans from raw events.
+    Calculate cycle start times, coordination plans, and ring/phase strings
+    from raw events.
 
     Uses a two-path approach:
     - Path A: Code 31 barrier pulses if present and valid.
     - Path B: Ring-Barrier configuration fallback.
 
+    After cycle detection, ring/phase strings are appended via
+    :func:`assign_ring_phases`.
+
     Args:
         events_df: Raw events with columns [timestamp, event_code, parameter].
-        config: Configuration dict with RB_R1 / RB_R2 entries.
+        config: Configuration dict.  May contain RB_R1 / RB_R2 entries and/or
+            RB_* columns parsed from the config table.
 
     Returns:
-        DataFrame with columns [cycle_start, coord_plan, detection_method],
+        DataFrame with columns
+        [cycle_start, coord_plan, detection_method, r1_phases, r2_phases],
         sorted by cycle_start.
 
     Raises:
         CycleDetectionError: If no detection method succeeds.
     """
     if events_df.empty:
-        return pd.DataFrame(columns=['cycle_start', 'coord_plan', 'detection_method'])
+        return pd.DataFrame(
+            columns=[
+                'cycle_start', 'coord_plan', 'detection_method',
+                'r1_phases', 'r2_phases',
+            ]
+        )
 
     has_valid_code31 = _check_code31_validity(events_df)
 
@@ -77,10 +106,208 @@ def calculate_cycles(
 
     # Merge coord plan using vectorized backward-fill join
     cycles_df = _merge_coordination_plan(cycles_df, events_df)
-
     cycles_df = cycles_df.sort_values('cycle_start').reset_index(drop=True)
-    return cycles_df[['cycle_start', 'coord_plan', 'detection_method']]
 
+    # Append ring/phase assignment columns
+    cycles_df = assign_ring_phases(cycles_df, events_df, config)
+
+    return cycles_df[[
+        'cycle_start', 'coord_plan', 'detection_method',
+        'r1_phases', 'r2_phases',
+    ]]
+
+
+def assign_ring_phases(
+    cycles_df: pd.DataFrame,
+    events_df: pd.DataFrame,
+    config: Dict[str, Any],
+) -> pd.DataFrame:
+    """
+    Add ``r1_phases`` and ``r2_phases`` columns to a cycles DataFrame.
+
+    Assignment priority
+    ------------------
+    1. If *config* contains ``RB_R1`` and/or ``RB_R2`` entries the phases
+       listed there are used as the authoritative ring membership lists.
+    2. Otherwise the legacy concurrency-based defaults are used
+       (R1 = [1,2,3,4,9,10,11,12], R2 = [5,6,7,8,13,14,15,16]).
+
+    The resulting columns contain comma-separated phase number strings,
+    e.g. ``"2,6"``, or ``"None"`` when no phases for that ring appeared in a
+    given cycle.  This matches the schema column format and the legacy
+    ``add_r1r2`` output.
+
+    Gap markers (event_code == -1) in *events_df* are excluded before phase
+    grouping so they cannot corrupt ring strings.
+
+    Args:
+        cycles_df: DataFrame with at least a ``cycle_start`` column (numeric
+            UNIX timestamps or datetime).  Returned with two new columns.
+        events_df: Raw events with columns
+            [timestamp, event_code, parameter].  Code 1 (green start) rows are
+            used to determine which phases appeared in each cycle.
+        config: Configuration dict.  Inspected for ``RB_R1`` / ``RB_R2``
+            keys to determine ring membership.
+
+    Returns:
+        *cycles_df* copy with ``r1_phases`` and ``r2_phases`` appended.
+
+    Example SQL to build events_df for this call::
+
+        -- Pull raw events for the analysis window
+        SELECT timestamp, event_code, parameter
+        FROM events
+        WHERE timestamp BETWEEN :start AND :end
+        ORDER BY timestamp;
+    """
+    cycles_out = cycles_df.copy()
+
+    # Determine ring membership from config or legacy defaults
+    r1_members, r2_members = _resolve_ring_membership(config)
+
+    # Code 1 = green start; these define which phases ran in a cycle.
+    # Exclude gap markers explicitly (they carry event_code == -1).
+    green_events = events_df[
+        (events_df['event_code'] == 1) &
+        (events_df['event_code'] != _GAP_CODE)
+    ][['timestamp', 'parameter']].copy()
+
+    if green_events.empty or cycles_out.empty:
+        cycles_out['r1_phases'] = 'None'
+        cycles_out['r2_phases'] = 'None'
+        return cycles_out
+
+    # Assign each green event to its cycle via backward merge_asof.
+    # This is O(n log n) and fully vectorized.
+    cycles_sorted = cycles_out[['cycle_start']].sort_values('cycle_start').copy()
+    green_sorted = green_events.sort_values('timestamp')
+
+    # Align timestamp types – both must be the same dtype for merge_asof.
+    # cycles may be datetime64 or float (UNIX epoch); normalise here.
+    cs_col = cycles_sorted['cycle_start']
+    ts_col = green_sorted['timestamp']
+
+    if pd.api.types.is_datetime64_any_dtype(cs_col):
+        if not pd.api.types.is_datetime64_any_dtype(ts_col):
+            green_sorted = green_sorted.copy()
+            green_sorted['timestamp'] = pd.to_datetime(
+                green_sorted['timestamp'], unit='s', utc=True
+            )
+    else:
+        # Keep as numeric
+        pass
+
+    assigned = pd.merge_asof(
+        green_sorted,
+        cycles_sorted.rename(columns={'cycle_start': '_cs'}),
+        left_on='timestamp',
+        right_on='_cs',
+        direction='backward',
+    )
+    # Drop unmatched (events before the first cycle)
+    assigned = assigned.dropna(subset=['_cs'])
+    assigned['_cs'] = assigned['_cs']
+
+    # Build per-cycle phase strings with vectorized groupby
+    r1_set = set(r1_members)
+    r2_set = set(r2_members)
+
+    assigned['_phase'] = assigned['parameter'].astype(int)
+    assigned['_in_r1'] = assigned['_phase'].isin(r1_set)
+    assigned['_in_r2'] = assigned['_phase'].isin(r2_set)
+    assigned['_phase_str'] = assigned['_phase'].astype(str)
+
+    def _join_phases(series: pd.Series) -> str:
+        phases = series.tolist()
+        return ','.join(phases) if phases else 'None'
+
+    # R1 strings
+    r1_map = (
+        assigned[assigned['_in_r1']]
+        .groupby('_cs')['_phase_str']
+        .agg(_join_phases)
+        .rename('r1_phases')
+    )
+
+    # R2 strings
+    r2_map = (
+        assigned[assigned['_in_r2']]
+        .groupby('_cs')['_phase_str']
+        .agg(_join_phases)
+        .rename('r2_phases')
+    )
+
+    # Merge back onto cycles
+    cycles_out = cycles_out.merge(
+        r1_map, left_on='cycle_start', right_index=True, how='left'
+    )
+    cycles_out = cycles_out.merge(
+        r2_map, left_on='cycle_start', right_index=True, how='left'
+    )
+
+    cycles_out['r1_phases'] = cycles_out['r1_phases'].fillna('None')
+    cycles_out['r2_phases'] = cycles_out['r2_phases'].fillna('None')
+
+    return cycles_out
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers – ring membership resolution
+# ---------------------------------------------------------------------------
+
+def _resolve_ring_membership(
+    config: Dict[str, Any],
+) -> Tuple[List[int], List[int]]:
+    """
+    Derive R1 / R2 phase membership lists from config.
+
+    Priority
+    --------
+    1. ``RB_R1`` and ``RB_R2`` keys (pipe-delimited phase groups, e.g.
+       ``"1,2|3,4"``).  All phases present across all groups are pooled per
+       ring.
+    2. Legacy defaults: R1=[1,2,3,4,9,10,11,12], R2=[5,6,7,8,13,14,15,16].
+
+    Args:
+        config: Configuration dict potentially containing ``RB_R1``/``RB_R2``.
+
+    Returns:
+        Tuple ``(r1_list, r2_list)`` of integer phase IDs.
+    """
+    def _flatten_ring(raw: Any) -> List[int]:
+        """Parse 'group1_phase,group1_phase2|group2_phase,...' → flat list."""
+        if not raw or (isinstance(raw, float) and pd.isna(raw)):
+            return []
+        phases: List[int] = []
+        for group_str in str(raw).split('|'):
+            for tok in group_str.split(','):
+                tok = tok.strip()
+                if tok.isdigit():
+                    phases.append(int(tok))
+        return phases
+
+    r1_raw = config.get('RB_R1') or config.get('RB_r1')
+    r2_raw = config.get('RB_R2') or config.get('RB_r2')
+
+    r1 = _flatten_ring(r1_raw)
+    r2 = _flatten_ring(r2_raw)
+
+    if not r1 and not r2:
+        # Fall back to legacy concurrency-based defaults
+        return list(_DEFAULT_R1), list(_DEFAULT_R2)
+
+    # Fill any missing ring with defaults rather than leaving empty
+    if not r1:
+        r1 = [p for p in _DEFAULT_R1 if p not in r2]
+    if not r2:
+        r2 = [p for p in _DEFAULT_R2 if p not in r1]
+
+    return r1, r2
+
+
+# ---------------------------------------------------------------------------
+# Internal detection helpers (unchanged from original)
+# ---------------------------------------------------------------------------
 
 def _segment_id(events_df: pd.DataFrame) -> pd.Series:
     """
@@ -153,6 +380,7 @@ def _detect_cycles_from_barriers(events_df: pd.DataFrame) -> pd.DataFrame:
 
     return pd.DataFrame({'cycle_start': cycle_starts})
 
+
 def _detect_cycles_from_config(
     events_df: pd.DataFrame,
     config: Dict[str, Any]
@@ -213,7 +441,6 @@ def _detect_cycles_from_config(
     phase_events['group_idx'] = phase_events['group_idx'].astype(np.int8)
 
     # Aggregate per (segment, timestamp): min and max group_idx present.
-    # Including _seg in the groupby key keeps segments isolated.
     ts_agg = (
         phase_events.groupby(['_seg', 'timestamp'])['group_idx']
         .agg(min_group='min', max_group='max')
@@ -229,14 +456,15 @@ def _detect_cycles_from_config(
 
     return pd.DataFrame({'cycle_start': cycle_starts})
 
+
 def _parse_ring_barrier_config(config: Dict[str, Any]) -> List[List[int]]:
     """
     Parse Ring-Barrier configuration into phase groups.
 
     Handles formats:
-    - Single ring: RB_R1='6|4|8'           â†’ [[6], [4], [8]]
+    - Single ring: RB_R1='6|4|8'           → [[6], [4], [8]]
     - Dual ring:   RB_R1='1,2|3,4',
-                   RB_R2='5,6|7,8'          â†’ [[1,2,5,6], [3,4,7,8]]
+                   RB_R2='5,6|7,8'          → [[1,2,5,6], [3,4,7,8]]
 
     Args:
         config: Configuration dict with optional RB_R1 / RB_R2 keys.
@@ -305,7 +533,7 @@ def _merge_coordination_plan(
         cycles_sorted['coord_plan'] = 0.0
         return cycles_sorted
 
-    # merge_asof: for each cycle_start, find the last coord event â‰¤ cycle_start
+    # merge_asof: for each cycle_start, find the last coord event ≤ cycle_start
     merged = pd.merge_asof(
         cycles_sorted,
         coord_events,

@@ -18,12 +18,13 @@ from .processing import CycleProcessor, run_cycle_processing
 from .reader import (
     get_legacy_dataframe,
     get_legacy_dataframe_by_date,
+    get_coordination_data,
     get_config_df,
     get_config_dict,
+    get_det_config,
     get_date_range,
     get_available_dates,
     check_data_quality,
-    preview_data,
     convert_to_datetime,
 )
 
@@ -53,12 +54,13 @@ __all__ = [
     # Reader
     'get_legacy_dataframe',
     'get_legacy_dataframe_by_date',
+    'get_coordination_data',
     'get_config_df',
     'get_config_dict',
+    'get_det_config',
     'get_date_range',
     'get_available_dates',
     'check_data_quality',
-    'preview_data',
     'convert_to_datetime',
     # Counts
     'CountEngine',

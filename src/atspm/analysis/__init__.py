@@ -24,6 +24,7 @@ from .decoders import (
 from .cycles import (
     CycleDetectionError,
     calculate_cycles,
+    assign_ring_phases,
     validate_cycles,
     get_cycle_stats,
     assign_events_to_cycles,
@@ -52,6 +53,7 @@ __all__ = [
     # Cycles
     'CycleDetectionError',
     'calculate_cycles',
+    'assign_ring_phases',
     'validate_cycles',
     'get_cycle_stats',
     'assign_events_to_cycles',
