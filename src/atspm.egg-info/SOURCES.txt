@@ -1,0 +1,32 @@
+README.md
+pyproject.toml
+src/atspm/__init__.py
+src/atspm/cli.py
+src/atspm.egg-info/PKG-INFO
+src/atspm.egg-info/SOURCES.txt
+src/atspm.egg-info/dependency_links.txt
+src/atspm.egg-info/entry_points.txt
+src/atspm.egg-info/requires.txt
+src/atspm.egg-info/top_level.txt
+src/atspm/analysis/__init__.py
+src/atspm/analysis/counts.py
+src/atspm/analysis/cycles.py
+src/atspm/analysis/decoders.py
+src/atspm/analysis/detectors.py
+src/atspm/analysis/phases.py
+src/atspm/data/__init__.py
+src/atspm/data/counts.py
+src/atspm/data/detectors.py
+src/atspm/data/ingestion - Copy.py
+src/atspm/data/ingestion.py
+src/atspm/data/manager - Copy.py
+src/atspm/data/manager.py
+src/atspm/data/phases.py
+src/atspm/data/processing - Copy.py
+src/atspm/data/processing.py
+src/atspm/data/reader.py
+src/atspm/plotting/__init__.py
+src/atspm/plotting/coordination.py
+src/atspm/plotting/termination.py
+src/atspm/reports/__init__.py
+src/atspm/reports/generators.py

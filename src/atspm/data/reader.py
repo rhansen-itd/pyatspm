@@ -28,7 +28,7 @@ Timezone note:
 import sqlite3
 from pathlib import Path
 from datetime import datetime, timedelta, date, time as dt_time
-from typing import Optional, List, Dict, Any, Tuple
+from typing import Optional, List, Dict, Any, Tuple, Union
 
 import pandas as pd
 import pytz
@@ -507,22 +507,30 @@ def preview_data(
     return get_legacy_dataframe(db_path, day_start, day_end).head(max_rows)
 
 
-def convert_to_datetime(df: pd.DataFrame) -> pd.DataFrame:
+def convert_to_datetime(
+    df: pd.DataFrame, 
+    columns: Union[List[str], Tuple[str, ...]] = ('TS_start', 'Cycle_start'),
+    tz: str = 'UTC'
+) -> pd.DataFrame:
     """
-    Convert float timestamp columns to pandas Timestamps (UTC).
+    Convert float timestamp columns to pandas Timestamps with timezone support.
 
     Args:
-        df: DataFrame with TS_start and/or Cycle_start as UTC epoch floats.
+        df: DataFrame containing timestamp columns.
+        columns: List or tuple of column names to attempt conversion on. 
+            Defaults to ('TS_start', 'Cycle_start').
+        tz: Target timezone string (e.g., 'UTC', 'US/Mountain', 'Europe/London').
+            Defaults to 'UTC'.
 
     Returns:
-        Copy of *df* with those columns converted to ``datetime64[ns, UTC]``.
+        Copy of *df* with specified columns converted to ``datetime64[ns, tz]``.
     """
     df = df.copy()
-    for col in ('TS_start', 'Cycle_start'):
+    for col in columns:
         if col in df.columns and pd.api.types.is_float_dtype(df[col]):
-            df[col] = pd.to_datetime(df[col], unit='s', utc=True)
+            # Convert to UTC first, then localize/convert to the target TZ
+            df[col] = pd.to_datetime(df[col], unit='s', utc=True).dt.tz_convert(tz)
     return df
-
 
 # ---------------------------------------------------------------------------
 # Private helpers – querying

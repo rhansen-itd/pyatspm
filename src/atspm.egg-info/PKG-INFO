@@ -1,0 +1,7 @@
+Metadata-Version: 2.4
+Name: atspm
+Version: 0.1.0
+Requires-Python: >=3.9
+Requires-Dist: pandas
+Requires-Dist: pytz
+Requires-Dist: plotly

@@ -1,113 +1,167 @@
 """
 ATSPM Cycle Processing Engine (Imperative Shell)
 
-This module orchestrates cycle detection on the SQLite database.
-It manages I/O, transactions, and calls the Functional Core for logic.
+Implements two mathematically distinct processing paths driven by the nature
+of newly ingested data.  Both paths derive their working boundaries from real
+data anchors — existing ``cycle_start`` timestamps and gap markers — rather
+than from fixed time buffers.
+
+Architecture
+============
+
+Path A – Fast Append (``fill_gaps=False``, default)
+----------------------------------------------------
+Assumption: new data has been **appended to the end** of the timeline.
+
+Cycle detection is a causal, forward-looking algorithm: once a cycle boundary
+is locked in, nothing that arrives *before* it can change it.  Therefore only
+the last committed cycle boundary that precedes (or equals) the new data needs
+to be re-opened.
+
+Anchor derivation::
+
+    CS_prev = MAX(cycle_start) WHERE cycle_start <= T_start
+              Falls back to T_start itself when the cycles table is empty.
+    CS_next = None   (no future data to bound against)
+
+Working window::
+
+    Fetch events  : [CS_prev, end-of-events-table)
+    Delete cycles : (CS_prev, +∞)    ← CS_prev kept; everything after re-derived
+    Insert        : all freshly computed cycles
+
+Path B – Gap Fill (``fill_gaps=True``)
+---------------------------------------
+Assumption: data has been inserted into a **historical gap** in the timeline.
+This path surgically repairs only the affected region without disturbing
+unrelated cycles on either side.
+
+Anchor derivation (gap markers act as hard stops)::
+
+    Gap_prev = MAX(timestamp) WHERE event_code = -1 AND timestamp <= T_start
+    Gap_next = MIN(timestamp) WHERE event_code = -1 AND timestamp >= T_end
+    CS_prev  = MAX(cycle_start) WHERE cycle_start <= T_start
+                                  AND (Gap_prev IS NULL OR cycle_start >= Gap_prev)
+    CS_next  = MIN(cycle_start) WHERE cycle_start >= T_end
+                                  AND (Gap_next IS NULL OR cycle_start <= Gap_next)
+
+Working window::
+
+    Fetch events  : [CS_prev, CS_next or Gap_next or end-of-events)
+    Delete cycles : (CS_prev, CS_next)   ← both anchors excluded
+    Insert        : freshly computed cycles (anchors stripped before insert)
+
+Gap Marker Scrubbing (Path B only)
+------------------------------------
+Before recalculating, any ``event_code = -1`` markers that fall **strictly
+inside** ``(T_start, T_end)`` are removed from the events table.  Those
+markers exist solely because of the gap that has now been filled.  Markers at
+the exact edges (``ts == T_start`` or ``ts == T_end``) are preserved — the
+IngestionEngine already decided whether a hard discontinuity exists at those
+seams.
+
+Config Boundary Splitting (Both Paths)
+-----------------------------------------
+``events_df`` is split into sub-segments only where the Ring-Barrier (``RB_*``)
+configuration actually changes.  Adjacent configs whose RB signature is
+identical are merged; only the latest config dict is kept.  This means a
+detector-map or IP update mid-span does not force an unnecessary segment break.
 
 Package Location: src/atspm/data/processing.py
-
-Timezone Notes:
-    All timestamps in the DB are UTC epochs. Date-level operations (identifying
-    which calendar day to process, slicing events for a day, saving/deleting
-    cycles) must convert UTC epochs to local time before applying date math.
-    SQLite's built-in DATE(ts, 'unixepoch') always returns the UTC date, which
-    is wrong for intersections in non-UTC timezones. We do date math in Python
-    using pytz-aware datetimes, then pass UTC epoch bounds to SQL.
 """
 
 import sqlite3
+from datetime import datetime
 from pathlib import Path
-from datetime import datetime, timedelta, date, time
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 import pytz
 
 from .manager import DatabaseManager
 from ..analysis.cycles import (
-    calculate_cycles,
-    assign_ring_phases,
     CycleDetectionError,
+    assign_ring_phases,
+    calculate_cycles,
 )
 
-# A date is considered stale (needs reprocessing) when the latest ingested
-# data for that local date extends more than this many seconds past the
-# latest cycle_start on that date.  One full max-cycle-length (300 s) gives
-# enough headroom to avoid re-triggering on a stray late event, while still
-# catching a genuine new half-day of data.
-_STALE_THRESHOLD_SECONDS: int = 300
 
+# ---------------------------------------------------------------------------
+# Module helpers
+# ---------------------------------------------------------------------------
+
+def _rb_signature(config: Dict[str, Any]) -> Dict[str, Any]:
+    """Return only the Ring-Barrier keys from a config dict.
+
+    Args:
+        config: Full config dict as returned by
+                :class:`~atspm.data.manager.DatabaseManager`.
+
+    Returns:
+        Sub-dict whose keys all start with ``RB_``.
+    """
+    return {k: v for k, v in config.items() if k.startswith("RB_")}
+
+
+# ---------------------------------------------------------------------------
+# CycleProcessor
+# ---------------------------------------------------------------------------
 
 class CycleProcessor:
-    """
-    Manages cycle detection processing on the database.
+    """Orchestrates cycle detection across both the Fast-Append and Gap-Fill paths.
 
     Responsibilities:
-    - Create and manage cycles table
-    - Identify unprocessed LOCAL dates (not UTC dates)
-    - Fetch appropriate config for each date
-    - Call Functional Core for cycle detection
-    - Persist results with transaction safety
+        - Create and migrate the ``cycles`` table on first use.
+        - Accept ``(T_start, T_end, fill_gaps)`` work orders from
+          :class:`~atspm.data.ingestion.IngestionEngine`.
+        - Derive mathematically sound processing anchors from live DB state.
+        - Split event windows at RB-config boundaries.
+        - Delegate calculation to the Functional Core (``calculate_cycles``).
+        - Persist results atomically via delete-then-insert.
     """
 
     def __init__(self, db_path: Path, timezone: str = None):
-        """
-        Initialize the cycle processor.
+        """Initialise the processor.
 
         Args:
-            db_path: Path to SQLite database
-            timezone: Local timezone string (e.g., 'US/Mountain'). If None,
-                      reads from the metadata table, falling back to 'US/Mountain'.
+            db_path:  Path to the SQLite database file.
+            timezone: IANA timezone string (e.g. ``'US/Mountain'``).
+                      When ``None`` the value is read from the ``metadata``
+                      table, falling back to ``'US/Mountain'``.
         """
         self.db_path = Path(db_path)
         self.tz = pytz.timezone(self._resolve_timezone(timezone))
         self._init_cycles_table()
 
     # ------------------------------------------------------------------
-    # Initialisation helpers
+    # Initialisation
     # ------------------------------------------------------------------
 
     def _resolve_timezone(self, timezone: Optional[str]) -> str:
-        """
-        Resolve timezone from argument, metadata table, or default.
+        """Return the best available timezone string.
 
         Args:
-            timezone: Caller-supplied timezone string or None.
+            timezone: Caller-supplied value or ``None``.
 
         Returns:
-            Resolved timezone string.
+            IANA timezone string.
         """
         if timezone is not None:
             return timezone
-
         try:
-            with DatabaseManager(self.db_path) as manager:
-                meta = manager.get_metadata()
-                if meta and meta.get('timezone'):
-                    tz_str = meta['timezone']
-                    print(f"CycleProcessor: using timezone from metadata: {tz_str}")
-                    return tz_str
+            with DatabaseManager(self.db_path) as m:
+                meta = m.get_metadata()
+                if meta and meta.get("timezone"):
+                    return meta["timezone"]
         except Exception:
             pass
-
-        print("CycleProcessor: no timezone found, defaulting to US/Mountain")
-        return 'US/Mountain'
+        return "US/Mountain"
 
     def _init_cycles_table(self) -> None:
-        """
-        Create cycles table and index if they do not already exist.
-
-        If the table already exists but is missing the ring-phase columns
-        (r1_phases, r2_phases) from an older schema, they are added via
-        ALTER TABLE so existing rows are preserved.  Callers can then run
-        backfill_ring_phases() to populate those columns without reingesting.
-        """
-        with DatabaseManager(self.db_path) as manager:
-            cursor = manager.conn.cursor()
-
-            # Create table with full schema (IF NOT EXISTS is a no-op on
-            # existing DBs so we handle migration separately below)
-            cursor.execute("""
+        """Create the ``cycles`` table and its index; migrate older schemas."""
+        with DatabaseManager(self.db_path) as m:
+            cur = m.conn.cursor()
+            cur.execute("""
                 CREATE TABLE IF NOT EXISTS cycles (
                     cycle_start      REAL PRIMARY KEY,
                     coord_plan       REAL NOT NULL DEFAULT 0,
@@ -116,18 +170,15 @@ class CycleProcessor:
                     r2_phases        TEXT NOT NULL DEFAULT 'None'
                 )
             """)
-            cursor.execute("""
+            cur.execute("""
                 CREATE INDEX IF NOT EXISTS idx_cycles_start
                 ON cycles (cycle_start)
             """)
-
-            # Migration guard: add ring columns to any pre-existing table
-            # that was created with the old 3-column schema.
-            cursor.execute("PRAGMA table_info(cycles)")
-            existing_cols = {row[1] for row in cursor.fetchall()}
-            for col in ('r1_phases', 'r2_phases'):
-                if col not in existing_cols:
-                    cursor.execute(
+            cur.execute("PRAGMA table_info(cycles)")
+            existing = {row[1] for row in cur.fetchall()}
+            for col in ("r1_phases", "r2_phases"):
+                if col not in existing:
+                    cur.execute(
                         f"ALTER TABLE cycles "
                         f"ADD COLUMN {col} TEXT NOT NULL DEFAULT 'None'"
                     )
@@ -135,88 +186,97 @@ class CycleProcessor:
                         f"CycleProcessor: migrated cycles table – added '{col}'. "
                         "Run backfill_ring_phases() to populate existing rows."
                     )
-
-            manager.conn.commit()
+            m.conn.commit()
 
     # ------------------------------------------------------------------
-    # Public interface
+    # Public API
     # ------------------------------------------------------------------
 
-    def run(self, reprocess: bool = False) -> None:
-        """
-        Process all unprocessed local dates in the events table.
+    def process_span(
+        self,
+        t_start: float,
+        t_end: float,
+        fill_gaps: bool = False,
+    ) -> None:
+        """Process cycles for one ingested time span.
+
+        Primary entry-point called by :class:`IngestionEngine` after each
+        batch commit.
 
         Args:
-            reprocess: If True, delete and reprocess all dates.
+            t_start:   UTC epoch of the first new event in the span.
+            t_end:     UTC epoch of the last new event in the span.
+            fill_gaps: When ``False`` (default) use Path A (Fast Append).
+                       When ``True`` use Path B (Gap Fill).
         """
-        dates_to_process = self._get_dates_to_process(reprocess)
+        if fill_gaps:
+            self._process_gap_fill(t_start, t_end)
+        else:
+            self._process_fast_append(t_start, t_end)
 
-        if not dates_to_process:
-            print("No dates to process")
+    def run(self, fill_gaps: bool = False) -> None:
+        """Full-pass (re)processing over all ingested spans.
+
+        Iterates over every span in ``ingestion_log`` and calls
+        :meth:`process_span`.  Use for initial backfill after ingesting a
+        large archive, or to repair the cycles table after a schema migration.
+
+        Args:
+            fill_gaps: Forwarded to :meth:`process_span` for each span.
+        """
+        with DatabaseManager(self.db_path) as m:
+            spans_df = m.get_ingestion_spans()
+
+        if spans_df.empty:
             return
 
-        print(f"Processing {len(dates_to_process)} dates...")
-        successful = 0
-        failed = 0
-
-        for date_str in dates_to_process:
+        for _, row in spans_df.iterrows():
             try:
-                self._process_day(date_str)
-                successful += 1
-            except Exception as e:
-                failed += 1
-                print(f"ERROR processing {date_str}: {e}")
-
-        print(f"\nCycle Processing Complete:")
-        print(f"  Successful: {successful}")
-        print(f"  Failed: {failed}")
+                self.process_span(
+                    float(row["span_start"]),
+                    float(row["span_end"]),
+                    fill_gaps=fill_gaps,
+                )
+            except Exception as exc:
+                print(
+                    f"CycleProcessor ERROR – span "
+                    f"{self._fmt(row['span_start'])} → "
+                    f"{self._fmt(row['span_end'])}: {exc}"
+                )
 
     def backfill_ring_phases(self) -> int:
-        """
-        Populate r1_phases / r2_phases for cycles rows that still carry the
-        default 'None' value from a pre-migration schema.
+        """Populate ``r1_phases`` / ``r2_phases`` for rows carrying the default.
 
-        Does NOT reingest events or rerun cycle detection.  Reads existing
-        cycle_start values, fetches the matching Code 1 events and config,
-        then writes the computed ring strings back in place.
+        Does not reingest events or rerun cycle detection.  Reads existing
+        ``cycle_start`` values, fetches Code-1 events and the matching config,
+        then writes the computed ring strings back in-place.
 
         Returns:
             Number of cycle rows updated.
-
-        Example::
-
-            processor = CycleProcessor(Path("2068_data.db"))
-            updated = processor.backfill_ring_phases()
-            print(f"Backfilled {updated} cycle rows")
         """
-        with DatabaseManager(self.db_path) as manager:
-            cursor = manager.conn.cursor()
-
-            # Only target rows that still have the default placeholder
-            cursor.execute("""
+        with DatabaseManager(self.db_path) as m:
+            cur = m.conn.cursor()
+            cur.execute("""
                 SELECT DISTINCT cycle_start FROM cycles
                 WHERE r1_phases = 'None' AND r2_phases = 'None'
                 ORDER BY cycle_start
             """)
-            rows = cursor.fetchall()
+            rows = cur.fetchall()
 
         if not rows:
             print("backfill_ring_phases: nothing to do – all rows already populated")
             return 0
 
         epochs = [r[0] for r in rows]
-        start_epoch = min(epochs)
-        end_epoch   = max(epochs)
+        start_epoch, end_epoch = min(epochs), max(epochs)
 
-        # Fetch only Code 1 (green start) events covering the full range.
-        # This is the minimal event set needed by assign_ring_phases.
-        with DatabaseManager(self.db_path) as manager:
-            events_df = manager.query_events(
+        with DatabaseManager(self.db_path) as m:
+            events_df = m.query_events(
                 start_time=start_epoch,
-                end_time=end_epoch + 1,   # +1 s to make end inclusive
+                end_time=end_epoch + 1,
                 event_codes=[1],
             )
-            config = manager.get_config_at_date(
+            config = m.get_config_at_date(
                 datetime.fromtimestamp(start_epoch, self.tz)
             )
 
@@ -224,527 +284,548 @@ class CycleProcessor:
             print("backfill_ring_phases: no events or config found – aborting")
             return 0
 
-        # Build a minimal cycles_df from the DB values
-        cycles_df = pd.DataFrame({'cycle_start': epochs})
-
+        cycles_df = pd.DataFrame({"cycle_start": epochs})
         updated = assign_ring_phases(cycles_df, events_df, config)
 
-        # Write back only the two ring columns
         records = list(
-            updated[['r1_phases', 'r2_phases', 'cycle_start']]
+            updated[["r1_phases", "r2_phases", "cycle_start"]]
             .itertuples(index=False, name=None)
         )
-
-        with DatabaseManager(self.db_path) as manager:
-            cursor = manager.conn.cursor()
+        with DatabaseManager(self.db_path) as m:
+            cur = m.conn.cursor()
             try:
-                cursor.executemany(
+                cur.executemany(
                     "UPDATE cycles SET r1_phases = ?, r2_phases = ? "
                     "WHERE cycle_start = ?",
-                    records
+                    records,
                 )
-                manager.conn.commit()
-            except sqlite3.Error as e:
-                manager.conn.rollback()
-                raise RuntimeError(f"Database error during backfill: {e}")
+                m.conn.commit()
+            except sqlite3.Error as exc:
+                m.conn.rollback()
+                raise RuntimeError(f"Database error during backfill: {exc}")
 
         print(f"backfill_ring_phases: updated {len(records)} rows")
         return len(records)
 
     # ------------------------------------------------------------------
-    # Date identification (local-time aware)
+    # Path A – Fast Append
     # ------------------------------------------------------------------
 
-    def _get_dates_to_process(self, reprocess: bool) -> List[str]:
-        """
-        Identify which LOCAL calendar dates need cycle processing.
+    def _process_fast_append(self, t_start: float, t_end: float) -> None:
+        """Path A: recalculate from the last known cycle boundary forward.
 
-        Three categories of dates are returned:
+        ``CS_prev`` is the highest ``cycle_start`` that is ``<= T_start``.
+        This is the last fully-committed cycle; its start timestamp is a
+        mathematically proven safe re-entry point because everything before
+        it is already correct and immutable.
 
-        1. Dates with no cycles at all (never processed).
-        2. Dates where ingestion has added data since cycles were last run —
-           i.e. the ingestion span_end for that local date extends more than
-           ``_STALE_THRESHOLD_SECONDS`` past the last cycle_start on that
-           date.  This handles the common case where a partial day was
-           processed, then new files were ingested for the rest of that day.
-        3. If ``reprocess=True``, all dates that have any ingested data.
-
-        Uses ingestion_log (tiny) and cycles (small) — never scans events.
+        Fetch window  : [CS_prev, MAX(events.timestamp)]
+        Delete window : (CS_prev, +∞)   — CS_prev itself is preserved
 
         Args:
-            reprocess: If True, return every date that has ingested data.
+            t_start: UTC epoch of the first newly ingested event.
+            t_end:   UTC epoch of the last newly ingested event (used only in
+                     the log message; the fetch extends to the DB end).
+        """
+        with DatabaseManager(self.db_path) as m:
+            cs_prev = m.get_cs_prev(t_start)
+            fetch_start = cs_prev if cs_prev is not None else t_start
+
+            # Extend to the absolute end of the events table so
+            # calculate_cycles sees all available context.
+            events_df = m.query_events(start_time=fetch_start)
+            configs = m.get_configs_for_range(
+                datetime.fromtimestamp(fetch_start, self.tz),
+                datetime.fromtimestamp(t_end, self.tz),
+            )
+
+        if events_df.empty or not configs:
+            return
+
+        fetch_end = events_df["timestamp"].max()
+        segments = self._build_rb_segments(configs, fetch_start, fetch_end)
+        all_cycles = self._run_segments(segments, events_df)
+
+        if not all_cycles:
+            return
+
+        full_cycles = pd.concat(all_cycles, ignore_index=True)
+
+        # Do not duplicate the anchor itself.
+        if cs_prev is not None:
+            full_cycles = full_cycles[full_cycles["cycle_start"] > cs_prev]
+
+        if full_cycles.empty:
+            return
+
+        self._save_cycles_append(full_cycles, delete_gt=cs_prev)
+
+        n = len(full_cycles)
+        method = full_cycles["detection_method"].iloc[0]
+        print(
+            f"CycleProcessor [append] "
+            f"{self._fmt(t_start)} → {self._fmt(t_end)} | "
+            f"anchor {self._fmt(cs_prev)} | "
+            f"{n} cycles [{method}]"
+        )
+
+    # ------------------------------------------------------------------
+    # Path B – Gap Fill
+    # ------------------------------------------------------------------
+
+    def _process_gap_fill(self, t_start: float, t_end: float) -> None:
+        """Path B: surgically repair the region affected by newly filled data.
+
+        Steps:
+
+        1. Scrub obsolete gap markers strictly inside ``(T_start, T_end)``.
+        2. Derive gap-aware anchors from the current DB state.
+        3. Fetch events, calculate cycles, delete between anchors, insert.
+
+        The two anchors ``CS_prev`` and ``CS_next`` are like load-bearing walls
+        in the cycle timeline: everything between them is torn down and rebuilt
+        from the fresh event data, while everything outside is untouched.
+
+        Args:
+            t_start: UTC epoch of the first newly ingested event.
+            t_end:   UTC epoch of the last newly ingested event.
+        """
+        # Step 1 ─ remove markers made obsolete by the newly filled data.
+        self._scrub_gap_markers(t_start, t_end)
+
+        with DatabaseManager(self.db_path) as m:
+            gap_prev = m.get_gap_prev(t_start)
+            gap_next = m.get_gap_next(t_end)
+            cs_prev  = m.get_cs_prev_bounded(t_start, gap_prev)
+            cs_next  = m.get_cs_next_bounded(t_end,   gap_next)
+
+            # Determine the fetch end-point.
+            # Priority: CS_next > Gap_next > open-ended (None = read to DB end).
+            fetch_start = cs_prev if cs_prev is not None else t_start
+            if cs_next is not None:
+                fetch_end: Optional[float] = cs_next
+            elif gap_next is not None:
+                fetch_end = gap_next
+            else:
+                fetch_end = None
+
+            events_df = m.query_events(
+                start_time=fetch_start,
+                end_time=fetch_end,
+            )
+            # Use T_end as a proxy upper bound for the config range when
+            # fetch_end is open-ended, so we still pull the right configs.
+            config_end_dt = datetime.fromtimestamp(
+                fetch_end if fetch_end is not None else t_end, self.tz
+            )
+            configs = m.get_configs_for_range(
+                datetime.fromtimestamp(fetch_start, self.tz),
+                config_end_dt,
+            )
+
+        if events_df.empty or not configs:
+            return
+
+        seg_end = fetch_end if fetch_end is not None else events_df["timestamp"].max()
+        segments = self._build_rb_segments(configs, fetch_start, seg_end)
+        all_cycles = self._run_segments(segments, events_df)
+
+        if not all_cycles:
+            return
+
+        full_cycles = pd.concat(all_cycles, ignore_index=True)
+
+        # Strip anchors — they already exist in the DB and must not be
+        # touched by the delete-then-insert operation.
+        mask = pd.Series(True, index=full_cycles.index)
+        if cs_prev is not None:
+            mask &= full_cycles["cycle_start"] > cs_prev
+        if cs_next is not None:
+            mask &= full_cycles["cycle_start"] < cs_next
+        full_cycles = full_cycles[mask]
+
+        if full_cycles.empty:
+            return
+
+        self._save_cycles_gap_fill(full_cycles, cs_prev, cs_next)
+
+        n = len(full_cycles)
+        method = full_cycles["detection_method"].iloc[0]
+        print(
+            f"CycleProcessor [gap-fill] "
+            f"{self._fmt(t_start)} → {self._fmt(t_end)} | "
+            f"anchor_prev {self._fmt(cs_prev)} | "
+            f"anchor_next {self._fmt(cs_next)} | "
+            f"{n} cycles [{method}]"
+        )
+
+    # ------------------------------------------------------------------
+    # Gap marker scrubbing (Path B only)
+    # ------------------------------------------------------------------
+
+    def _scrub_gap_markers(self, t_start: float, t_end: float) -> None:
+        """Delete stale ``event_code = -1`` rows strictly inside (T_start, T_end).
+
+        When a gap is filled by new ingestion, any ``-1`` marker that was
+        originally inserted *because* those files were missing becomes
+        incorrect.  Leaving it in place would cause ``calculate_cycles`` to
+        treat the now-continuous region as two disconnected fragments.
+
+        Only markers **strictly between** the edges are removed; markers
+        at ``ts == T_start`` or ``ts == T_end`` are kept because the
+        IngestionEngine already evaluated whether a real discontinuity exists
+        at those seams and its decision must not be overridden here.
+
+        Args:
+            t_start: UTC epoch of the newly filled gap's start.
+            t_end:   UTC epoch of the newly filled gap's end.
+        """
+        with DatabaseManager(self.db_path) as m:
+            cur = m.conn.cursor()
+            try:
+                cur.execute(
+                    "DELETE FROM events "
+                    "WHERE event_code = -1 "
+                    "  AND timestamp > ? "
+                    "  AND timestamp < ?",
+                    (t_start, t_end),
+                )
+                m.conn.commit()
+            except sqlite3.Error as exc:
+                m.conn.rollback()
+                raise RuntimeError(f"Error scrubbing gap markers: {exc}")
+
+    # ------------------------------------------------------------------
+    # Segment building and execution (shared by both paths)
+    # ------------------------------------------------------------------
+
+    def _build_rb_segments(
+        self,
+        configs: List[Dict[str, Any]],
+        fetch_start: float,
+        fetch_end: float,
+    ) -> List[Tuple[float, float, Dict[str, Any]]]:
+        """Produce processing segments split only at true RB config boundaries.
+
+        Consecutive configs with identical RB signatures are merged into a
+        single segment.  The *latest* config dict wins so non-RB fields
+        (detector maps, IPs, etc.) are always current within each segment.
+
+        Args:
+            configs:     Config dicts sorted by ``start_date`` ascending, each
+                         containing an ``_epoch_start`` key added by
+                         :meth:`~atspm.data.manager.DatabaseManager.get_configs_for_range`.
+            fetch_start: UTC epoch for the start of the processing window.
+            fetch_end:   UTC epoch for the end of the processing window.
 
         Returns:
-            Sorted list of date strings in ``'YYYY-MM-DD'`` (local) format.
+            List of ``(seg_start, seg_end, config)`` covering
+            ``[fetch_start, fetch_end)``.
         """
-        with DatabaseManager(self.db_path) as manager:
-            cursor = manager.conn.cursor()
-
-            # Full ingestion epoch range from ingestion_log (Performance Rule)
-            cursor.execute(
-                "SELECT MIN(span_start), MAX(span_end) FROM ingestion_log"
-            )
-            row = cursor.fetchone()
-
-        if not row or row[0] is None:
+        if not configs:
             return []
 
-        min_epoch, max_epoch = row
-        min_local = datetime.fromtimestamp(min_epoch, self.tz).date()
-        max_local = datetime.fromtimestamp(max_epoch, self.tz).date()
+        segments: List[Tuple[float, float, Dict[str, Any]]] = []
+        current_start  = fetch_start
+        current_config = configs[0]
+        current_rb     = _rb_signature(current_config)
 
-        all_local_dates = set()
-        current = min_local
-        while current <= max_local:
-            all_local_dates.add(current)
-            current += timedelta(days=1)
-
-        if reprocess:
-            return sorted(d.strftime('%Y-%m-%d') for d in all_local_dates)
-
-        stale_or_missing = self._get_stale_or_missing_dates(all_local_dates)
-        return sorted(d.strftime('%Y-%m-%d') for d in stale_or_missing)
-
-    def _get_stale_or_missing_dates(self, all_local_dates: set) -> set:
-        """
-        Return dates that are either unprocessed or stale.
-
-        A date is **stale** when the ingestion log shows data extending more
-        than ``_STALE_THRESHOLD_SECONDS`` beyond the latest cycle_start on
-        that local date.  This catches the partial-day scenario: cycles were
-        run after ingesting half a day, then the rest of the day was ingested
-        later.
-
-        Both tables (ingestion_log and cycles) are fetched in full — both are
-        small and this avoids per-date round-trips.
-
-        Args:
-            all_local_dates: Complete set of local dates covered by ingestion.
-
-        Returns:
-            Subset of ``all_local_dates`` that need (re)processing.
-        """
-        with DatabaseManager(self.db_path) as manager:
-            cursor = manager.conn.cursor()
-
-            # Latest ingested epoch per local date, derived from span_end values.
-            # span_end is the end of each ingestion span; MAX over spans whose
-            # span_end falls within or just after a local date gives us the
-            # furthest point data has been ingested for that date.
-            cursor.execute("SELECT span_start, span_end FROM ingestion_log")
-            spans = cursor.fetchall()
-
-            # Latest cycle_start per local date
-            cursor.execute("SELECT cycle_start FROM cycles ORDER BY cycle_start")
-            cycle_rows = cursor.fetchall()
-
-        # Build: local_date → latest ingested epoch
-        ingested_end: dict = {}
-        for span_start, span_end in spans:
-            # The span may cross a local midnight; attribute its end to the
-            # local date of span_end (the latest data point in the span).
-            local_date = datetime.fromtimestamp(span_end, self.tz).date()
-            if local_date not in ingested_end or span_end > ingested_end[local_date]:
-                ingested_end[local_date] = span_end
-            # Also attribute span_start's date in case a span starts and ends
-            # on different local dates — we want every covered date represented.
-            local_start_date = datetime.fromtimestamp(span_start, self.tz).date()
-            if local_start_date not in ingested_end:
-                ingested_end[local_start_date] = span_end
-
-        # Build: local_date → latest cycle_start epoch
-        latest_cycle: dict = {}
-        for (cs,) in cycle_rows:
-            local_date = datetime.fromtimestamp(cs, self.tz).date()
-            if local_date not in latest_cycle or cs > latest_cycle[local_date]:
-                latest_cycle[local_date] = cs
-
-        stale_or_missing = set()
-        for d in all_local_dates:
-            if d not in latest_cycle:
-                # Never processed
-                stale_or_missing.add(d)
+        for next_cfg in configs[1:]:
+            boundary: float = next_cfg["_epoch_start"]
+            if boundary >= fetch_end:
+                break
+            next_rb = _rb_signature(next_cfg)
+            if next_rb != current_rb:
+                # RB changed: close the current segment and start a new one.
+                segments.append((current_start, boundary, current_config))
+                current_start  = boundary
+                current_config = next_cfg
+                current_rb     = next_rb
             else:
-                data_end = ingested_end.get(d, 0.0)
-                cycle_end = latest_cycle[d]
-                if data_end - cycle_end > _STALE_THRESHOLD_SECONDS:
-                    stale_or_missing.add(d)
+                # Non-RB change only: adopt the newer config but keep segment open.
+                current_config = next_cfg
 
-        return stale_or_missing
+        segments.append((current_start, fetch_end, current_config))
+        return segments
 
-    # ------------------------------------------------------------------
-    # Per-day processing
-    # ------------------------------------------------------------------
+    def _run_segments(
+        self,
+        segments: List[Tuple[float, float, Dict[str, Any]]],
+        events_df: pd.DataFrame,
+    ) -> List[pd.DataFrame]:
+        """Execute ``calculate_cycles`` for each segment and collect results.
 
-    def _process_day(self, date_str: str) -> None:
-        """
-        Process a single local calendar day's worth of events.
-
-        Args:
-            date_str: Local date in 'YYYY-MM-DD' format.
-        """
-        try:
-            local_date = datetime.strptime(date_str, '%Y-%m-%d').date()
-        except ValueError as e:
-            raise ValueError(f"Invalid date format '{date_str}': {e}")
-
-        start_epoch, end_epoch = self._local_day_to_utc_epoch_range(local_date)
-
-        config = self._get_config_for_date(
-            datetime.combine(local_date, time.min)
-        )
-        if config is None:
-            raise ValueError(f"No configuration found for {date_str}")
-
-        events_df = self._get_events_for_epoch_range(start_epoch, end_epoch)
-
-        if events_df.empty:
-            print(f"Processed {date_str}: No events found")
-            return
-
-        # Functional Core – calculate_cycles() now returns r1_phases and
-        # r2_phases as part of its standard output via assign_ring_phases()
-        try:
-            cycles_df = calculate_cycles(events_df, config)
-        except CycleDetectionError as e:
-            raise CycleDetectionError(
-                f"Cycle detection failed for {date_str}: {e}"
-            )
-
-        if cycles_df.empty:
-            print(f"Processed {date_str}: No cycles detected")
-            return
-
-        self._save_cycles(cycles_df, start_epoch, end_epoch)
-
-        detection_method = cycles_df['detection_method'].iloc[0]
-        print(
-            f"Processed {date_str}: Found {len(cycles_df)} cycles "
-            f"using {detection_method}"
-        )
-
-    def _local_day_to_utc_epoch_range(
-        self, local_date: date
-    ) -> Tuple[float, float]:
-        """
-        Convert a local calendar date to UTC epoch [start, end) bounds.
+        Each segment slices its own view from the shared ``events_df``;
+        no per-segment DB round-trips are needed.
 
         Args:
-            local_date: A datetime.date in the intersection's local timezone.
+            segments:  Output of :meth:`_build_rb_segments`.
+            events_df: Full fetched events DataFrame.
 
         Returns:
-            (start_epoch, end_epoch) as UTC floats – midnight-to-midnight local.
+            List of non-empty cycles DataFrames (one per segment that
+            produced at least one cycle).
         """
-        local_midnight_start = self.tz.localize(
-            datetime.combine(local_date, time.min)
-        )
-        local_midnight_end = local_midnight_start + timedelta(days=1)
-
-        return local_midnight_start.timestamp(), local_midnight_end.timestamp()
+        results: List[pd.DataFrame] = []
+        for seg_start, seg_end, config in segments:
+            seg_events = events_df[
+                (events_df["timestamp"] >= seg_start) &
+                (events_df["timestamp"] <  seg_end)
+            ].copy()
+            if seg_events.empty:
+                continue
+            try:
+                cycles_df = calculate_cycles(seg_events, config)
+            except CycleDetectionError as exc:
+                print(
+                    f"CycleProcessor WARNING: detection failed "
+                    f"{self._fmt(seg_start)} → {self._fmt(seg_end)}: {exc}"
+                )
+                continue
+            if not cycles_df.empty:
+                results.append(cycles_df)
+        return results
 
     # ------------------------------------------------------------------
-    # DB fetch / save helpers
+    # DB persistence helpers
     # ------------------------------------------------------------------
 
-    def _get_config_for_date(self, date: datetime) -> Optional[dict]:
-        """
-        Get the configuration active on a specific date.
-
-        Args:
-            date: Naive or aware datetime; only the date portion is used.
-
-        Returns:
-            Configuration dict or None if not found.
-        """
-        with DatabaseManager(self.db_path) as manager:
-            return manager.get_config_at_date(date)
-
-    def _get_events_for_epoch_range(
-        self, start_epoch: float, end_epoch: float
-    ) -> pd.DataFrame:
-        """
-        Fetch all events (including gap markers) within a UTC epoch range.
-
-        Args:
-            start_epoch: Start of range (UTC epoch, inclusive).
-            end_epoch:   End of range (UTC epoch, exclusive).
-
-        Returns:
-            DataFrame with columns [timestamp, event_code, parameter].
-        """
-        with DatabaseManager(self.db_path) as manager:
-            return manager.query_events(
-                start_time=start_epoch,
-                end_time=end_epoch
-            )
-
-    def _save_cycles(
+    def _save_cycles_append(
         self,
         cycles_df: pd.DataFrame,
-        start_epoch: float,
-        end_epoch: float
+        delete_gt: Optional[float],
     ) -> None:
-        """
-        Persist cycles for a local day, deleting any prior records first.
+        """Persist cycles for Path A atomically.
 
-        Idempotency: existing cycles whose cycle_start falls within
-        [start_epoch, end_epoch) are deleted before the new ones are inserted.
+        Deletes every ``cycle_start > delete_gt``, then bulk-inserts.
 
         Args:
-            cycles_df:   Cycles DataFrame with columns [cycle_start, coord_plan,
-                         detection_method, r1_phases, r2_phases].
-            start_epoch: UTC epoch for start of local day (inclusive).
-            end_epoch:   UTC epoch for end of local day (exclusive).
+            cycles_df: New cycles to insert.
+            delete_gt: Exclusive lower bound for deletion; ``None`` clears all.
         """
-        # Vectorized extraction – no row-iteration
-        records = list(
+        records = self._to_records(cycles_df)
+        with DatabaseManager(self.db_path) as m:
+            cur = m.conn.cursor()
+            try:
+                if delete_gt is None:
+                    cur.execute("DELETE FROM cycles")
+                else:
+                    cur.execute(
+                        "DELETE FROM cycles WHERE cycle_start > ?",
+                        (delete_gt,),
+                    )
+                cur.executemany(
+                    "INSERT INTO cycles "
+                    "(cycle_start, coord_plan, detection_method, r1_phases, r2_phases) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    records,
+                )
+                m.conn.commit()
+            except sqlite3.Error as exc:
+                m.conn.rollback()
+                raise RuntimeError(f"Database error saving cycles (append): {exc}")
+
+    def _save_cycles_gap_fill(
+        self,
+        cycles_df: pd.DataFrame,
+        cs_prev: Optional[float],
+        cs_next: Optional[float],
+    ) -> None:
+        """Persist cycles for Path B atomically.
+
+        Deletes cycles **strictly between** the two anchors (both excluded),
+        then inserts the new rows.  The anchors themselves are never touched.
+
+        Args:
+            cycles_df: New cycles to insert (anchors already stripped).
+            cs_prev:   Lower anchor epoch, or ``None`` for no lower bound.
+            cs_next:   Upper anchor epoch, or ``None`` for no upper bound.
+        """
+        records = self._to_records(cycles_df)
+        with DatabaseManager(self.db_path) as m:
+            cur = m.conn.cursor()
+            try:
+                if cs_prev is not None and cs_next is not None:
+                    cur.execute(
+                        "DELETE FROM cycles "
+                        "WHERE cycle_start > ? AND cycle_start < ?",
+                        (cs_prev, cs_next),
+                    )
+                elif cs_prev is not None:
+                    cur.execute(
+                        "DELETE FROM cycles WHERE cycle_start > ?",
+                        (cs_prev,),
+                    )
+                elif cs_next is not None:
+                    cur.execute(
+                        "DELETE FROM cycles WHERE cycle_start < ?",
+                        (cs_next,),
+                    )
+                else:
+                    cur.execute("DELETE FROM cycles")
+
+                cur.executemany(
+                    "INSERT INTO cycles "
+                    "(cycle_start, coord_plan, detection_method, r1_phases, r2_phases) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    records,
+                )
+                m.conn.commit()
+            except sqlite3.Error as exc:
+                m.conn.rollback()
+                raise RuntimeError(f"Database error saving cycles (gap-fill): {exc}")
+
+    # ------------------------------------------------------------------
+    # Utility
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _to_records(cycles_df: pd.DataFrame) -> list:
+        """Convert a cycles DataFrame to a list of DB-insertion tuples.
+
+        Args:
+            cycles_df: Standard cycles DataFrame.
+
+        Returns:
+            List of ``(cycle_start, coord_plan, detection_method,
+            r1_phases, r2_phases)`` tuples.
+        """
+        return list(
             cycles_df[
-                ['cycle_start', 'coord_plan', 'detection_method',
-                 'r1_phases', 'r2_phases']
+                ["cycle_start", "coord_plan", "detection_method",
+                 "r1_phases", "r2_phases"]
             ]
-            .fillna({'r1_phases': 'None', 'r2_phases': 'None',
-                     'detection_method': '', 'coord_plan': 0})
+            .fillna(
+                {"r1_phases": "None", "r2_phases": "None",
+                 "detection_method": "", "coord_plan": 0}
+            )
             .itertuples(index=False, name=None)
         )
 
-        with DatabaseManager(self.db_path) as manager:
-            cursor = manager.conn.cursor()
-            try:
-                cursor.execute(
-                    "DELETE FROM cycles "
-                    "WHERE cycle_start >= ? AND cycle_start < ?",
-                    (start_epoch, end_epoch)
-                )
-                cursor.executemany(
-                    """
-                    INSERT INTO cycles
-                        (cycle_start, coord_plan, detection_method,
-                         r1_phases, r2_phases)
-                    VALUES (?, ?, ?, ?, ?)
-                    """,
-                    records
-                )
-                manager.conn.commit()
-            except sqlite3.Error as e:
-                manager.conn.rollback()
-                raise RuntimeError(f"Database error saving cycles: {e}")
+    def _fmt(self, epoch: Optional[float]) -> str:
+        """Format a UTC epoch as a local-timezone human-readable string.
+
+        Args:
+            epoch: UTC epoch float, or ``None``.
+
+        Returns:
+            Formatted local datetime string, or ``'None'``.
+        """
+        if epoch is None:
+            return "None"
+        return datetime.fromtimestamp(epoch, self.tz).strftime("%Y-%m-%d %H:%M:%S %Z")
 
     # ------------------------------------------------------------------
-    # Statistics and validation (timezone-aware)
+    # Statistics and validation
     # ------------------------------------------------------------------
 
     def get_processing_stats(self) -> dict:
-        """
-        Get statistics about cycle processing.
+        """Return summary statistics about the cycles table.
 
         Returns:
-            Dictionary with keys: total_cycles, days_processed,
-            unprocessed_days, detection_methods, coord_plans, date_range.
+            Dict with keys ``total_cycles``, ``detection_methods``,
+            ``coord_plans``, ``date_range``.
         """
-        with DatabaseManager(self.db_path) as manager:
-            cursor = manager.conn.cursor()
+        with DatabaseManager(self.db_path) as m:
+            cur = m.conn.cursor()
+            cur.execute("SELECT COUNT(*) FROM cycles")
+            total = cur.fetchone()[0]
 
-            cursor.execute("SELECT COUNT(*) FROM cycles")
-            total_cycles = cursor.fetchone()[0]
-
-            cursor.execute(
+            cur.execute(
                 "SELECT detection_method, COUNT(*) FROM cycles "
                 "GROUP BY detection_method"
             )
-            method_counts = dict(cursor.fetchall())
+            methods = dict(cur.fetchall())
 
-            cursor.execute(
-                "SELECT coord_plan, COUNT(*) FROM cycles "
-                "GROUP BY coord_plan"
+            cur.execute(
+                "SELECT coord_plan, COUNT(*) FROM cycles GROUP BY coord_plan"
             )
-            coord_counts = dict(cursor.fetchall())
+            plans = dict(cur.fetchall())
 
-            cursor.execute(
-                "SELECT MIN(cycle_start), MAX(cycle_start) FROM cycles"
-            )
-            min_ts, max_ts = cursor.fetchone()
-
-            cursor.execute("SELECT DISTINCT cycle_start FROM cycles")
-            cycle_epochs = [r[0] for r in cursor.fetchall()]
-
-        days_processed = len({
-            datetime.fromtimestamp(ts, self.tz).date()
-            for ts in cycle_epochs
-        })
-
-        all_dates_set = {
-            datetime.strptime(d, '%Y-%m-%d').date()
-            for d in self._get_dates_to_process(reprocess=True)
-        }
-        # Use stale-aware check so partially-processed days count as unprocessed
-        stale_or_missing = self._get_stale_or_missing_dates(all_dates_set)
-        unprocessed_days = len(stale_or_missing)
+            cur.execute("SELECT MIN(cycle_start), MAX(cycle_start) FROM cycles")
+            min_ts, max_ts = cur.fetchone()
 
         return {
-            'total_cycles': total_cycles,
-            'days_processed': days_processed,
-            'unprocessed_days': unprocessed_days,
-            'detection_methods': method_counts,
-            'coord_plans': coord_counts,
-            'date_range': {
-                'start': (
-                    datetime.fromtimestamp(min_ts, self.tz).isoformat()
-                    if min_ts else None
-                ),
-                'end': (
-                    datetime.fromtimestamp(max_ts, self.tz).isoformat()
-                    if max_ts else None
-                ),
-            }
+            "total_cycles": total,
+            "detection_methods": methods,
+            "coord_plans": plans,
+            "date_range": {
+                "start": self._fmt(min_ts) if min_ts else None,
+                "end":   self._fmt(max_ts) if max_ts else None,
+            },
         }
-
-    def get_cycle_summary_for_date(self, date_str: str) -> Optional[dict]:
-        """
-        Get cycle summary for a specific local calendar date.
-
-        Args:
-            date_str: Local date in 'YYYY-MM-DD' format.
-
-        Returns:
-            Dictionary with cycle statistics or None if no data.
-        """
-        try:
-            local_date = datetime.strptime(date_str, '%Y-%m-%d').date()
-        except ValueError:
-            return None
-
-        start_epoch, end_epoch = self._local_day_to_utc_epoch_range(local_date)
-
-        with DatabaseManager(self.db_path) as manager:
-            cursor = manager.conn.cursor()
-            cursor.execute(
-                """
-                SELECT
-                    COUNT(*)           AS cycle_count,
-                    MIN(coord_plan)    AS min_coord,
-                    MAX(coord_plan)    AS max_coord,
-                    detection_method
-                FROM cycles
-                WHERE cycle_start >= ? AND cycle_start < ?
-                GROUP BY detection_method
-                """,
-                (start_epoch, end_epoch)
-            )
-            results = cursor.fetchall()
-
-        if not results:
-            return None
-
-        return {
-            'date': date_str,
-            'cycle_count': results[0][0],
-            'coord_plan_range': (results[0][1], results[0][2]),
-            'detection_method': results[0][3]
-        }
-
-    def reprocess_date(self, date_str: str) -> bool:
-        """
-        Reprocess a specific local calendar date.
-
-        Args:
-            date_str: Local date in 'YYYY-MM-DD' format.
-
-        Returns:
-            True if successful, False otherwise.
-        """
-        try:
-            self._process_day(date_str)
-            return True
-        except Exception as e:
-            print(f"Error reprocessing {date_str}: {e}")
-            return False
 
     def validate_cycles_table(self) -> Tuple[bool, List[str]]:
-        """
-        Validate the cycles table for data quality issues.
+        """Validate the cycles table for data-quality issues.
 
         Returns:
-            Tuple of (is_valid, list_of_issues).
+            ``(is_valid, list_of_issues)``
         """
-        issues = []
-
-        with DatabaseManager(self.db_path) as manager:
-            cursor = manager.conn.cursor()
-
-            cursor.execute(
+        issues: List[str] = []
+        with DatabaseManager(self.db_path) as m:
+            cur = m.conn.cursor()
+            cur.execute(
                 "SELECT cycle_start, COUNT(*) FROM cycles "
                 "GROUP BY cycle_start HAVING COUNT(*) > 1"
             )
-            duplicates = cursor.fetchall()
-            if duplicates:
-                issues.append(
-                    f"Found {len(duplicates)} duplicate cycle_start timestamps"
-                )
+            if cur.fetchall():
+                issues.append("Found duplicate cycle_start timestamps")
 
-            cursor.execute("""
-                SELECT
-                    MIN(next_start - cycle_start) AS min_length,
-                    MAX(next_start - cycle_start) AS max_length
+            cur.execute("""
+                SELECT MIN(next_start - cycle_start),
+                       MAX(next_start - cycle_start)
                 FROM (
-                    SELECT
-                        cycle_start,
-                        LEAD(cycle_start) OVER (ORDER BY cycle_start) AS next_start
+                    SELECT cycle_start,
+                           LEAD(cycle_start) OVER (ORDER BY cycle_start) AS next_start
                     FROM cycles
                 )
                 WHERE next_start IS NOT NULL
             """)
-            result = cursor.fetchone()
-            if result and result[0] is not None:
-                min_length, max_length = result
-                if min_length < 10.0:
-                    issues.append(
-                        f"Found cycle length < 10 s (minimum: {min_length:.1f} s)"
-                    )
-                if max_length > 300.0:
-                    issues.append(
-                        f"Found cycle length > 300 s (maximum: {max_length:.1f} s)"
-                    )
+            res = cur.fetchone()
+            if res and res[0] is not None:
+                mn, mx = res
+                if mn < 10.0:
+                    issues.append(f"Cycle length < 10 s (min: {mn:.1f} s)")
+                if mx > 300.0:
+                    issues.append(f"Cycle length > 300 s (max: {mx:.1f} s)")
 
-            cursor.execute(
+            cur.execute(
                 "SELECT COUNT(*) FROM cycles "
                 "WHERE coord_plan IS NULL OR detection_method IS NULL"
             )
-            null_count = cursor.fetchone()[0]
-            if null_count > 0:
-                issues.append(f"Found {null_count} rows with NULL values")
+            null_count = cur.fetchone()[0]
+            if null_count:
+                issues.append(f"{null_count} rows with NULL values")
 
         return len(issues) == 0, issues
 
 
 # ---------------------------------------------------------------------------
-# Convenience entry-points
+# Convenience entry-point
 # ---------------------------------------------------------------------------
 
 def run_cycle_processing(
     db_path: Path,
-    reprocess: bool = False,
-    timezone: str = None
+    fill_gaps: bool = False,
+    timezone: str = None,
 ) -> None:
-    """
-    Convenience function to run cycle processing.
+    """Convenience wrapper for a full-pass cycle-processing run.
 
     Args:
-        db_path:   Path to SQLite database.
-        reprocess: If True, reprocess all dates.
-        timezone:  Local timezone string. If None, reads from metadata table.
+        db_path:   Path to the SQLite database.
+        fill_gaps: When ``True`` use Path B (Gap Fill) for every span.
+        timezone:  Local timezone string; ``None`` reads from metadata.
     """
     processor = CycleProcessor(db_path, timezone=timezone)
-    processor.run(reprocess=reprocess)
+    processor.run(fill_gaps=fill_gaps)
 
     stats = processor.get_processing_stats()
     print("\nCycle Processing Statistics:")
     print(f"  Total cycles:      {stats['total_cycles']:,}")
-    print(f"  Days processed:    {stats['days_processed']}")
-    print(f"  Unprocessed days:  {stats['unprocessed_days']}")
     print(f"  Detection methods: {stats['detection_methods']}")
-    print(f"  Coordination plans:{stats['coord_plans']}")
-    if stats['date_range']['start']:
+    print(f"  Coord plans:       {stats['coord_plans']}")
+    if stats["date_range"]["start"]:
         print(
             f"  Date range:        "
-            f"{stats['date_range']['start']} to {stats['date_range']['end']}"
+            f"{stats['date_range']['start']} → {stats['date_range']['end']}"
         )
