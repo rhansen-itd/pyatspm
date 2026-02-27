@@ -37,6 +37,10 @@ from .counts import (
     parse_exclusions_from_config,
 )
 
+from .detectors import (
+    analyze_colocated_discrepancies,
+)
+
 from .phases import (
     phase_splits,
 )
@@ -62,6 +66,8 @@ __all__ = [
     'ped_counts',
     'parse_movements_from_config',
     'parse_exclusions_from_config',
+    # Detectors
+    'analyze_colocated_discrepancies',
     # Phases
     'phase_splits',
 ]

@@ -35,6 +35,10 @@ from .counts import (
     get_combined_counts,
 )
 
+from.detectors import(
+    get_detector_discrepancies,
+)
+
 from .phases import (
     PhaseEngine,
     get_phase_splits,
@@ -62,6 +66,8 @@ __all__ = [
     'get_available_dates',
     'check_data_quality',
     'convert_to_datetime',
+    #Detectors
+    'get_detector_discrepancies',
     # Counts
     'CountEngine',
     'get_vehicle_counts',
