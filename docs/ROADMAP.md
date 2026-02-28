@@ -4,29 +4,20 @@
 
 
 
-\## 1. AI Delegation Strategy
+## 1. AI Delegation Strategy
+Use this matrix to decide which AI/tool to engage for each task type.
 
-\*Use this matrix to determine which LLM to use for specific tasks to optimize token usage and code quality.\*
-
-
-
-| Task Type | Best Model for Bulk Coding | Best for Planning \& Prompting | Rationale |
-
-| :--- | :--- | :--- | :--- |
-
-| \*\*Complex `pandas`/`numpy` vectorization\*\* | Claude | Grok / Gemini | Claude is currently unmatched for complex data manipulation and optimizing analytical code. |
-
-| \*\*Detector state machines, SQL pipelines\*\* | Claude | Grok / Gemini | Deep business logic requires Claude's specific coding strengths. |
-
-| \*\*CLI tools, SCP/`paramiko` wrappers\*\* | Gemini | Grok / Gemini | Gemini is highly reliable for Python scripting, network tools, and CLI boilerplate. |
-
-| \*\*Dash / Streamlit web app prototypes\*\* | Gemini | Grok / Gemini | Gemini excels at modern frontend patterns and scaffolding interactive data dashboards. |
-
-| \*\*Small refactors (DRY, renames)\*\* | Any | Grok / Gemini | Low risk, mechanical tasks; use whatever model you currently have open. |
-
-| \*\*Documentation (Initial major pass)\*\* | Claude | - | Claude will already have the deep context from writing the new architecture. |
-
-| \*\*Documentation (Ongoing maintenance)\*\* | Gemini / Grok | - | Lower token pressure; feed git diffs to Gemini/Grok to generate changelogs and doc updates. |
+| Task Type                              | Best Tool                  | Best for Planning / Prompt Writing | Rationale / Notes                                                                 |
+|----------------------------------------|----------------------------|-------------------------------------|-----------------------------------------------------------------------------------|
+| Complex pandas/numpy vectorization     | Claude                     | Grok / Gemini (chatbot)             | Claude excels at analytical optimization; others help craft tight prompts.       |
+| Detector state machines, SQL pipelines | Claude                     | Grok                                | Deep domain logic + architecture integrity.                                       |
+| Repo-wide terminology sweeps & renames | Jules (agent)              | Grok / Gemini (chatbot)             | Full repo read/write access; zero copy-paste friction; catches buried references. |
+| File migrations, bulk DRY refactors   | Jules (agent)              | Grok / Gemini (chatbot)             | "Set it and forget it" — renames files, updates imports/paths atomically.         |
+| Small repo cleanups (imports, lint)    | Jules (agent)              | —                                   | Ongoing hygiene tasks (e.g. sort imports, remove unused vars) after big changes.  |
+| CLI tools, new feature boilerplate     | Claude                     | Grok / Gemini                       | Claude keeps context for consistent Typer/Click style + feature integration.     |
+| Dash / Streamlit / web prototypes      | Gemini (chatbot)           | Grok                                | Gemini strong at modern interactive dashboard scaffolding.                       |
+| Documentation — initial major overhaul | Claude                     | —                                   | Deep project understanding from recent code work.                                 |
+| Documentation — ongoing updates        | Gemini (chatbot) or Grok   | —                                   | Low token cost; feed diffs/changelogs for targeted patches.                      |
 
 
 
