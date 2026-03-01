@@ -4,6 +4,35 @@ A high-performance Python package for Automated Traffic Signal Performance Measu
 
 Replaces a legacy flat-file system (CSV/Pickle + complex pandas logic) with a modern, queryable, per-intersection database backend — while maintaining backward compatibility with existing analysis and plotting code.
 
+## Documentation
+
+For deep technical dives, refer to the documents below:
+
+- **[Installation Guide](docs/INSTALL.md)**: Instructions on environment setup and package installation.
+- **[CLI Reference](docs/CLI_REFERENCE.md)**: Complete list of subcommands, arguments, and flags for the `atspm` CLI.
+- **[Architecture](docs/ARCHITECTURE.md)**: Detailed breakdown of the Database Strategy, Implemented Schema, and Functional Core/Imperative Shell pattern.
+
+## Quickstart (CLI)
+
+The `atspm` CLI handles intersection setup, ingestion, and reporting.
+
+1. **Setup a new intersection environment**:
+```bash
+atspm setup --target 2068_US-95_and_SH-8 --timezone "US/Mountain"
+```
+*(This creates `intersections/2068_US-95_and_SH-8/` with `metadata.json` and a config placeholder.)*
+
+2. **Process and ingest raw `.datZ` files**:
+```bash
+atspm process --target 2068_US-95_and_SH-8
+```
+*(This reads `.datZ` files, ingests data into SQLite, and orchestrates cycle detection.)*
+
+3. **Generate Reports**:
+```bash
+atspm report --target 2068_US-95_and_SH-8 --dates 2026-02-19
+```
+
 ---
 
 ## Project Structure
