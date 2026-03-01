@@ -36,6 +36,7 @@ from .counts import (
 )
 
 from.detectors import(
+    DetectorEngine,
     get_detector_discrepancies,
 )
 
@@ -67,6 +68,7 @@ __all__ = [
     'check_data_quality',
     'convert_to_datetime',
     #Detectors
+    'DetectorEngine',
     'get_detector_discrepancies',
     # Counts
     'CountEngine',

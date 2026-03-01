@@ -1,11 +1,13 @@
 """
 ATSPM Unified Command-Line Interface
 
-Exposes three subcommands that replace the legacy ``scripts/`` folder:
+Exposes subcommands that replace the legacy ``scripts/`` folder:
 
-    atspm setup   --target <folder_name>       Create a new intersection environment
-    atspm process --target <folder_name> [...]  Ingest data and compute cycles
-    atspm report  --target <folder_name> [...]  Generate ATSPM performance reports
+    atspm setup          --targetid <id>             Create a new intersection environment
+    atspm process        --targetid <id> [...]       Ingest data and compute cycles
+    atspm report         --targetid <id> [...]       Generate ATSPM performance reports
+    atspm discrepancies  --targetid <id> [...]       Analyze detector discrepancies
+    atspm plot-detectors --targetid <id> [...]       Generate interactive detector comparison plots
 
 The package must be installed (``pip install -e .``) for the ``atspm`` entry
 point to be available.  All logic uses clean absolute imports from the
@@ -21,6 +23,7 @@ import json
 import re
 import sys
 import traceback
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -67,6 +70,42 @@ def _get_intersections_dir() -> Path:
         Path object for the intersections directory.
     """
     return _find_project_root() / _INTERSECTIONS_DIRNAME
+
+
+def _resolve_target_name(target: Optional[str], targetid: Optional[str]) -> str:
+    """Resolve the full intersection folder name from either a target or targetid.
+    
+    Args:
+        target: The exact folder name (e.g., '2068_US-95_and_SH-8').
+        targetid: The intersection ID prefix (e.g., '2068').
+        
+    Returns:
+        The exact folder name string.
+        
+    Raises:
+        SystemExit: If no matching folder or multiple matching folders are found.
+    """
+    if target:
+        return target
+        
+    if not targetid:
+        _die("Either --target or --targetid must be provided.")
+        
+    intersections_dir = _get_intersections_dir()
+    if not intersections_dir.exists():
+        _die(f"Intersections directory not found: {intersections_dir}")
+        
+    matches = []
+    for p in intersections_dir.iterdir():
+        if p.is_dir() and p.name.split('_')[0] == str(targetid):
+            matches.append(p.name)
+            
+    if not matches:
+        _die(f"No intersection folder found for ID '{targetid}'.")
+    if len(matches) > 1:
+        _die(f"Multiple folders found for ID '{targetid}': {', '.join(matches)}")
+        
+    return matches[0]
 
 
 def _get_target_dir(target_name: str, must_exist: bool = True) -> Path:
@@ -268,23 +307,8 @@ def handle_setup(args: argparse.Namespace) -> None:
 # process
 # ---------------------------------------------------------------------------
 
-def handle_process(args: argparse.Namespace) -> None:
-    """Ingest raw ``.datZ`` data and compute signal cycles.
-
-    Loads ``metadata.json``, syncs it to the SQLite ``metadata`` table,
-    imports the configuration CSV, then delegates to ``run_ingestion``
-    (which drives both ingestion and optional cycle processing in one pass).
-
-    Path A (Fast Append, default): only files newer than the last ingested
-    span are scanned; cycles are updated from the last known cycle boundary.
-
-    Path B (Gap Fill, ``--fill-gaps``): the full file list is scanned for
-    uncovered holes; gap markers made obsolete by new data are scrubbed;
-    cycles are surgically repaired between gap-bounded anchors.
-
-    Args:
-        args: Parsed CLI arguments.
-    """
+def _process_single_intersection(target_name: str, args: argparse.Namespace) -> None:
+    """Core logic to process a single intersection."""
     # Resolve fill_gaps: --fill-gaps OR --full both activate Path B.
     fill_gaps: bool = args.fill_gaps or args.full
 
@@ -292,7 +316,7 @@ def handle_process(args: argparse.Namespace) -> None:
     from atspm.data import init_db, import_config, run_ingestion
     from atspm.data.manager import DatabaseManager
 
-    target_dir = _get_target_dir(args.target)
+    target_dir = _get_target_dir(target_name)
     meta       = _load_metadata(target_dir)
     db_path    = _resolve_db_path(target_dir, meta)
     config_csv = target_dir / "int_cfg.csv"
@@ -303,8 +327,8 @@ def handle_process(args: argparse.Namespace) -> None:
         args.timezone or meta.get("timezone") or "US/Mountain"
     )
 
-    int_name = meta.get("intersection_name", args.target)
-    int_id   = meta.get("intersection_id",   args.target.split("_")[0])
+    int_name = meta.get("intersection_name", target_name)
+    int_id   = meta.get("intersection_id",   target_name.split("_")[0])
     mode_tag = "Gap Fill" if fill_gaps else "Fast Append"
 
     print(
@@ -378,35 +402,66 @@ def handle_process(args: argparse.Namespace) -> None:
     print("\n✅  Processing complete.")
 
 
-# ---------------------------------------------------------------------------
-# report
-# ---------------------------------------------------------------------------
+def handle_process(args: argparse.Namespace) -> None:
+    """Ingest raw ``.datZ`` data and compute signal cycles.
 
-def handle_report(args: argparse.Namespace) -> None:
-    """Generate ATSPM performance reports for one or more dates.
+    Loads ``metadata.json``, syncs it to the SQLite ``metadata`` table,
+    imports the configuration CSV, then delegates to ``run_ingestion``
+    (which drives both ingestion and optional cycle processing in one pass).
 
-    Validates cycle data for each requested date (running on-demand
-    reprocessing when a date is absent), then invokes ``PlotGenerator``
-    to produce the full suite of Plotly reports.
+    Path A (Fast Append, default): only files newer than the last ingested
+    span are scanned; cycles are updated from the last known cycle boundary.
+
+    Path B (Gap Fill, ``--fill-gaps``): the full file list is scanned for
+    uncovered holes; gap markers made obsolete by new data are scrubbed;
+    cycles are surgically repaired between gap-bounded anchors.
 
     Args:
         args: Parsed CLI arguments.
     """
+    intersections_dir = _get_intersections_dir()
+    
+    if getattr(args, "all", False):
+        targets = [p.name for p in intersections_dir.iterdir() if p.is_dir()]
+        if not targets:
+            _die(f"No intersection directories found in {intersections_dir}")
+        print(f"\n🌍 Batch processing {len(targets)} intersections...")
+    else:
+        targets = [_resolve_target_name(args.target, args.targetid)]
+
+    for target_name in targets:
+        try:
+            _process_single_intersection(target_name, args)
+        except SystemExit:
+            # Catch _die() to prevent a single failure from crashing the batch loop
+            print(f"\n⏭️ Skipping {target_name} due to errors.", file=sys.stderr)
+        except Exception as exc:
+            print(f"\n❌ Unexpected error processing {target_name}: {exc}", file=sys.stderr)
+            if getattr(args, "verbose", False):
+                traceback.print_exc()
+
+
+# ---------------------------------------------------------------------------
+# report
+# ---------------------------------------------------------------------------
+
+def _report_single_intersection(target_name: str, args: argparse.Namespace) -> None:
+    """Core logic to generate reports for a single intersection."""
     from atspm.data.processing import CycleProcessor
     from atspm.reports.generators import PlotGenerator
 
-    target_dir = _get_target_dir(args.target)
+    target_dir = _get_target_dir(target_name)
     meta       = _load_metadata(target_dir)
     db_path    = _resolve_db_path(target_dir, meta)
     output_dir = target_dir / "outputs"
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    int_name = meta.get("intersection_name", args.target)
+    int_name = meta.get("intersection_name", target_name)
 
     if not db_path.exists():
         _die(
             f"Database not found: {db_path}\n"
-            f"Run 'atspm process --target {args.target}' first."
+            f"Run 'atspm process --target {target_name}' first."
         )
 
     print(f"\n📊  Generating reports for {int_name}")
@@ -472,7 +527,222 @@ def handle_report(args: argparse.Namespace) -> None:
     )
     if errors:
         print(f"    Failed dates: {', '.join(errors)}")
-        sys.exit(1)
+        _die(f"Report generation completed with errors for {target_name}.")
+
+
+def handle_report(args: argparse.Namespace) -> None:
+    """Generate ATSPM performance reports for one or more dates.
+
+    Validates cycle data for each requested date (running on-demand
+    reprocessing when a date is absent), then invokes ``PlotGenerator``
+    to produce the full suite of Plotly reports.
+
+    Args:
+        args: Parsed CLI arguments.
+    """
+    intersections_dir = _get_intersections_dir()
+    
+    if getattr(args, "all", False):
+        targets = [p.name for p in intersections_dir.iterdir() if p.is_dir()]
+        if not targets:
+            _die(f"No intersection directories found in {intersections_dir}")
+        print(f"\n🌍 Batch generating reports for {len(targets)} intersections...")
+    else:
+        targets = [_resolve_target_name(args.target, args.targetid)]
+
+    for target_name in targets:
+        try:
+            _report_single_intersection(target_name, args)
+        except SystemExit:
+            print(f"\n⏭️ Skipping {target_name} due to errors.", file=sys.stderr)
+        except Exception as exc:
+            print(f"\n❌ Unexpected error reporting {target_name}: {exc}", file=sys.stderr)
+            if getattr(args, "verbose", False):
+                traceback.print_exc()
+
+
+# ---------------------------------------------------------------------------
+# discrepancies
+# ---------------------------------------------------------------------------
+
+def _discrepancies_single_intersection(target_name: str, args: argparse.Namespace) -> None:
+    """Core logic to analyze discrepancies for a single intersection."""
+    from atspm.data.detectors import get_detector_discrepancies
+
+    target_dir = _get_target_dir(target_name)
+    meta       = _load_metadata(target_dir)
+    db_path    = _resolve_db_path(target_dir, meta)
+    
+    # Optional outputs dir
+    output_dir = None
+    if args.output:
+        output_dir = target_dir / "outputs"
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+    int_name = meta.get("intersection_name", target_name)
+    timezone = args.timezone or meta.get("timezone") or "US/Mountain"
+
+    if not db_path.exists():
+        _die(
+            f"Database not found: {db_path}\n"
+            f"Run 'atspm process --target {target_name}' first."
+        )
+
+    try:
+        start_dt = datetime.fromisoformat(args.start)
+        end_dt   = datetime.fromisoformat(args.end)
+    except ValueError as exc:
+        _die(f"Invalid date format for --start or --end: {exc}. Use ISO format (e.g., 2024-06-01T06:00:00).")
+
+    print(f"\n🔍  Analyzing detector discrepancies for {int_name}")
+    print(f"    DB:     {db_path.name}")
+    print(f"    Window: {start_dt.isoformat()} → {end_dt.isoformat()}")
+    print(f"    Lag:    {args.lag}s")
+    print(f"    TZ:     {timezone}")
+
+    try:
+        result = get_detector_discrepancies(
+            db_path=db_path,
+            start=start_dt,
+            end=end_dt,
+            lag_threshold_sec=args.lag,
+            timezone=timezone,
+            output_dir=output_dir,
+        )
+    except Exception as exc:
+        if args.verbose:
+            traceback.print_exc()
+        _die(f"Discrepancy analysis failed: {exc}")
+
+    if result.empty:
+        print("\n✅  No anomalies detected.")
+        return # Changed from sys.exit to allow batch looping
+
+    print(f"\n⚠️  Found {len(result)} anomaly(ies):\n")
+    print(result.to_string(index=False))
+
+    if output_dir:
+        print(f"\nReport saved to {output_dir}/")
+
+
+def handle_discrepancies(args: argparse.Namespace) -> None:
+    """Analyze co-located detector discrepancies for a time window.
+
+    Reads detector pair mappings from the active configuration
+    (Det_Ph<X>_Pairs columns) and reports extended disagreements and
+    unconfirmed pulses to stdout (and optionally a CSV file).
+
+    Args:
+        args: Parsed CLI arguments.
+    """
+    intersections_dir = _get_intersections_dir()
+    
+    if getattr(args, "all", False):
+        targets = [p.name for p in intersections_dir.iterdir() if p.is_dir()]
+        if not targets:
+            _die(f"No intersection directories found in {intersections_dir}")
+        print(f"\n🌍 Batch analyzing discrepancies for {len(targets)} intersections...")
+    else:
+        targets = [_resolve_target_name(args.target, args.targetid)]
+
+    for target_name in targets:
+        try:
+            _discrepancies_single_intersection(target_name, args)
+        except SystemExit:
+            print(f"\n⏭️ Skipping {target_name} due to errors.", file=sys.stderr)
+        except Exception as exc:
+            print(f"\n❌ Unexpected error analyzing {target_name}: {exc}", file=sys.stderr)
+            if getattr(args, "verbose", False):
+                traceback.print_exc()
+
+
+# ---------------------------------------------------------------------------
+# plot-detectors
+# ---------------------------------------------------------------------------
+
+def _plot_detectors_single_intersection(
+    target_name: str,
+    args: argparse.Namespace,
+) -> None:
+    """Core logic to generate a detector comparison plot for one intersection.
+
+    Args:
+        target_name: Exact intersection folder name.
+        args: Parsed CLI arguments from the ``plot-detectors`` subcommand.
+    """
+    import pytz
+    from atspm.reports.generators import PlotGenerator
+
+    target_dir = _get_target_dir(target_name)
+    meta       = _load_metadata(target_dir)
+    db_path    = _resolve_db_path(target_dir, meta)
+
+    if not db_path.exists():
+        _die(
+            f"Database not found: {db_path}\n"
+            f"Run 'atspm process --target {target_name}' first."
+        )
+
+    output_dir = target_dir / "outputs"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    int_name = meta.get("intersection_name", target_name)
+    tz_str = args.timezone or meta.get("timezone") or "US/Mountain"
+    tz = pytz.timezone(tz_str)
+
+    try:
+        # Localise naive inputs immediately
+        start_naive = datetime.fromisoformat(args.start)
+        end_naive   = datetime.fromisoformat(args.end)
+        start_dt = tz.localize(start_naive)
+        end_dt   = tz.localize(end_naive)
+    except ValueError as exc:
+        _die(f"Invalid datetime format: {exc}. Use ISO-8601 (e.g. 2024-06-01T06:00:00).")
+
+    print(f"\n📈  Generating detector comparison plot for {int_name}")
+    print(f"    Window: {start_dt.isoformat()} → {end_dt.isoformat()}")
+    if args.phases:
+        print(f"    Phases: {args.phases}")
+
+    try:
+        gen = PlotGenerator(db_path, output_dir)
+        gen._generate_detector_comparison(
+            start_dt=start_dt,
+            end_dt=end_dt,
+            phases=args.phases,
+            lag_threshold_sec=args.lag,
+        )
+    except Exception as exc:
+        if args.verbose:
+            traceback.print_exc()
+        _die(f"Plot generation failed: {exc}")
+
+
+def handle_plot_detectors(args: argparse.Namespace) -> None:
+    """Generate interactive detector comparison plots.
+
+    Args:
+        args: Parsed CLI arguments.
+    """
+    intersections_dir = _get_intersections_dir()
+    
+    if getattr(args, "all", False):
+        targets = [p.name for p in intersections_dir.iterdir() if p.is_dir()]
+        if not targets:
+            _die(f"No intersection directories found in {intersections_dir}")
+        print(f"\n🌍 Batch generating detector plots for {len(targets)} intersections...")
+    else:
+        targets = [_resolve_target_name(args.target, args.targetid)]
+
+    for target_name in targets:
+        try:
+            _plot_detectors_single_intersection(target_name, args)
+        except SystemExit:
+            print(f"\n⏭️ Skipping {target_name} due to errors.", file=sys.stderr)
+        except Exception as exc:
+            print(f"\n❌ Unexpected error processing {target_name}: {exc}", file=sys.stderr)
+            if getattr(args, "verbose", False):
+                traceback.print_exc()
 
 
 # ---------------------------------------------------------------------------
@@ -480,7 +750,7 @@ def handle_report(args: argparse.Namespace) -> None:
 # date-level stats / reprocess API that test_reporting.py relied on)
 # ---------------------------------------------------------------------------
 
-def _get_cycle_summary(processor: "CycleProcessor", date_str: str) -> Optional[dict]:
+def _get_cycle_summary(processor, date_str: str) -> Optional[dict]:
     """Return cycle summary for a local calendar date, or None.
 
     Queries the cycles table directly rather than relying on a specific
@@ -503,12 +773,8 @@ def _get_cycle_summary(processor: "CycleProcessor", date_str: str) -> Optional[d
         return None
 
     tz = processor.tz
-    start_epoch = tz.localize(
-        datetime.combine(local_date, time.min)
-    ).timestamp()
-    end_epoch = tz.localize(
-        datetime.combine(local_date + timedelta(days=1), time.min)
-    ).timestamp()
+    start_epoch = tz.localize(datetime.combine(local_date, time.min)).timestamp()
+    end_epoch = tz.localize(datetime.combine(local_date + timedelta(days=1), time.min)).timestamp()
 
     with DatabaseManager(processor.db_path) as m:
         cur = m.conn.cursor()
@@ -535,11 +801,7 @@ def _get_cycle_summary(processor: "CycleProcessor", date_str: str) -> Optional[d
     }
 
 
-def _reprocess_date(
-    processor: "CycleProcessor",
-    date_str: str,
-    timezone: Optional[str] = None,
-) -> None:
+def _reprocess_date(processor, date_str: str, timezone: Optional[str] = None) -> None:
     """Trigger on-demand cycle reprocessing for a single local date.
 
     Converts the local date to UTC epoch bounds and calls
@@ -562,9 +824,7 @@ def _reprocess_date(
         return
 
     t_start = tz.localize(datetime.combine(local_date, time.min)).timestamp()
-    t_end   = tz.localize(
-        datetime.combine(local_date + timedelta(days=1), time.min)
-    ).timestamp()
+    t_end   = tz.localize(datetime.combine(local_date + timedelta(days=1), time.min)).timestamp()
 
     # Use gap-fill (Path B) so the repair is surgically bounded.
     processor.process_span(t_start, t_end, fill_gaps=True)
@@ -578,14 +838,14 @@ def _build_parser() -> argparse.ArgumentParser:
     """Construct and return the top-level argument parser.
 
     Returns:
-        Configured ``ArgumentParser`` with ``setup``, ``process``, and
-        ``report`` subcommands attached.
+        Configured ``ArgumentParser`` with ``setup``, ``process``,
+        ``report``, and ``discrepancies`` subcommands attached.
     """
     parser = argparse.ArgumentParser(
         prog="atspm",
         description=(
             "ATSPM – Automated Traffic Signal Performance Measures\n"
-            "Unified CLI for intersection setup, data ingestion, and reporting."
+            "Unified CLI for intersection setup, data ingestion, reporting, and discrepancy analysis."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -609,13 +869,13 @@ def _build_parser() -> argparse.ArgumentParser:
         "--target",
         required=True,
         metavar="FOLDER",
-        help="Intersection folder name, e.g. '2068_US-95_and_SH-8'.",
+        help="Intersection folder name, e.g. '2068_US-95_and_SH-8'."
     )
     p_setup.add_argument(
         "--timezone",
         default="US/Mountain",
         metavar="TZ",
-        help="IANA timezone for the new metadata.json (default: US/Mountain).",
+        help="IANA timezone for the new metadata.json (default: US/Mountain)."
     )
     p_setup.set_defaults(func=handle_setup)
 
@@ -636,12 +896,10 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    p_proc.add_argument(
-        "--target",
-        required=True,
-        metavar="FOLDER",
-        help="Intersection folder name.",
-    )
+    group_proc = p_proc.add_mutually_exclusive_group(required=True)
+    group_proc.add_argument("--target", metavar="FOLDER", help="Exact intersection folder name.")
+    group_proc.add_argument("--targetid", metavar="ID", help="Intersection ID (prefix of folder name).")
+    group_proc.add_argument("--all", action="store_true", help="Process all intersections in the directory.")
     p_proc.add_argument(
         "--fill-gaps",
         action="store_true",
@@ -662,13 +920,13 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         default=50,
         metavar="N",
-        help="Number of .datZ files per transaction commit (default: 50).",
+        help="Number of .datZ files per transaction commit (default: 50)."
     )
     p_proc.add_argument(
         "--no-cycles",
         action="store_true",
         default=False,
-        help="Skip cycle processing; only ingest raw events.",
+        help="Skip cycle processing; only ingest raw events."
     )
     p_proc.add_argument(
         "--timezone",
@@ -695,12 +953,10 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    p_rep.add_argument(
-        "--target",
-        required=True,
-        metavar="FOLDER",
-        help="Intersection folder name.",
-    )
+    group_rep = p_rep.add_mutually_exclusive_group(required=True)
+    group_rep.add_argument("--target", metavar="FOLDER", help="Exact intersection folder name.")
+    group_rep.add_argument("--targetid", metavar="ID", help="Intersection ID (prefix of folder name).")
+    group_rep.add_argument("--all", action="store_true", help="Generate reports for all intersections in the directory.")
     p_rep.add_argument(
         "--dates",
         required=True,
@@ -724,9 +980,143 @@ def _build_parser() -> argparse.ArgumentParser:
         "--verbose",
         action="store_true",
         default=False,
-        help="Print full tracebacks for any per-date generation errors.",
+        help="Print full tracebacks for any per-date generation errors."
     )
     p_rep.set_defaults(func=handle_report)
+
+    # ------------------------------------------------------------------
+    # discrepancies
+    # ------------------------------------------------------------------
+    p_disc = subs.add_parser(
+        "discrepancies",
+        help="Analyze co-located detector discrepancies for a time window.",
+        description=(
+            "Identify disagreements across co-located detector pairs for a specific\n"
+            "time window. Reads detector mappings directly from the configuration database.\n\n"
+            "To save the output, use the --output flag."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    group_disc = p_disc.add_mutually_exclusive_group(required=True)
+    group_disc.add_argument("--target", metavar="FOLDER", help="Exact intersection folder name.")
+    group_disc.add_argument("--targetid", metavar="ID", help="Intersection ID (prefix of folder name).")
+    group_disc.add_argument("--all", action="store_true", help="Analyze discrepancies for all intersections in the directory.")
+    p_disc.add_argument(
+        "--start",
+        required=True,
+        metavar="ISO8601",
+        help="Query window start (local time, ISO-8601). E.g. '2024-06-01T06:00:00'."
+    )
+    p_disc.add_argument(
+        "--end",
+        required=True,
+        metavar="ISO8601",
+        help="Query window end, exclusive (local time, ISO-8601)."
+    )
+    p_disc.add_argument(
+        "--lag",
+        type=float,
+        default=2.0,
+        help="Minimum disagreement duration in seconds (default: 2.0)."
+    )
+    p_disc.add_argument(
+        "--timezone",
+        default=None,
+        metavar="TZ",
+        help="Override the timezone from metadata.json."
+    )
+    p_disc.add_argument(
+        "--output",
+        action="store_true",
+        default=False,
+        help="Write results to a CSV file in the intersection's outputs directory."
+    )
+    p_disc.add_argument(
+        "--verbose",
+        action="store_true",
+        default=False,
+        help="Print full tracebacks for any errors."
+    )
+    p_disc.set_defaults(func=handle_discrepancies)
+
+    # ------------------------------------------------------------------
+    # plot-detectors
+    # ------------------------------------------------------------------
+    p_det = subs.add_parser(
+        "plot-detectors",
+        help="Generate interactive detector comparison plots.",
+        description=(
+            "Visualise co-located detector actuations side-by-side. Highlights\n"
+            "identified discrepancies (unconfirmed pulses, extended disagreements).\n"
+            "Reads pairs directly from configuration."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    group_det = p_det.add_mutually_exclusive_group(required=True)
+    group_det.add_argument(
+        "--target",
+        metavar="FOLDER",
+        help="Exact intersection folder name.",
+    )
+    group_det.add_argument(
+        "--targetid",
+        metavar="ID",
+        help="Intersection ID prefix (e.g. '2068').",
+    )
+    group_det.add_argument(
+        "--all",
+        action="store_true",
+        help="Generate plots for all intersections in the directory.",
+    )
+    p_det.add_argument(
+        "--start",
+        required=True,
+        metavar="ISO8601",
+        help=(
+            "Window start (local time, ISO-8601). "
+            "E.g. '2024-06-01T06:00:00'."
+        ),
+    )
+    p_det.add_argument(
+        "--end",
+        required=True,
+        metavar="ISO8601",
+        help="Window end, exclusive (local time, ISO-8601).",
+    )
+    p_det.add_argument(
+        "--phases",
+        nargs="+",
+        type=int,
+        metavar="N",
+        default=None,
+        help=(
+            "Filter to specific signal phases, e.g. --phases 2 6. "
+            "Omit to include all configured pairs."
+        ),
+    )
+    p_det.add_argument(
+        "--lag",
+        type=float,
+        default=2.0,
+        metavar="SEC",
+        help=(
+            "Minimum disagreement duration (seconds) for extended-disagreement "
+            "classification (default: 2.0)."
+        ),
+    )
+    p_det.add_argument(
+        "--timezone",
+        default=None,
+        metavar="TZ",
+        help="Override the timezone from metadata.json.",
+    )
+    p_det.add_argument(
+        "--verbose",
+        action="store_true",
+        default=False,
+        help="Print full tracebacks for any errors.",
+    )
+    p_det.set_defaults(func=handle_plot_detectors)
 
     return parser
 

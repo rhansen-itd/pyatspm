@@ -1,10 +1,11 @@
 """
 ATSPM Report Generator (Imperative Shell)
 
-Thin orchestration layer: resolves dates → epoch bounds, calls reader.py
+Thin orchestration layer: resolves dates -> epoch bounds, calls reader.py
 to fetch DataFrames, calls plotting functions to build figures, writes HTML.
 
-No SQL lives here.  All data access goes through src/atspm/data/reader.py.
+No SQL lives here.  All data access goes through src/atspm/data/reader.py
+(or domain-specific engines such as DetectorEngine).
 
 Package Location: src/atspm/reports/generators.py
 
@@ -27,7 +28,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 import pytz
 
@@ -47,7 +48,8 @@ class PlotGenerator:
     ----------------
     - Resolve a local date string to UTC epoch bounds using the
       intersection's timezone from metadata.
-    - Delegate all DB access to ``reader.py``.
+    - Delegate all DB access to ``reader.py`` (standard plots) or to
+      domain-specific engines (e.g. ``DetectorEngine``).
     - Call pure plotting functions from the functional core.
     - Write the resulting Plotly figures to HTML files.
 
@@ -98,10 +100,10 @@ class PlotGenerator:
         metadata = self._get_metadata()
         tz_str = self._get_timezone()
 
-        # Convert local date → UTC-bounded datetimes for reader calls
+        # Convert local date -> UTC-bounded datetimes for reader calls
         start_dt, end_dt = _local_date_to_utc_datetimes(local_date, tz_str)
 
-        print(f"[{date_str}] Generating reports…")
+        print(f"[{date_str}] Generating reports...")
 
         # ---- Termination plot ----
         try:
@@ -173,14 +175,14 @@ class PlotGenerator:
         )
 
         if df_events.empty:
-            print(f"[{date_str}] Termination: no events – skipping")
+            print(f"[{date_str}] Termination: no events - skipping")
             return
 
         fig = plot_termination(df_events=df_events, metadata=metadata)
 
         out_path = date_dir / 'Phase_Termination.html'
         fig.write_html(str(out_path))
-        print(f"[{date_str}] Termination saved → {out_path}")
+        print(f"[{date_str}] Termination saved -> {out_path}")
 
     def _generate_coordination(
         self,
@@ -214,11 +216,11 @@ class PlotGenerator:
         )
 
         if df_cycles.empty:
-            print(f"[{date_str}] Coordination: no cycles – skipping")
+            print(f"[{date_str}] Coordination: no cycles - skipping")
             return
 
         if df_signal.empty:
-            print(f"[{date_str}] Coordination: no signal events – skipping")
+            print(f"[{date_str}] Coordination: no signal events - skipping")
             return
 
         # Detector config: fetch only if detector events exist
@@ -245,7 +247,94 @@ class PlotGenerator:
 
         out_path = date_dir / 'Coordination_Split.html'
         fig.write_html(str(out_path))
-        print(f"[{date_str}] Coordination saved → {out_path}")
+        print(f"[{date_str}] Coordination saved -> {out_path}")
+
+    def _generate_detector_comparison(
+        self,
+        start_dt: datetime,
+        end_dt: datetime,
+        phases: Optional[List[int]] = None,
+        lag_threshold_sec: float = 2.0,
+    ) -> None:
+        """Fetch detector data, build the comparison figure, and write HTML.
+
+        Delegates all database access to
+        :class:`~atspm.data.detectors.DetectorEngine` via ``get_plot_data``,
+        then passes the results to the pure plotting function
+        :func:`~atspm.plotting.detectors.plot_detector_comparison`.
+
+        Output is written to a date-specific subdirectory consistent with
+        all other reports::
+
+            {output_dir}/{date_str}/Detector_Comparison_{date_str}.html
+            {output_dir}/{date_str}/Detector_Comparison_{date_str}_Ph2_6.html
+
+        The phase suffix is appended when ``phases`` is provided so multiple
+        phase-filtered calls to the same date directory do not clobber each
+        other.
+
+        Args:
+            start_dt: Window start (UTC-aware datetime produced by
+                ``_local_date_to_utc_datetimes``).
+            end_dt:   Window end, exclusive (UTC-aware datetime).
+            phases: Optional list of phase numbers to include.  ``None``
+                plots all configured pairs.
+            lag_threshold_sec: Minimum disagreement duration in seconds passed
+                to ``analyze_discrepancies``.  Defaults to ``2.0``.
+        """
+        from ..data.detectors import DetectorEngine
+        from ..plotting.detectors import plot_detector_comparison
+
+        tz_str   = self._get_timezone()
+        metadata = self._get_metadata()
+
+        # Derive local date string from the UTC-aware start for folder/filename
+        local_start = start_dt.astimezone(pytz.timezone(tz_str))
+        date_str    = local_start.strftime("%Y-%m-%d")
+
+        # All detector-comparison outputs live in the same date subfolder as
+        # other reports, consistent with generate_for_date().
+        date_dir = self.output_dir / date_str
+        date_dir.mkdir(parents=True, exist_ok=True)
+
+        engine = DetectorEngine(db_path=self.db_path, timezone=tz_str)
+
+        try:
+            events_df, anomalies_df, filtered_pairs = engine.get_plot_data(
+                start=_strip_tz(start_dt),
+                end=_strip_tz(end_dt),
+                phases=phases,
+                lag_threshold_sec=lag_threshold_sec,
+            )
+        except ValueError as exc:
+            print(f"  [{date_str}] Detector Comparison: {exc} - skipping")
+            return
+
+        if not filtered_pairs:
+            print(f"  [{date_str}] Detector Comparison: no detector pairs configured - skipping")
+            return
+
+        if events_df.empty:
+            print(f"  [{date_str}] Detector Comparison: no detector events in window - skipping")
+            return
+
+        fig = plot_detector_comparison(
+            events_df=events_df,
+            anomalies_df=anomalies_df,
+            detector_pairs=filtered_pairs,
+            metadata=metadata,
+        )
+
+        # Filename: base date + optional phase suffix
+        if phases:
+            phase_tag = "_Ph" + "_".join(str(p) for p in sorted(phases))
+        else:
+            phase_tag = ""
+        filename = f"Detector_Comparison_{date_str}{phase_tag}.html"
+
+        out_path = date_dir / filename
+        fig.write_html(str(out_path))
+        print(f"  [{date_str}] Detector Comparison saved -> {out_path}")
 
     # ------------------------------------------------------------------
     # Lazy metadata / timezone resolution
@@ -311,8 +400,28 @@ def _local_date_to_utc_datetimes(
     return start_utc, end_utc
 
 
+def _strip_tz(dt: datetime) -> datetime:
+    """Return a naive copy of *dt* (drops tzinfo).
+
+    ``DetectorEngine._localize_epoch`` expects naive datetimes and applies
+    its own pytz localisation.  This helper bridges UTC-aware datetimes
+    (produced by ``_local_date_to_utc_datetimes``) to that interface.
+
+    Note: the engine will re-localise using the intersection timezone stored
+    in its ``timezone`` attribute, so callers must ensure the datetimes were
+    originally derived from that same timezone.
+
+    Args:
+        dt: Any ``datetime`` (aware or naive).
+
+    Returns:
+        Timezone-naive ``datetime`` with identical date/time components.
+    """
+    return dt.replace(tzinfo=None)
+
+
 # ---------------------------------------------------------------------------
-# Convenience entry-point
+# Convenience entry-points
 # ---------------------------------------------------------------------------
 
 def generate_reports(

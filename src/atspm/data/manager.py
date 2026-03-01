@@ -9,12 +9,52 @@ Package Location: src/atspm/data/manager.py
 """
 
 import json
+import re
 import sqlite3
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
+
+
+# ---------------------------------------------------------------------------
+# Module-level helpers
+# ---------------------------------------------------------------------------
+
+_DET_PAIRS_RE = re.compile(r"^Det_P(\d+)_Pairs$")
+
+
+def _parse_detector_pairs(cfg: Dict[str, Any]) -> List[Dict[str, int]]:
+    """Scan a config dict for ``Det_P<X>_Pairs`` columns and parse them.
+
+    Each matching column value is expected to be a JSON string containing a
+    list of ``[det_a, det_b]`` two-element lists (e.g. ``"[[33,2],[34,3]]"``).
+    Results from *all* phases are flattened into a single list keyed by phase.
+
+    Args:
+        cfg: Config dict as returned by ``get_config_at_date`` or one element
+             of ``get_configs_for_range``.
+
+    Returns:
+        List of ``{"phase": int, "det_a": int, "det_b": int}`` dicts, ordered
+        by phase then pair order.  Returns ``[]`` if no matching columns exist
+        or all values are ``None`` / empty.
+    """
+    pairs: List[Dict[str, int]] = []
+    for key, raw in cfg.items():
+        m = _DET_PAIRS_RE.match(key)
+        if not m or not raw:
+            continue
+        phase = int(m.group(1))
+        try:
+            parsed = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        for entry in parsed:
+            if len(entry) == 2:
+                pairs.append({"phase": phase, "det_a": int(entry[0]), "det_b": int(entry[1])})
+    return pairs
 
 
 class DatabaseManager:
@@ -304,11 +344,19 @@ class DatabaseManager:
     def get_config_at_date(self, query_date: datetime) -> Optional[Dict[str, Any]]:
         """Retrieve the configuration active at a specific datetime.
 
+        In addition to parsing ``TM_Exclusions`` into ``exclusions``, this
+        method scans for any columns matching ``Det_P<X>_Pairs``, parses
+        their JSON values, and compiles them into ``detector_pairs``.
+
         Args:
             query_date: Datetime to query (naive or aware; date portion used).
 
         Returns:
-            Config dict with a parsed ``exclusions`` key, or ``None``.
+            Config dict augmented with:
+                ``exclusions``:      List of exclusion dicts (may be ``[]``).
+                ``detector_pairs``:  List of ``{"phase": int, "det_a": int,
+                                     "det_b": int}`` dicts (may be ``[]``).
+            Returns ``None`` when no config covers ``query_date``.
         """
         if not self.conn:
             raise RuntimeError("No active connection.")
@@ -328,6 +376,7 @@ class DatabaseManager:
         cfg["exclusions"] = (
             json.loads(cfg["TM_Exclusions"]) if cfg.get("TM_Exclusions") else []
         )
+        cfg["detector_pairs"] = _parse_detector_pairs(cfg)
         return cfg
 
     def get_configs_for_range(
@@ -338,9 +387,13 @@ class DatabaseManager:
         """Return all configs whose validity period overlaps [range_start, range_end].
 
         Each returned dict is augmented with:
-            ``_epoch_start``: UTC epoch at which *this* config becomes active
-                              within the requested range (clamped to range_start).
-            ``_epoch_end``:   UTC epoch at which it ceases (clamped to range_end).
+            ``_epoch_start``:    UTC epoch at which *this* config becomes active
+                                 within the requested range (clamped to range_start).
+            ``_epoch_end``:      UTC epoch at which it ceases (clamped to range_end).
+            ``exclusions``:      Parsed list of exclusion dicts (may be ``[]``).
+            ``detector_pairs``:  List of ``{"phase": int, "det_a": int,
+                                 "det_b": int}`` dicts compiled from all
+                                 ``Det_P<X>_Pairs`` columns (may be ``[]``).
 
         The list is sorted ascending by ``start_date``.
 
@@ -374,6 +427,7 @@ class DatabaseManager:
             cfg["exclusions"] = (
                 json.loads(cfg["TM_Exclusions"]) if cfg.get("TM_Exclusions") else []
             )
+            cfg["detector_pairs"] = _parse_detector_pairs(cfg)
             # Compute epoch boundaries clamped to the requested range.
             cfg_start = datetime.fromisoformat(cfg["start_date"])
             eff_start = max(cfg_start, range_start.replace(tzinfo=None))
