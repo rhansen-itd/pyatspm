@@ -2,13 +2,13 @@
 ATSPM Phase Termination Plot (Functional Core)
 
 Pure function – no SQL, no file I/O, no side effects.
-Input: legacy-style events DataFrame + metadata dict.
+Input: flat events DataFrame + metadata dict.
 Output: plotly.graph_objects.Figure.
 
 Package Location: src/atspm/plotting/termination.py
 
 Gap Marker Rule:
-    Rows where Code == -1 (event_code == -1) are excluded from all
+    Rows where event_code == -1 are excluded from all
     aggregations and scatter traces.  The rolling max-out proportion line
     is computed per phase; a gap marker within a phase's sequence causes
     the next valid observation to appear as a natural break in the line
@@ -28,10 +28,10 @@ Y-axis Remapping:
 Example SQL to build df_events
 -------------------------------
     SELECT
-        datetime(e.timestamp, 'unixepoch', 'localtime') AS TS_start,
-        e.event_code                                     AS Code,
-        e.parameter                                      AS ID,
-        datetime(c.cycle_start, 'unixepoch', 'localtime') AS Cycle_start
+        datetime(e.timestamp, 'unixepoch', 'localtime')   AS timestamp,
+        e.event_code                                      AS event_code,
+        e.parameter                                       AS parameter,
+        datetime(c.cycle_start, 'unixepoch', 'localtime') AS cycle_start
     FROM events e
     LEFT JOIN cycles c ON e.timestamp >= c.cycle_start
     WHERE e.event_code IN (-1, 4, 5, 6, 21, 45, 105)
@@ -115,10 +115,10 @@ def plot_termination(
     Args:
         df_events: Events DataFrame with columns::
 
-            TS_start   : datetime-like, event timestamp
-            Code       : int, ATSPM event code
-            ID         : int/float, phase number
-            Cycle_start: datetime-like (used for gap isolation)
+            timestamp  : datetime-like, event timestamp
+            event_code : int, ATSPM event code
+            parameter  : int/float, phase number
+            cycle_start: datetime-like (used for gap isolation)
 
         metadata: Dict with keys ``intersection_name``, ``major_road_name``,
             ``minor_road_name``.  Missing road names fall back to
@@ -135,36 +135,33 @@ def plot_termination(
     Raises:
         ValueError: If ``df_events`` is missing required columns.
     """
-    _validate_columns(df_events, required=['TS_start', 'Code', 'ID'])
+    # Changed: Require native column names
+    _validate_columns(df_events, required=['timestamp', 'event_code', 'parameter'])
 
     title = _build_title(metadata, suffix='Phase Termination')
 
     # Build a working copy, excluding gap markers from all scatter logic.
     # Gap markers are only needed for the ped-pairing segment computation,
     # which reads from the original df_events below.
-    df = df_events[df_events['Code'] != _GAP_CODE].copy()
-    df['ID'] = pd.to_numeric(df['ID'], errors='coerce')
-    df = df.dropna(subset=['ID'])
-    df['ID'] = df['ID'].astype(int)
+    # Changed: Native event_code and parameter column usage
+    df = df_events[df_events['event_code'] != _GAP_CODE].copy()
+    df['parameter'] = pd.to_numeric(df['parameter'], errors='coerce')
+    df = df.dropna(subset=['parameter'])
+    df['parameter'] = df['parameter'].astype(int)
 
     # -----------------------------------------------------------------------
     # Y-axis remapping: only phases present in the data, sequential positions
     # -----------------------------------------------------------------------
-    # Determine active phases from termination codes (4/5/6) so the axis
-    # reflects signal phase activity rather than incidental ped/preempt IDs.
     active_phases: List[int] = sorted(
-        df.loc[df['Code'].isin(_TERM_CODES), 'ID'].unique().tolist()
+        df.loc[df['event_code'].isin(_TERM_CODES), 'parameter'].unique().tolist()
     )
     if not active_phases:
         # Fallback: any phase seen at all
-        active_phases = sorted(df['ID'].unique().tolist())
+        active_phases = sorted(df['parameter'].unique().tolist())
 
     phase_to_y: Dict[int, int] = {ph: idx + 1 for idx, ph in enumerate(active_phases)}
 
-    # Map IDs → sequential y in the main working DataFrame.
-    # Rows for phases not in active_phases (e.g. a preempt on an unlisted ID)
-    # are kept but mapped to their nearest or own position gracefully.
-    df['_y'] = df['ID'].map(phase_to_y)
+    df['_y'] = df['parameter'].map(phase_to_y)
 
     fig = make_subplots(rows=1, cols=1, subplot_titles=[title])
 
@@ -178,14 +175,14 @@ def plot_termination(
     # Termination markers: Gap Out, Max Out, Force Off
     # -----------------------------------------------------------------------
     for code in _TERM_CODES:
-        df_code = df[df['Code'] == code].dropna(subset=['_y'])
+        df_code = df[df['event_code'] == code].dropna(subset=['_y'])
         if df_code.empty:
             continue
         style = _TERM_STYLES[code]
         y_off = _Y_OFFSET[code]
 
         fig.add_trace(go.Scatter(
-            x=df_code['TS_start'],
+            x=df_code['timestamp'],
             y=df_code['_y'] + y_off,
             mode='markers',
             marker=dict(
@@ -196,7 +193,7 @@ def plot_termination(
             name=style['name'],
             showlegend=True,
             legendgroup=style['name'],
-            customdata=df_code['ID'],
+            customdata=df_code['parameter'],
             hovertemplate=(
                 f"<b>{style['name']}</b><br>"
                 "Phase: %{customdata}<br>"
@@ -207,11 +204,11 @@ def plot_termination(
     # -----------------------------------------------------------------------
     # Preempt markers (Code 105) – only if present
     # -----------------------------------------------------------------------
-    df_pre = df[df['Code'] == 105].dropna(subset=['_y'])
+    df_pre = df[df['event_code'] == 105].dropna(subset=['_y'])
     if not df_pre.empty:
         style = _TERM_STYLES[105]
         fig.add_trace(go.Scatter(
-            x=df_pre['TS_start'],
+            x=df_pre['timestamp'],
             y=df_pre['_y'] + _Y_OFFSET[105],
             mode='markers',
             marker=dict(
@@ -222,7 +219,7 @@ def plot_termination(
             name=style['name'],
             showlegend=True,
             legendgroup=style['name'],
-            customdata=df_pre['ID'],
+            customdata=df_pre['parameter'],
             hovertemplate=(
                 "<b>Preempt</b><br>"
                 "Phase: %{customdata}<br>"
@@ -233,8 +230,6 @@ def plot_termination(
     # -----------------------------------------------------------------------
     # Pedestrian service – actuated vs recall, gap-aware
     # -----------------------------------------------------------------------
-    # Pass the full events_df (including gap markers) so segment IDs reset
-    # the call→service pairing state correctly at every discontinuity.
     df_ped_actuated, df_ped_recall = _classify_ped_service(df_events)
 
     for kind, df_ped in (('ped_actuated', df_ped_actuated), ('ped_recall', df_ped_recall)):
@@ -242,18 +237,18 @@ def plot_termination(
             continue
 
         df_ped = df_ped.copy()
-        df_ped['ID'] = pd.to_numeric(df_ped['ID'], errors='coerce').dropna().astype(int)
-        df_ped = df_ped.dropna(subset=['ID'])
-        df_ped['ID'] = df_ped['ID'].astype(int)
-        df_ped['_y'] = df_ped['ID'].map(phase_to_y)
-        df_ped = df_ped.dropna(subset=['_y'])  # skip phases not on the axis
+        df_ped['parameter'] = pd.to_numeric(df_ped['parameter'], errors='coerce').dropna().astype(int)
+        df_ped = df_ped.dropna(subset=['parameter'])
+        df_ped['parameter'] = df_ped['parameter'].astype(int)
+        df_ped['_y'] = df_ped['parameter'].map(phase_to_y)
+        df_ped = df_ped.dropna(subset=['_y'])  
 
         if df_ped.empty:
             continue
 
         style = _TERM_STYLES[kind]
         fig.add_trace(go.Scatter(
-            x=df_ped['TS_start'],
+            x=df_ped['timestamp'],
             y=df_ped['_y'] + _Y_OFFSET[kind],
             mode='markers',
             marker=dict(
@@ -264,7 +259,7 @@ def plot_termination(
             name=style['name'],
             showlegend=True,
             legendgroup=style['name'],
-            customdata=df_ped['ID'],
+            customdata=df_ped['parameter'],
             hovertemplate=(
                 f"<b>{style['name']}</b><br>"
                 "Phase: %{customdata}<br>"
@@ -288,7 +283,7 @@ def plot_termination(
             tickvals=y_tick_vals,
             ticktext=y_tick_text,
             range=[0.5, n_phases + 0.5],
-            fixedrange=True,  # disable y-axis zoom/pan
+            fixedrange=True,  
         ),
         showlegend=True,
         legend=dict(
@@ -300,10 +295,9 @@ def plot_termination(
         ),
         hovermode='closest',
         template='plotly_white',
-        dragmode='pan',  # default interaction mode
+        dragmode='pan',  
     )
 
-    # Constrain all scroll/zoom interactions to x-axis only
     fig.update_xaxes(fixedrange=False)
 
     return fig
@@ -314,16 +308,7 @@ def plot_termination(
 # ---------------------------------------------------------------------------
 
 def _validate_columns(df: pd.DataFrame, required: list[str]) -> None:
-    """
-    Raise ValueError if any required columns are absent.
-
-    Args:
-        df: DataFrame to check.
-        required: List of column names that must be present.
-
-    Raises:
-        ValueError: Listing the missing columns.
-    """
+    """Raise ValueError if any required columns are absent."""
     missing = [c for c in required if c not in df.columns]
     if missing:
         raise ValueError(
@@ -332,19 +317,7 @@ def _validate_columns(df: pd.DataFrame, required: list[str]) -> None:
 
 
 def _build_title(metadata: Dict[str, Any], suffix: str = '') -> str:
-    """
-    Construct a plot title from metadata.
-
-    Prefers ``{major_road_name} @ {minor_road_name}``; falls back to
-    ``intersection_name``.
-
-    Args:
-        metadata: Dict with road/intersection name keys.
-        suffix: String appended after the location name.
-
-    Returns:
-        Formatted title string.
-    """
+    """Construct a plot title from metadata."""
     major = str(metadata.get('major_road_name') or '').strip()
     minor = str(metadata.get('minor_road_name') or '').strip()
     intx  = str(metadata.get('intersection_name') or 'Intersection').strip()
@@ -360,18 +333,8 @@ def _build_title(metadata: Dict[str, Any], suffix: str = '') -> str:
 def _segment_id(df: pd.DataFrame) -> pd.Series:
     """
     Return a monotonically increasing integer segment ID per row.
-
-    Increments at every gap-marker row (Code == -1) so that rows within
-    the same uninterrupted data block share the same ID.  Mirrors the
-    implementation in counts.py and cycles.py.
-
-    Args:
-        df: DataFrame sorted by ``TS_start``, containing a ``Code`` column.
-
-    Returns:
-        ``int32`` Series aligned with *df*'s index.
     """
-    return (df['Code'] == _GAP_CODE).cumsum().astype(np.int32)
+    return (df['event_code'] == _GAP_CODE).cumsum().astype(np.int32)
 
 
 def _classify_ped_service(
@@ -379,86 +342,53 @@ def _classify_ped_service(
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
     Split Code 21 (Ped Begin Service) rows into actuated vs recall.
-
-    **Actuated**: at least one Code 45 (button press) for the same phase
-    appeared after the previous Code 21 for that phase *and within the same
-    continuous data segment*.
-
-    **Recall**: no Code 45 was detected before this Code 21 in the same
-    segment (controller is in ped-recall mode).
-
-    The implementation mirrors the vectorised state-machine in
-    ``counts.py::ped_counts()``:
-
-    1. Assign segment IDs from gap markers so no state crosses a
-       discontinuity.
-    2. Drop gap-marker rows; keep only Codes 21 and 45.
-    3. Within each ``(seg, phase)`` group, compute a cumulative Code-45
-       counter.  A shifted version gives the call count *at the moment the
-       previous Code 21 fired*.  A Code 21 is actuated when the current
-       call count exceeds that saved value.
-
-    Args:
-        df_events: Full raw events DataFrame including gap markers.
-            Must have columns ``[TS_start, Code, ID]``.
-
-    Returns:
-        Tuple ``(df_actuated, df_recall)`` — subsets of the Code 21 rows
-        from *df_events* (gap markers excluded, index preserved).
     """
     df_all = df_events.loc[
-        df_events['Code'].isin([_GAP_CODE, 21, 45])
+        df_events['event_code'].isin([_GAP_CODE, 21, 45])
     ].copy()
 
     if df_all.empty:
         return pd.DataFrame(), pd.DataFrame()
 
-    df_all = df_all.sort_values('TS_start').reset_index(drop=True)
+    df_all = df_all.sort_values('timestamp').reset_index(drop=True)
     df_all['_seg'] = _segment_id(df_all)
 
-    # Drop gap markers now that segments are assigned
-    df_p = df_all.loc[df_all['Code'].isin([21, 45])].copy()
+    df_p = df_all.loc[df_all['event_code'].isin([21, 45])].copy()
 
     if df_p.empty:
         return pd.DataFrame(), pd.DataFrame()
 
-    df_p['ID'] = pd.to_numeric(df_p['ID'], errors='coerce')
-    df_p = df_p.dropna(subset=['ID'])
-    df_p['ID'] = df_p['ID'].astype(int)
+    df_p['parameter'] = pd.to_numeric(df_p['parameter'], errors='coerce')
+    df_p = df_p.dropna(subset=['parameter'])
+    df_p['parameter'] = df_p['parameter'].astype(int)
 
-    df_p = df_p.sort_values(['_seg', 'ID', 'TS_start']).reset_index(drop=True)
+    df_p = df_p.sort_values(['_seg', 'parameter', 'timestamp']).reset_index(drop=True)
 
-    df_p['_is_21'] = (df_p['Code'] == 21).astype(np.int8)
-    df_p['_is_45'] = (df_p['Code'] == 45).astype(np.int8)
+    df_p['_is_21'] = (df_p['event_code'] == 21).astype(np.int8)
+    df_p['_is_45'] = (df_p['event_code'] == 45).astype(np.int8)
 
-    # Cumulative call count within each (seg, phase)
-    df_p['_call_cum'] = df_p.groupby(['_seg', 'ID'])['_is_45'].cumsum()
+    df_p['_call_cum'] = df_p.groupby(['_seg', 'parameter'])['_is_45'].cumsum()
 
-    # "Service group" index: increments after each Code 21
-    # (shift so the Code 21 itself belongs to the group it closes)
     df_p['_svc_grp'] = (
-        df_p.groupby(['_seg', 'ID'])['_is_21']
+        df_p.groupby(['_seg', 'parameter'])['_is_21']
         .cumsum()
         .shift(1)
         .fillna(0)
     )
 
-    # Within each service group, did any Code 45 appear?
     df_p['_has_call'] = (
-        df_p.groupby(['_seg', 'ID', '_svc_grp'])['_is_45']
+        df_p.groupby(['_seg', 'parameter', '_svc_grp'])['_is_45']
         .transform('sum') > 0
     )
 
-    svc_rows = df_p[df_p['Code'] == 21].copy()
+    svc_rows = df_p[df_p['event_code'] == 21].copy()
 
-    # Use original df_events index to return proper row subsets
-    # (df_p was reset_index'd, so map back via TS_start + ID + _seg match)
     actuated_mask = svc_rows['_has_call']
     recall_mask   = ~svc_rows['_has_call']
 
     return (
-        svc_rows.loc[actuated_mask, ['TS_start', 'Code', 'ID']].reset_index(drop=True),
-        svc_rows.loc[recall_mask,   ['TS_start', 'Code', 'ID']].reset_index(drop=True),
+        svc_rows.loc[actuated_mask, ['timestamp', 'event_code', 'parameter']].reset_index(drop=True),
+        svc_rows.loc[recall_mask,   ['timestamp', 'event_code', 'parameter']].reset_index(drop=True),
     )
 
 
@@ -468,31 +398,15 @@ def _add_maxout_lines(
     phase_to_y: Dict[int, int],
     n_con: int = 10,
 ) -> None:
-    """
-    Add per-phase rolling max-out proportion lines to *fig*.
-
-    The proportion is the fraction of Code 5 (Max Out) events among all
-    termination events (codes 4, 5, 6) over a rolling window of *n_con*
-    observations.  The line is scaled and offset to sit within the ±0.33
-    band around each phase's sequential y-position.
-
-    Args:
-        fig: Figure to mutate in-place.
-        df: Clean events DataFrame (gap markers already excluded), with
-            ``_y`` column containing sequential y-positions.
-        phase_to_y: Mapping of original phase ID → sequential y-position,
-            used to place the reference guide lines correctly.
-        n_con: Rolling window size in cycles.
-    """
-    df_term = df[df['Code'].isin([4, 5, 6])].copy()
+    """Add per-phase rolling max-out proportion lines to *fig*."""
+    df_term = df[df['event_code'].isin([4, 5, 6])].copy()
     if df_term.empty:
         return
 
-    df_term = df_term.sort_values(['ID', 'TS_start'])
-    df_term['is_maxout'] = (df_term['Code'] == 5).astype(float)
+    df_term = df_term.sort_values(['parameter', 'timestamp'])
+    df_term['is_maxout'] = (df_term['event_code'] == 5).astype(float)
 
-    # Reference guide lines at 1/3 boundaries (legacy visual aid)
-    x_range = [df_term['TS_start'].min(), df_term['TS_start'].max()]
+    x_range = [df_term['timestamp'].min(), df_term['timestamp'].max()]
     max_y = max(phase_to_y.values()) if phase_to_y else 1
     for y_third in np.arange(2 / 3, max_y + 1, 1 / 3):
         fig.add_trace(go.Scatter(
@@ -504,17 +418,15 @@ def _add_maxout_lines(
             hoverinfo='skip',
         ))
 
-    # Per-phase rolling mean line, plotted at the sequential y-position
-    for phase_id, grp in df_term.groupby('ID'):
+    for phase_id, grp in df_term.groupby('parameter'):
         y_pos = phase_to_y.get(int(phase_id))
         if y_pos is None:
             continue
-        grp = grp.sort_values('TS_start')
+        grp = grp.sort_values('timestamp')
         rolling_mean = grp['is_maxout'].rolling(n_con, center=True, min_periods=1).mean()
-        # Scale: 0 → y_pos-0.333, 0.5 → y_pos, 1 → y_pos+0.333
         y_vals = rolling_mean * (2 / 3) + y_pos - (1 / 3)
         fig.add_trace(go.Scatter(
-            x=grp['TS_start'],
+            x=grp['timestamp'],
             y=y_vals,
             mode='lines',
             line=dict(color='lightgray', width=1),

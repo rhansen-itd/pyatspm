@@ -23,7 +23,7 @@ from ..analysis.detectors import _reconstruct_intervals
 # ---------------------------------------------------------------------------
 
 # Y-axis layout: each pair occupies a 3-unit band.
-# det_a sits at band_base + 2, det_b at band_base + 1 (matching legacy).
+# det_a sits at band_base + 2, det_b at band_base + 1.
 _BAND_HEIGHT  = 3
 _DET_A_OFFSET = 2
 _DET_B_OFFSET = 1
@@ -195,7 +195,7 @@ def plot_detector_comparison(
     intervals are reconstructed via
     :func:`~atspm.analysis.detectors._reconstruct_intervals` and rendered as
     horizontal line segments on a shared local-time axis.  Pairs are stacked
-    vertically with a 3-unit Y-band gap, matching the legacy layout.
+    vertically with a 3-unit Y-band gap.
 
     **Legend** -- contains only anomaly-type entries (detector lines are
     self-labelled by their Y-axis tick text and are excluded from the legend):

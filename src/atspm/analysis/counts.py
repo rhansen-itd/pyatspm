@@ -10,7 +10,7 @@ actuation counts, both on a time-bin or per-cycle basis.
 Package Location: src/atspm/analysis/counts.py
 
 Gap Marker Rule:
-    Rows with Code == -1 (event_code = -1, parameter = -1) mark data
+    Rows with event_code == -1 (event_code = -1, parameter = -1) mark data
     discontinuities in the events table.  All stateful logic — phase
     signal-state forward-fill, pedestrian call-to-service pairing, detector
     on/off carry-forward — must treat a gap marker as a hard reset for ALL
@@ -62,9 +62,9 @@ def vehicle_counts(
     made after it.
 
     Args:
-        events_df: Legacy-format DataFrame with columns
-            ``[TS_start, Code, ID, Cycle_start, Coord_plan]``.
-            ``TS_start`` and ``Cycle_start`` must be timezone-aware
+        events_df: Flat DataFrame with columns
+            ``[timestamp, event_code, parameter, cycle_start, coord_plan]``.
+            ``timestamp`` and ``cycle_start`` must be timezone-aware
             ``datetime64`` or UTC-epoch floats (both are handled).
         movements: Mapping of movement label to list of detector IDs.
             Example: ``{"EBL": [5, 6], "EBT": [7, 8], "NBL": [1]}``.
@@ -80,7 +80,7 @@ def vehicle_counts(
             included as additional columns alongside movement totals.
 
     Returns:
-        DataFrame indexed by ``Time`` (bin start or ``Cycle_start``).
+        DataFrame indexed by ``Time`` (bin start or ``cycle_start``).
         Columns are movement labels followed by ``TEV`` (total entering
         vehicles), then optionally individual detector IDs if
         *include_detectors* is ``True``.
@@ -88,7 +88,7 @@ def vehicle_counts(
         detector columns are ``int`` when *hourly* is ``False``.
     """
     # ---- isolate detector-on events (gap markers are Code -1, never 82) ----
-    df_det = events_df.loc[events_df["Code"] == 82].copy()
+    df_det = events_df.loc[events_df["event_code"] == 82].copy()
 
     if df_det.empty:
         return pd.DataFrame()
@@ -141,8 +141,8 @@ def ped_counts(
     Recall (Code 21 without a prior Code 45 in the same segment) is excluded.
 
     Args:
-        events_df: Legacy-format DataFrame with columns
-            ``[TS_start, Code, ID, Cycle_start]``.  Gap markers (Code -1)
+        events_df: Flat DataFrame with columns
+            ``[timestamp, event_code, parameter, cycle_start]``.  Gap markers (Code -1)
             must be present in this DataFrame to take effect.
         bin_len: Aggregation interval in minutes, or ``"cycle"`` for
             per-cycle aggregation.  Default ``60``.
@@ -154,70 +154,56 @@ def ped_counts(
         for each phase with activity, plus ``"Ped Total"``.
         Returns an empty DataFrame when no relevant events are present.
     """
-    # Include gap markers so _segment_id can see them, then filter to
-    # ped-relevant codes for actual processing.
-    df_all = events_df.loc[events_df["Code"].isin([_GAP_CODE, 21, 45])].copy()
+    df_all = events_df.loc[events_df["event_code"].isin([_GAP_CODE, 21, 45])].copy()
     if df_all.empty:
         return pd.DataFrame()
 
-    df_all = df_all.sort_values("TS_start").reset_index(drop=True)
+    df_all = df_all.sort_values("timestamp").reset_index(drop=True)
 
-    # Assign a segment ID that increments at each gap marker.
-    # Gap marker rows themselves are dropped after segment assignment.
     df_all["_seg"] = _segment_id(df_all)
-    df_p = df_all.loc[df_all["Code"].isin([21, 45])].copy()
+    df_p = df_all.loc[df_all["event_code"].isin([21, 45])].copy()
 
     if df_p.empty:
         return pd.DataFrame()
 
-    df_p = df_p.sort_values(["_seg", "ID", "TS_start"]).reset_index(drop=True)
+    df_p = df_p.sort_values(["_seg", "parameter", "timestamp"]).reset_index(drop=True)
 
-    # ---- vectorised legitimate-service detection ----------------------------
-    # Grouping by (_seg, ID) ensures no state crosses a gap marker.
-    #
-    # Within each group:
-    #   1. Assign a "service group" index that increments at each Code 21
-    #      (shifted so the 21 itself belongs to the group it closes).
-    #   2. A Code 21 is legitimate when its group contained at least one
-    #      Code 45.
-
-    df_p["_is_21"] = (df_p["Code"] == 21).astype(np.int8)
-    df_p["_is_45"] = (df_p["Code"] == 45).astype(np.int8)
+    df_p["_is_21"] = (df_p["event_code"] == 21).astype(np.int8)
+    df_p["_is_45"] = (df_p["event_code"] == 45).astype(np.int8)
 
     df_p["_svc_grp"] = (
-        df_p.groupby(["_seg", "ID"])["_is_21"]
+        df_p.groupby(["_seg", "parameter"])["_is_21"]
         .cumsum()
         .shift(1)
         .fillna(0)
     )
 
     df_p["_has_call"] = (
-        df_p.groupby(["_seg", "ID", "_svc_grp"])["_is_45"]
+        df_p.groupby(["_seg", "parameter", "_svc_grp"])["_is_45"]
         .transform("sum") > 0
     )
 
-    legit_mask = (df_p["Code"] == 21) & df_p["_has_call"]
+    legit_mask = (df_p["event_code"] == 21) & df_p["_has_call"]
     df_legit = df_p.loc[legit_mask].copy()
 
     if df_legit.empty:
         return pd.DataFrame()
 
-    # ---- aggregate ----------------------------------------------------------
     hourly_factor = 1.0
     if bin_len == "cycle":
         df_counts = (
-            df_legit.groupby(["Cycle_start", "ID"])
+            df_legit.groupby(["cycle_start", "parameter"])
             .size()
             .unstack(fill_value=0)
         )
     else:
         hourly_factor = (60.0 / int(bin_len)) if hourly else 1.0
         df_counts = (
-            df_legit.set_index("TS_start")
-            .groupby("ID")
+            df_legit.set_index("timestamp")
+            .groupby("parameter")
             .resample(f"{int(bin_len)}min")
             .size()
-            .unstack(level="ID")
+            .unstack(level="parameter")
             .fillna(0)
             .astype(int)
         )
@@ -240,21 +226,6 @@ def ped_counts(
 # ---------------------------------------------------------------------------
 
 def parse_movements_from_config(config: Dict[str, Any]) -> Dict[str, List[int]]:
-    """
-    Extract movement-to-detector mapping from a flat config dict.
-
-    Config keys of the form ``TM_{label}`` (e.g., ``TM_EBL``) whose values
-    are comma-separated detector ID strings are parsed into a dict of
-    ``{label: [det_id, ...]}``.
-
-    Args:
-        config: Flat config dict as returned by
-            ``DatabaseManager.get_config_at_date()``.
-
-    Returns:
-        Dict mapping movement labels to lists of integer detector IDs.
-        Empty dict if no ``TM_*`` keys are found.
-    """
     movements: Dict[str, List[int]] = {}
     for key, value in config.items():
         if not key.startswith("TM_") or key == "TM_Exclusions":
@@ -273,19 +244,6 @@ def parse_movements_from_config(config: Dict[str, Any]) -> Dict[str, List[int]]:
 
 
 def parse_exclusions_from_config(config: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """
-    Extract exclusion rules from a flat config dict.
-
-    Reads the ``TM_Exclusions`` JSON field produced by
-    ``DatabaseManager._parse_exclusions()``.
-
-    Args:
-        config: Flat config dict.
-
-    Returns:
-        List of exclusion dicts with keys ``detector`` (int),
-        ``phase`` (int), ``status`` (str).
-    """
     raw = config.get("TM_Exclusions")
     if not raw or (isinstance(raw, float) and pd.isna(raw)):
         return []
@@ -299,10 +257,9 @@ def parse_exclusions_from_config(config: Dict[str, Any]) -> List[Dict[str, Any]]
 # Private helpers
 # ---------------------------------------------------------------------------
 
-# Phase signal-state codes used for exclusion filtering
-_PHASE_GREEN_CODES  = frozenset({1})         # Green start
-_PHASE_YELLOW_CODES = frozenset({8})         # Yellow start
-_PHASE_RED_CODES    = frozenset({9, 11, 12}) # Red clearance, Red, Red+overlap
+_PHASE_GREEN_CODES  = frozenset({1})         
+_PHASE_YELLOW_CODES = frozenset({8})         
+_PHASE_RED_CODES    = frozenset({9, 11, 12}) 
 _ALL_PHASE_CODES    = _PHASE_GREEN_CODES | _PHASE_YELLOW_CODES | _PHASE_RED_CODES
 
 _STATUS_CODES: Dict[str, frozenset] = {
@@ -319,21 +276,7 @@ _CODE_TO_STATE: Dict[int, str] = {
 
 
 def _segment_id(df: pd.DataFrame) -> pd.Series:
-    """
-    Return a Series of integer segment IDs, one per row of *df*.
-
-    The segment ID starts at 0 and increments by 1 at every row where
-    ``Code == _GAP_CODE`` (-1).  Rows within the same continuous block of
-    data share the same segment ID.  Gap-marker rows themselves belong to
-    the segment that closes at the gap; callers drop them after this call.
-
-    Args:
-        df: DataFrame sorted by ``TS_start``, containing a ``Code`` column.
-
-    Returns:
-        Integer Series aligned with *df*'s index.
-    """
-    return (df["Code"] == _GAP_CODE).cumsum().astype(np.int32)
+    return (df["event_code"] == _GAP_CODE).cumsum().astype(np.int32)
 
 
 def _apply_exclusions(
@@ -341,62 +284,32 @@ def _apply_exclusions(
     events_df: pd.DataFrame,
     exclusions: List[Dict[str, Any]],
 ) -> pd.DataFrame:
-    """
-    Remove detector actuations that occur while a specified phase is in a
-    given signal state.
-
-    Phase state is forward-filled from Code 1/8/9/11/12 events.  A gap
-    marker (Code -1) resets the forward-fill for all phases, so that signal
-    state from before a data discontinuity cannot affect exclusion decisions
-    made after it.
-
-    For each exclusion rule ``{detector, phase, status}``:
-    - Extract phase state-change events and gap markers for *phase*.
-    - Insert ``None`` sentinels at gap-marker timestamps to break the fill.
-    - Use ``merge_asof`` backward-fill to assign state to each actuation.
-    - Drop actuations where state matches *status*.
-
-    NaN state (actuation after a gap but before the next known phase-state
-    event) is treated as unknown and the actuation is kept.
-
-    Args:
-        df_det:     Detector-on events (Code 82) to filter.
-        events_df:  Full raw event DataFrame (needed for phase state and gaps).
-        exclusions: List of exclusion rule dicts.
-
-    Returns:
-        Filtered copy of *df_det*.
-    """
     if df_det.empty or not exclusions:
         return df_det
 
     needed_phases = {int(exc["phase"]) for exc in exclusions}
 
-    # Build a gap-reset state DataFrame for each needed phase.
-    # Gap-marker rows are inserted with _state = None so that merge_asof
-    # backward-fill returns NaN for any actuation after a gap (until the
-    # next real phase-state event appears).
     phase_state_df: Dict[int, pd.DataFrame] = {}
     for ph in needed_phases:
         ph_events = events_df.loc[
-            events_df["Code"].isin(_ALL_PHASE_CODES) & (events_df["ID"] == ph),
-            ["TS_start", "Code"],
+            events_df["event_code"].isin(_ALL_PHASE_CODES) & (events_df["parameter"] == ph),
+            ["timestamp", "event_code"],
         ].copy()
-        ph_events["_state"] = ph_events["Code"].map(_CODE_TO_STATE)
+        ph_events["_state"] = ph_events["event_code"].map(_CODE_TO_STATE)
 
         gap_events = events_df.loc[
-            events_df["Code"] == _GAP_CODE,
-            ["TS_start"],
+            events_df["event_code"] == _GAP_CODE,
+            ["timestamp"],
         ].copy()
-        gap_events["_state"] = None  # explicit reset sentinel
+        gap_events["_state"] = None
 
         combined = (
             pd.concat(
-                [ph_events[["TS_start", "_state"]], gap_events],
+                [ph_events[["timestamp", "_state"]], gap_events],
                 ignore_index=True,
             )
-            .sort_values("TS_start")
-            .drop_duplicates("TS_start", keep="last")
+            .sort_values("timestamp")
+            .drop_duplicates("timestamp", keep="last")
             .reset_index(drop=True)
         )
 
@@ -419,11 +332,10 @@ def _apply_exclusions(
 
         state_df = phase_state_df[ph]
 
-        # Carry original df_det index through the merge
-        mask = df_det["ID"] == det_id
+        mask = df_det["parameter"] == det_id
         det_subset = (
-            df_det.loc[mask, ["TS_start"]]
-            .sort_values("TS_start")
+            df_det.loc[mask, ["timestamp"]]
+            .sort_values("timestamp")
             .reset_index()
             .rename(columns={"index": "_orig_idx"})
         )
@@ -431,14 +343,10 @@ def _apply_exclusions(
         if det_subset.empty:
             continue
 
-        # merge_asof backward-fill: each actuation gets the most recent
-        # state entry at or before its timestamp.  Gap-sentinel rows
-        # (state=None) cause NaN to be returned for actuations that follow
-        # a gap but precede the next real phase-state event.
         merged = pd.merge_asof(
             det_subset,
             state_df,
-            on="TS_start",
+            on="timestamp",
             direction="backward",
         )
 
@@ -449,17 +357,8 @@ def _apply_exclusions(
 
 
 def _aggregate_by_cycle(df_det: pd.DataFrame) -> pd.DataFrame:
-    """
-    Pivot detector counts per cycle.
-
-    Args:
-        df_det: Filtered Code-82 events with ``Cycle_start`` and ``ID`` columns.
-
-    Returns:
-        DataFrame with ``Cycle_start`` as index and detector IDs as columns.
-    """
     result = (
-        df_det.groupby(["Cycle_start", "ID"])["Code"]
+        df_det.groupby(["cycle_start", "parameter"])["event_code"]
         .count()
         .unstack(fill_value=0)
     )
@@ -467,22 +366,12 @@ def _aggregate_by_cycle(df_det: pd.DataFrame) -> pd.DataFrame:
 
 
 def _aggregate_by_bin(df_det: pd.DataFrame, bin_len: int) -> pd.DataFrame:
-    """
-    Resample detector counts into fixed-width time bins.
-
-    Args:
-        df_det:  Filtered Code-82 events.
-        bin_len: Bin width in minutes.
-
-    Returns:
-        DataFrame with time-bin start as index and detector IDs as columns.
-    """
     result = (
-        df_det.set_index("TS_start")
-        .groupby("ID")["Code"]
+        df_det.set_index("timestamp")
+        .groupby("parameter")["event_code"]
         .resample(f"{bin_len}min")
         .count()
-        .unstack(level="ID")
+        .unstack(level="parameter")
         .fillna(0)
         .astype(int)
     )
@@ -494,17 +383,6 @@ def _sum_movements(
     movements: Dict[str, List[int]],
     hourly_factor: float,
 ) -> pd.DataFrame:
-    """
-    Sum detector columns into movement totals, vectorised via matrix multiply.
-
-    Args:
-        det_agg:       Aggregated detector counts (rows=time/cycle, cols=det IDs).
-        movements:     Mapping of movement label to list of detector IDs.
-        hourly_factor: Scalar applied to all counts.
-
-    Returns:
-        DataFrame with movement columns plus ``TEV``, same index as *det_agg*.
-    """
     if not movements:
         return pd.DataFrame(index=det_agg.index)
 

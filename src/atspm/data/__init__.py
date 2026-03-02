@@ -8,7 +8,7 @@ Modules:
 - manager:    Database initialization and configuration import
 - ingestion:  Event data ingestion from .datZ files
 - processing: Cycle detection processing
-- reader:     Legacy adapter for reading data in flat format
+- reader:     Adapter for reading data in flat format
 - counts:     Vehicle and pedestrian count orchestration
 """
 
@@ -16,8 +16,8 @@ from .manager import DatabaseManager, init_db, import_config
 from .ingestion import IngestionEngine, run_ingestion
 from .processing import CycleProcessor, run_cycle_processing
 from .reader import (
-    get_legacy_dataframe,
-    get_legacy_dataframe_by_date,
+    get_events_with_cycles_df,
+    get_events_with_cycles_df_by_date,
     get_coordination_data,
     get_config_df,
     get_config_dict,
@@ -57,8 +57,8 @@ __all__ = [
     'CycleProcessor',
     'run_cycle_processing',
     # Reader
-    'get_legacy_dataframe',
-    'get_legacy_dataframe_by_date',
+    'get_events_with_cycles_df',
+    'get_events_with_cycles_df_by_date',
     'get_coordination_data',
     'get_config_df',
     'get_config_dict',

@@ -54,7 +54,7 @@ import numpy as np
 import pandas as pd
 
 from .manager import DatabaseManager
-from .reader import get_legacy_dataframe
+from .reader import get_events_with_cycles_df
 from ..analysis.counts import (
     parse_exclusions_from_config,
     parse_movements_from_config,
@@ -74,7 +74,7 @@ class CountEngine:
 
     All date/time arguments are interpreted in the intersection's local
     timezone (read from the ``metadata`` table).  The underlying
-    ``get_legacy_dataframe`` call converts to UTC epochs for the SQL query
+    ``get_events_with_cycles_df`` call converts to UTC epochs for the SQL query
     and returns timezone-aware timestamps.
 
     Example::
@@ -452,7 +452,7 @@ class CountEngine:
         # 2. Downgrade bins that contain a gap marker
         # ------------------------------------------------------------------
         gap_ts = events_df.loc[
-            events_df["Code"] == _GAP_CODE, "TS_start"
+            events_df["event_code"] == _GAP_CODE, "timestamp"
         ]
         # Convert to UTC epoch floats for comparison
         if not gap_ts.empty:
@@ -539,7 +539,7 @@ class CountEngine:
         event_codes: Optional[List[int]],
     ) -> pd.DataFrame:
         """
-        Fetch events from the database via the legacy reader.
+        Fetch events from the database via the reader.
 
         Args:
             start:       Naive local start datetime.
@@ -547,9 +547,9 @@ class CountEngine:
             event_codes: Code filter list, or ``None`` to load all codes.
 
         Returns:
-            Legacy-format DataFrame with tz-aware ``TS_start`` / ``Cycle_start``.
+            DataFrame with tz-aware ``timestamp`` / ``cycle_start``.
         """
-        return get_legacy_dataframe(
+        return get_events_with_cycles_df(
             db_path=self.db_path,
             start=start,
             end=end,

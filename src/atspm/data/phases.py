@@ -28,7 +28,7 @@ import numpy as np
 import pandas as pd
 
 from .manager import DatabaseManager
-from .reader import get_legacy_dataframe
+from .reader import get_events_with_cycles_df
 from ..analysis.phases import phase_splits as _phase_splits_core, ReportMode
 
 # Phase state event codes — must include gap marker so the core sees discontinuities
@@ -282,7 +282,7 @@ class PhaseEngine:
         # ------------------------------------------------------------------
         # 2. Downgrade bins containing a gap marker
         # ------------------------------------------------------------------
-        gap_ts = events_df.loc[events_df["Code"] == _GAP_CODE, "TS_start"]
+        gap_ts = events_df.loc[events_df["event_code"] == _GAP_CODE, "timestamp"]
         if not gap_ts.empty:
             sample = gap_ts.iloc[0]
             if hasattr(sample, "timestamp"):
@@ -368,10 +368,10 @@ class PhaseEngine:
             end:   Naive local end datetime.
 
         Returns:
-            Legacy-format DataFrame with tz-aware ``TS_start`` / ``Cycle_start``.
+            DataFrame with tz-aware ``timestamp`` / ``cycle_start``.
         """
         codes = sorted(set(_PHASE_CODES) | {_GAP_CODE})
-        return get_legacy_dataframe(
+        return get_events_with_cycles_df(
             db_path=self.db_path,
             start=start,
             end=end,
