@@ -655,6 +655,162 @@ def handle_discrepancies(args: argparse.Namespace) -> None:
             if getattr(args, "verbose", False):
                 traceback.print_exc()
 
+# ---------------------------------------------------------------------------
+# plot-coordination
+# ---------------------------------------------------------------------------
+
+def _plot_coordination_single_intersection(
+    target_name: str,
+    args: argparse.Namespace,
+) -> None:
+    """Core logic to generate a coordination plot for a specific window."""
+    import pytz
+    from atspm.reports.generators import PlotGenerator
+
+    target_dir = _get_target_dir(target_name)
+    meta       = _load_metadata(target_dir)
+    db_path    = _resolve_db_path(target_dir, meta)
+
+    if not db_path.exists():
+        _die(f"Database not found: {db_path}\nRun 'atspm process --target {target_name}' first.")
+
+    output_dir = target_dir / "outputs"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    int_name = meta.get("intersection_name", target_name)
+    tz_str = args.timezone or meta.get("timezone") or "US/Mountain"
+    tz = pytz.timezone(tz_str)
+
+    try:
+        start_naive = datetime.fromisoformat(args.start)
+        end_naive   = datetime.fromisoformat(args.end)
+        start_dt = tz.localize(start_naive)
+        end_dt   = tz.localize(end_naive)
+    except ValueError as exc:
+        _die(f"Invalid datetime format: {exc}. Use ISO-8601 (e.g. 2024-06-01T06:00:00).")
+
+    print(f"\n📈  Generating coordination plot for {int_name}")
+    print(f"    Window: {start_dt.isoformat()} → {end_dt.isoformat()}")
+
+    # Output to a date folder based on the start time
+    date_str = start_dt.strftime("%Y-%m-%d")
+    date_dir = output_dir / date_str
+    date_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        gen = PlotGenerator(db_path, output_dir)
+        gen._generate_coordination(
+            date_str=date_str,
+            start_dt=start_dt,
+            end_dt=end_dt,
+            metadata=gen._get_metadata(),
+            date_dir=date_dir,
+            tz_str=tz_str,
+        )
+    except Exception as exc:
+        if args.verbose:
+            traceback.print_exc()
+        _die(f"Plot generation failed: {exc}")
+
+
+def handle_plot_coordination(args: argparse.Namespace) -> None:
+    """Generate interactive coordination plots."""
+    intersections_dir = _get_intersections_dir()
+    if getattr(args, "all", False):
+        targets = [p.name for p in intersections_dir.iterdir() if p.is_dir()]
+        if not targets:
+            _die(f"No intersection directories found in {intersections_dir}")
+        print(f"\n🌍 Batch generating coordination plots for {len(targets)} intersections...")
+    else:
+        targets = [_resolve_target_name(args.target, args.targetid)]
+
+    for target_name in targets:
+        try:
+            _plot_coordination_single_intersection(target_name, args)
+        except SystemExit:
+            print(f"\n⏭️ Skipping {target_name} due to errors.", file=sys.stderr)
+        except Exception as exc:
+            print(f"\n❌ Unexpected error processing {target_name}: {exc}", file=sys.stderr)
+            if getattr(args, "verbose", False):
+                traceback.print_exc()
+
+# ---------------------------------------------------------------------------
+# plot-termination
+# ---------------------------------------------------------------------------
+
+def _plot_termination_single_intersection(
+    target_name: str,
+    args: argparse.Namespace,
+) -> None:
+    """Core logic to generate a termination plot for a specific window."""
+    import pytz
+    from atspm.reports.generators import PlotGenerator
+
+    target_dir = _get_target_dir(target_name)
+    meta       = _load_metadata(target_dir)
+    db_path    = _resolve_db_path(target_dir, meta)
+
+    if not db_path.exists():
+        _die(f"Database not found: {db_path}\nRun 'atspm process --target {target_name}' first.")
+
+    output_dir = target_dir / "outputs"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    int_name = meta.get("intersection_name", target_name)
+    tz_str = args.timezone or meta.get("timezone") or "US/Mountain"
+    tz = pytz.timezone(tz_str)
+
+    try:
+        start_naive = datetime.fromisoformat(args.start)
+        end_naive   = datetime.fromisoformat(args.end)
+        start_dt = tz.localize(start_naive)
+        end_dt   = tz.localize(end_naive)
+    except ValueError as exc:
+        _die(f"Invalid datetime format: {exc}. Use ISO-8601 (e.g. 2024-06-01T06:00:00).")
+
+    print(f"\n📈  Generating termination plot for {int_name}")
+    print(f"    Window: {start_dt.isoformat()} → {end_dt.isoformat()}")
+
+    date_str = start_dt.strftime("%Y-%m-%d")
+    date_dir = output_dir / date_str
+    date_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        gen = PlotGenerator(db_path, output_dir)
+        gen._generate_termination(
+            date_str=date_str,
+            start_dt=start_dt,
+            end_dt=end_dt,
+            metadata=gen._get_metadata(),
+            date_dir=date_dir,
+            tz_str=tz_str,
+        )
+    except Exception as exc:
+        if args.verbose:
+            traceback.print_exc()
+        _die(f"Plot generation failed: {exc}")
+
+
+def handle_plot_termination(args: argparse.Namespace) -> None:
+    """Generate interactive termination plots."""
+    intersections_dir = _get_intersections_dir()
+    if getattr(args, "all", False):
+        targets = [p.name for p in intersections_dir.iterdir() if p.is_dir()]
+        if not targets:
+            _die(f"No intersection directories found in {intersections_dir}")
+        print(f"\n🌍 Batch generating termination plots for {len(targets)} intersections...")
+    else:
+        targets = [_resolve_target_name(args.target, args.targetid)]
+
+    for target_name in targets:
+        try:
+            _plot_termination_single_intersection(target_name, args)
+        except SystemExit:
+            print(f"\n⏭️ Skipping {target_name} due to errors.", file=sys.stderr)
+        except Exception as exc:
+            print(f"\n❌ Unexpected error processing {target_name}: {exc}", file=sys.stderr)
+            if getattr(args, "verbose", False):
+                traceback.print_exc()
 
 # ---------------------------------------------------------------------------
 # plot-detectors
@@ -983,6 +1139,44 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Print full tracebacks for any per-date generation errors."
     )
     p_rep.set_defaults(func=handle_report)
+
+    # ------------------------------------------------------------------
+    # plot-coordination
+    # ------------------------------------------------------------------
+    p_coord = subs.add_parser(
+        "plot-coordination",
+        help="Generate a coordination / split diagram for a specific time window.",
+        description="Generates an interactive coordination plot.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    group_coord = p_coord.add_mutually_exclusive_group(required=True)
+    group_coord.add_argument("--target", metavar="FOLDER", help="Exact intersection folder name.")
+    group_coord.add_argument("--targetid", metavar="ID", help="Intersection ID prefix.")
+    group_coord.add_argument("--all", action="store_true", help="Generate plots for all intersections in the directory.")
+    p_coord.add_argument("--start", required=True, metavar="ISO8601", help="Window start (local time, ISO-8601).")
+    p_coord.add_argument("--end", required=True, metavar="ISO8601", help="Window end, exclusive (local time, ISO-8601).")
+    p_coord.add_argument("--timezone", default=None, metavar="TZ", help="Override the timezone from metadata.json.")
+    p_coord.add_argument("--verbose", action="store_true", default=False, help="Print full tracebacks for any errors.")
+    p_coord.set_defaults(func=handle_plot_coordination)
+
+    # ------------------------------------------------------------------
+    # plot-termination
+    # ------------------------------------------------------------------
+    p_term = subs.add_parser(
+        "plot-termination",
+        help="Generate a phase termination plot for a specific time window.",
+        description="Generates an interactive phase termination plot.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    group_term = p_term.add_mutually_exclusive_group(required=True)
+    group_term.add_argument("--target", metavar="FOLDER", help="Exact intersection folder name.")
+    group_term.add_argument("--targetid", metavar="ID", help="Intersection ID prefix.")
+    group_term.add_argument("--all", action="store_true", help="Generate plots for all intersections in the directory.")
+    p_term.add_argument("--start", required=True, metavar="ISO8601", help="Window start (local time, ISO-8601).")
+    p_term.add_argument("--end", required=True, metavar="ISO8601", help="Window end, exclusive (local time, ISO-8601).")
+    p_term.add_argument("--timezone", default=None, metavar="TZ", help="Override the timezone from metadata.json.")
+    p_term.add_argument("--verbose", action="store_true", default=False, help="Print full tracebacks for any errors.")
+    p_term.set_defaults(func=handle_plot_termination)
 
     # ------------------------------------------------------------------
     # discrepancies
