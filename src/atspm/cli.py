@@ -1,13 +1,17 @@
 """
 ATSPM Unified Command-Line Interface
 
-Exposes subcommands that replace the legacy ``scripts/`` folder:
+Exposes subcommands from intersection configuration setup through reporting and visualization:
 
-    atspm setup          --targetid <id>             Create a new intersection environment
-    atspm process        --targetid <id> [...]       Ingest data and compute cycles
-    atspm report         --targetid <id> [...]       Generate ATSPM performance reports
-    atspm discrepancies  --targetid <id> [...]       Analyze detector discrepancies
-    atspm plot-detectors --targetid <id> [...]       Generate interactive detector comparison plots
+    atspm setup              --targetid <id>             Create a new intersection environment
+    atspm process            --targetid <id> [...]       Ingest data and compute cycles
+    atspm report             --targetid <id> [...]       Generate ATSPM performance reports
+    atspm counts             --targetid <id> [...]       Generate vehicle and pedestrian counts
+    atspm splits             --targetid <id> [...]       Generate phase split and timing records
+    atspm discrepancies      --targetid <id> [...]       Analyze detector discrepancies
+    atspm plot-detectors     --targetid <id> [...]       Generate interactive detector comparison plots
+    atspm plot-coordination  --targetid <id> [...]       Generate interactive coordination diagram plots
+    atspm plot-termination   --targetid <id> [...]       Generate interactive phase termination plots
 
 The package must be installed (``pip install -e .``) for the ``atspm`` entry
 point to be available.  All logic uses clean absolute imports from the
@@ -437,6 +441,168 @@ def handle_process(args: argparse.Namespace) -> None:
             print(f"\n⏭️ Skipping {target_name} due to errors.", file=sys.stderr)
         except Exception as exc:
             print(f"\n❌ Unexpected error processing {target_name}: {exc}", file=sys.stderr)
+            if getattr(args, "verbose", False):
+                traceback.print_exc()
+
+
+# ---------------------------------------------------------------------------
+# counts
+# ---------------------------------------------------------------------------
+
+def _counts_single_intersection(target_name: str, args: argparse.Namespace) -> None:
+    """Core logic to generate counts for a single intersection."""
+    from atspm.data.counts import CountEngine
+
+    target_dir = _get_target_dir(target_name)
+    meta       = _load_metadata(target_dir)
+    db_path    = _resolve_db_path(target_dir, meta)
+    
+    output_dir = target_dir / "outputs"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    int_name = meta.get("intersection_name", target_name)
+    timezone = args.timezone or meta.get("timezone") or "US/Mountain"
+
+    if not db_path.exists():
+        _die(
+            f"Database not found: {db_path}\n"
+            f"Run 'atspm process --target {target_name}' first."
+        )
+
+    print(f"\n🚗  Generating counts for {int_name}")
+    print(f"    DB:     {db_path.name}")
+    print(f"    Window: {args.start} → {args.end}")
+    print(f"    Bins:   {args.bin_len}{' (hourly)' if args.hourly else ''}")
+
+    # handle bin_len type (int or string "cycle")
+    bin_len = args.bin_len
+    if bin_len.isdigit():
+        bin_len = int(bin_len)
+
+    engine = CountEngine(db_path=db_path, timezone=timezone)
+    
+    try:
+        if args.type == "vehicle":
+            engine.vehicle_counts(
+                start=args.start, end=args.end, bin_len=bin_len, hourly=args.hourly,
+                include_detectors=args.include_detectors, exclude_missing=args.exclude_missing,
+                output_dir=output_dir,
+            )
+        elif args.type == "ped":
+            engine.ped_counts(
+                start=args.start, end=args.end, bin_len=bin_len, hourly=args.hourly,
+                exclude_missing=args.exclude_missing, output_dir=output_dir,
+            )
+        else:
+            engine.combined_counts(
+                start=args.start, end=args.end, bin_len=bin_len, hourly=args.hourly,
+                include_detectors=args.include_detectors, exclude_missing=args.exclude_missing,
+                output_dir=output_dir,
+            )
+    except Exception as exc:
+        if args.verbose:
+            traceback.print_exc()
+        _die(f"Count generation failed: {exc}")
+
+
+def handle_counts(args: argparse.Namespace) -> None:
+    """Generate vehicle and pedestrian counts to CSV.
+    
+    Args:
+        args: Parsed CLI arguments.
+    """
+    intersections_dir = _get_intersections_dir()
+    
+    if getattr(args, "all", False):
+        targets = [p.name for p in intersections_dir.iterdir() if p.is_dir()]
+        if not targets:
+            _die(f"No intersection directories found in {intersections_dir}")
+        print(f"\n🌍 Batch generating counts for {len(targets)} intersections...")
+    else:
+        targets = [_resolve_target_name(args.target, args.targetid)]
+
+    for target_name in targets:
+        try:
+            _counts_single_intersection(target_name, args)
+        except SystemExit:
+            print(f"\n⏭️ Skipping {target_name} due to errors.", file=sys.stderr)
+        except Exception as exc:
+            print(f"\n❌ Unexpected error generating counts for {target_name}: {exc}", file=sys.stderr)
+            if getattr(args, "verbose", False):
+                traceback.print_exc()
+
+
+# ---------------------------------------------------------------------------
+# splits
+# ---------------------------------------------------------------------------
+
+def _splits_single_intersection(target_name: str, args: argparse.Namespace) -> None:
+    """Core logic to generate phase splits for a single intersection."""
+    from atspm.data.phases import PhaseEngine
+
+    target_dir = _get_target_dir(target_name)
+    meta       = _load_metadata(target_dir)
+    db_path    = _resolve_db_path(target_dir, meta)
+    
+    output_dir = target_dir / "outputs"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    int_name = meta.get("intersection_name", target_name)
+    timezone = args.timezone or meta.get("timezone") or "US/Mountain"
+
+    if not db_path.exists():
+        _die(
+            f"Database not found: {db_path}\n"
+            f"Run 'atspm process --target {target_name}' first."
+        )
+
+    print(f"\n⏱️   Generating phase splits for {int_name}")
+    print(f"    DB:     {db_path.name}")
+    print(f"    Window: {args.start} → {args.end}")
+    print(f"    Bins:   {args.bin_len}")
+
+    bin_len = args.bin_len
+    if bin_len.isdigit():
+        bin_len = int(bin_len)
+
+    engine = PhaseEngine(db_path=db_path, timezone=timezone)
+    
+    try:
+        engine.phase_splits(
+            start=args.start, end=args.end, bin_len=bin_len, 
+            report_mode=args.report_mode, phases=args.phases,
+            include_no_clearance=args.include_no_clearance, 
+            exclude_missing=args.exclude_missing, output_dir=output_dir,
+        )
+    except Exception as exc:
+        if args.verbose:
+            traceback.print_exc()
+        _die(f"Phase splits generation failed: {exc}")
+
+
+def handle_splits(args: argparse.Namespace) -> None:
+    """Generate binned or per-cycle phase split and timing records to CSV.
+    
+    Args:
+        args: Parsed CLI arguments.
+    """
+    intersections_dir = _get_intersections_dir()
+    
+    if getattr(args, "all", False):
+        targets = [p.name for p in intersections_dir.iterdir() if p.is_dir()]
+        if not targets:
+            _die(f"No intersection directories found in {intersections_dir}")
+        print(f"\n🌍 Batch generating phase splits for {len(targets)} intersections...")
+    else:
+        targets = [_resolve_target_name(args.target, args.targetid)]
+
+    for target_name in targets:
+        try:
+            _splits_single_intersection(target_name, args)
+        except SystemExit:
+            print(f"\n⏭️ Skipping {target_name} due to errors.", file=sys.stderr)
+        except Exception as exc:
+            print(f"\n❌ Unexpected error generating splits for {target_name}: {exc}", file=sys.stderr)
             if getattr(args, "verbose", False):
                 traceback.print_exc()
 
@@ -995,13 +1161,14 @@ def _build_parser() -> argparse.ArgumentParser:
 
     Returns:
         Configured ``ArgumentParser`` with ``setup``, ``process``,
-        ``report``, and ``discrepancies`` subcommands attached.
+        ``report``, ``counts``, ``splits``, and ``discrepancies``
+        subcommands attached.
     """
     parser = argparse.ArgumentParser(
         prog="atspm",
         description=(
             "ATSPM – Automated Traffic Signal Performance Measures\n"
-            "Unified CLI for intersection setup, data ingestion, reporting, and discrepancy analysis."
+            "Unified CLI for intersection setup, data ingestion, reporting, counts, splits, and discrepancy analysis."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -1064,12 +1231,6 @@ def _build_parser() -> argparse.ArgumentParser:
             "Enable Gap Fill mode (Path B): scan for and ingest historical gaps; "
             "scrub obsolete gap markers; surgically repair affected cycles."
         ),
-    )
-    p_proc.add_argument(
-        "--full",
-        action="store_true",
-        default=False,
-        help="Legacy alias for --fill-gaps.",
     )
     p_proc.add_argument(
         "--batch-size",
@@ -1139,6 +1300,64 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Print full tracebacks for any per-date generation errors."
     )
     p_rep.set_defaults(func=handle_report)
+
+    # ------------------------------------------------------------------
+    # counts
+    # ------------------------------------------------------------------
+    p_counts = subs.add_parser(
+        "counts",
+        help="Generate vehicle and pedestrian counts.",
+        description=(
+            "Generates binned or per-cycle volume counts to CSV.\n\n"
+            "Outputs are saved to:\n"
+            "  intersections/<target>/outputs/"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    group_counts = p_counts.add_mutually_exclusive_group(required=True)
+    group_counts.add_argument("--target", metavar="FOLDER", help="Exact intersection folder name.")
+    group_counts.add_argument("--targetid", metavar="ID", help="Intersection ID (prefix of folder name).")
+    group_counts.add_argument("--all", action="store_true", help="Generate counts for all intersections in the directory.")
+    
+    p_counts.add_argument("--start", required=True, metavar="YYYY-MM-DD", help="Query window start (local time).")
+    p_counts.add_argument("--end", required=True, metavar="YYYY-MM-DD", help="Query window end (local time).")
+    p_counts.add_argument("--bin-len", default="60", metavar="N", help="Aggregation interval in minutes, or 'cycle' (default: 60).")
+    p_counts.add_argument("--type", choices=["vehicle", "ped", "combined"], default="combined", help="Type of counts to run (default: combined).")
+    p_counts.add_argument("--hourly", action="store_true", help="Scale numeric bins to hourly flow rate.")
+    p_counts.add_argument("--include-detectors", action="store_true", help="Include raw per-detector count columns.")
+    p_counts.add_argument("--exclude-missing", action="store_true", help="Drop partial and missing bins from the output.")
+    p_counts.add_argument("--timezone", default=None, metavar="TZ", help="Override the timezone from metadata.json.")
+    p_counts.add_argument("--verbose", action="store_true", help="Print full tracebacks for any errors.")
+    p_counts.set_defaults(func=handle_counts)
+
+    # ------------------------------------------------------------------
+    # splits
+    # ------------------------------------------------------------------
+    p_splits = subs.add_parser(
+        "splits",
+        help="Generate phase split and timing records.",
+        description=(
+            "Generates binned or per-cycle phase timing splits to CSV.\n\n"
+            "Outputs are saved to:\n"
+            "  intersections/<target>/outputs/"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    group_splits = p_splits.add_mutually_exclusive_group(required=True)
+    group_splits.add_argument("--target", metavar="FOLDER", help="Exact intersection folder name.")
+    group_splits.add_argument("--targetid", metavar="ID", help="Intersection ID (prefix of folder name).")
+    group_splits.add_argument("--all", action="store_true", help="Generate splits for all intersections in the directory.")
+    
+    p_splits.add_argument("--start", required=True, metavar="YYYY-MM-DD", help="Query window start (local time).")
+    p_splits.add_argument("--end", required=True, metavar="YYYY-MM-DD", help="Query window end (local time).")
+    p_splits.add_argument("--bin-len", default="cycle", metavar="N", help="Aggregation interval in minutes, or 'cycle' (default: cycle).")
+    p_splits.add_argument("--report-mode", choices=["seconds", "total", "proportion"], default="seconds", help="How binned values are expressed (default: seconds).")
+    p_splits.add_argument("--phases", nargs="+", type=int, metavar="N", default=None, help="Filter to specific phase IDs.")
+    p_splits.add_argument("--include-no-clearance", action="store_true", help="Include phases with no yellow logged as green-only intervals.")
+    p_splits.add_argument("--exclude-missing", action="store_true", help="Drop partial and missing bins from the output.")
+    p_splits.add_argument("--timezone", default=None, metavar="TZ", help="Override the timezone from metadata.json.")
+    p_splits.add_argument("--verbose", action="store_true", help="Print full tracebacks for any errors.")
+    p_splits.set_defaults(func=handle_splits)
 
     # ------------------------------------------------------------------
     # plot-coordination
