@@ -8,6 +8,7 @@ Exposes subcommands from intersection configuration setup through reporting and 
     atspm report             --targetid <id> [...]       Generate ATSPM performance reports
     atspm counts             --targetid <id> [...]       Generate vehicle and pedestrian counts
     atspm splits             --targetid <id> [...]       Generate phase split and timing records
+    atspm aog                --targetid <id> [...]       Generate Arrival on Green (AOG) tables
     atspm discrepancies      --targetid <id> [...]       Analyze detector discrepancies
     atspm plot-detectors     --targetid <id> [...]       Generate interactive detector comparison plots
     atspm plot-coordination  --targetid <id> [...]       Generate interactive coordination diagram plots
@@ -313,8 +314,8 @@ def handle_setup(args: argparse.Namespace) -> None:
 
 def _process_single_intersection(target_name: str, args: argparse.Namespace) -> None:
     """Core logic to process a single intersection."""
-    # Resolve fill_gaps: --fill-gaps OR --full both activate Path B.
-    fill_gaps: bool = args.fill_gaps or args.full
+    # Resolve fill_gaps: --fill-gaps activates Path B.
+    fill_gaps: bool = args.fill_gaps
 
     # Lazy imports keep module load fast and decouple from missing deps.
     from atspm.data import init_db, import_config, run_ingestion
@@ -603,6 +604,108 @@ def handle_splits(args: argparse.Namespace) -> None:
             print(f"\n⏭️ Skipping {target_name} due to errors.", file=sys.stderr)
         except Exception as exc:
             print(f"\n❌ Unexpected error generating splits for {target_name}: {exc}", file=sys.stderr)
+            if getattr(args, "verbose", False):
+                traceback.print_exc()
+
+
+# ---------------------------------------------------------------------------
+# aog
+# ---------------------------------------------------------------------------
+
+def _aog_single_intersection(target_name: str, args: argparse.Namespace) -> None:
+    """Core logic to generate Arrival on Green for a single intersection.
+
+    Resolves the database path and timezone from ``metadata.json``, then
+    delegates entirely to :class:`atspm.data.aog.AogEngine`.  All I/O (event
+    queries, CSV writing) is handled inside the engine; this function is
+    responsible only for path resolution, argument forwarding, and error
+    surfacing.
+
+    Args:
+        target_name: Exact intersection folder name
+            (e.g., ``'2068_US-95_and_SH-8'``).
+        args: Parsed CLI arguments from the ``aog`` subcommand.
+    """
+    from atspm.data.aog import AogEngine
+
+    target_dir = _get_target_dir(target_name)
+    meta = _load_metadata(target_dir)
+    db_path = _resolve_db_path(target_dir, meta)
+
+    output_dir = target_dir / "outputs"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    int_name = meta.get("intersection_name", target_name)
+    timezone = args.timezone or meta.get("timezone") or "US/Mountain"
+
+    if not db_path.exists():
+        _die(
+            f"Database not found: {db_path}\n"
+            f"Run 'atspm process --target {target_name}' first."
+        )
+
+    print(f"\n🟢  Generating Arrival on Green for {int_name}")
+    print(f"    DB:     {db_path.name}")
+    print(f"    Window: {args.start} → {args.end}")
+    print(f"    Bins:   {args.bin_len}")
+    if args.offset:
+        print(f"    Offset: {args.offset}s")
+    if args.phases:
+        print(f"    Phases: {args.phases}")
+
+    # Coerce bin_len to int when it is a digit string; leave "cycle" as-is.
+    bin_len = args.bin_len
+    if isinstance(bin_len, str) and bin_len.isdigit():
+        bin_len = int(bin_len)
+
+    engine = AogEngine(db_path=db_path, timezone=timezone)
+
+    try:
+        engine.arrival_on_green(
+            start=args.start,
+            end=args.end,
+            phases=args.phases,
+            arrival_offset_sec=args.offset,
+            bin_len=bin_len,
+            exclude_missing=args.exclude_missing,
+            output_dir=output_dir,
+        )
+    except Exception as exc:
+        if args.verbose:
+            traceback.print_exc()
+        _die(f"AOG generation failed: {exc}")
+
+
+def handle_aog(args: argparse.Namespace) -> None:
+    """Generate Arrival on Green tables to CSV for one or more intersections.
+
+    Reads advance detector mappings from the active configuration
+    (``Det_P{N}_Arrival`` keys) and writes per-cycle and/or binned AOG
+    tables to ``intersections/<target>/outputs/``.
+
+    Args:
+        args: Parsed CLI arguments from the ``aog`` subcommand.
+    """
+    intersections_dir = _get_intersections_dir()
+
+    if getattr(args, "all", False):
+        targets = [p.name for p in intersections_dir.iterdir() if p.is_dir()]
+        if not targets:
+            _die(f"No intersection directories found in {intersections_dir}")
+        print(f"\n🌍 Batch generating AOG for {len(targets)} intersections...")
+    else:
+        targets = [_resolve_target_name(args.target, args.targetid)]
+
+    for target_name in targets:
+        try:
+            _aog_single_intersection(target_name, args)
+        except SystemExit:
+            print(f"\n⏭️ Skipping {target_name} due to errors.", file=sys.stderr)
+        except Exception as exc:
+            print(
+                f"\n❌ Unexpected error generating AOG for {target_name}: {exc}",
+                file=sys.stderr,
+            )
             if getattr(args, "verbose", False):
                 traceback.print_exc()
 
@@ -1213,7 +1316,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "PATH A – Fast Append (default):\n"
             "  Only files newer than the last ingested span are scanned.\n"
             "  Cycles are recalculated forward from the last known anchor.\n\n"
-            "PATH B – Gap Fill (--fill-gaps or --full):\n"
+            "PATH B – Gap Fill (--fill-gaps):\n"
             "  All files are scanned; historical gaps are filled.\n"
             "  Obsolete gap markers are scrubbed; cycles are surgically repaired."
         ),
@@ -1358,6 +1461,104 @@ def _build_parser() -> argparse.ArgumentParser:
     p_splits.add_argument("--timezone", default=None, metavar="TZ", help="Override the timezone from metadata.json.")
     p_splits.add_argument("--verbose", action="store_true", help="Print full tracebacks for any errors.")
     p_splits.set_defaults(func=handle_splits)
+
+    # ------------------------------------------------------------------
+    # aog
+    # ------------------------------------------------------------------
+    p_aog = subs.add_parser(
+        "aog",
+        help="Generate Arrival on Green (AOG) tables.",
+        description=(
+            "Compute per-cycle or time-binned Arrival on Green for one or\n"
+            "more signal phases.  Advance detector IDs are read from the\n"
+            "active configuration (Det_P{N}_Arrival keys in int_cfg.csv).\n\n"
+            "Outputs are saved to:\n"
+            "  intersections/<target>/outputs/"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    group_aog = p_aog.add_mutually_exclusive_group(required=True)
+    group_aog.add_argument(
+        "--target",
+        metavar="FOLDER",
+        help="Exact intersection folder name (e.g. '2068_US-95_and_SH-8').",
+    )
+    group_aog.add_argument(
+        "--targetid",
+        metavar="ID",
+        help="Intersection ID prefix (e.g. '2068').",
+    )
+    group_aog.add_argument(
+        "--all",
+        action="store_true",
+        help="Generate AOG for all intersections in the directory.",
+    )
+    p_aog.add_argument(
+        "--start",
+        required=True,
+        metavar="YYYY-MM-DD",
+        help="Query window start date (local time, inclusive).",
+    )
+    p_aog.add_argument(
+        "--end",
+        required=True,
+        metavar="YYYY-MM-DD",
+        help="Query window end date (local time, inclusive).",
+    )
+    p_aog.add_argument(
+        "--phases",
+        nargs="+",
+        type=int,
+        metavar="N",
+        default=None,
+        help=(
+            "Signal phase numbers to analyse, e.g. --phases 2 6. "
+            "Omit to analyse all phases with a configured Det_P{N}_Arrival key."
+        ),
+    )
+    p_aog.add_argument(
+        "--offset",
+        type=float,
+        default=0.0,
+        metavar="SEC",
+        help=(
+            "Arrival offset in seconds: added to each detector timestamp "
+            "before evaluating green-window containment. "
+            "Use this to account for travel time from an advance detector "
+            "to the stop bar (default: 0.0)."
+        ),
+    )
+    p_aog.add_argument(
+        "--bin-len",
+        default="60",
+        metavar="N",
+        help=(
+            "Aggregation interval in minutes, or 'cycle' for one row per "
+            "detected cycle (default: 60)."
+        ),
+    )
+    p_aog.add_argument(
+        "--exclude-missing",
+        action="store_true",
+        help=(
+            "Drop bins labeled 'partial' or 'missing' from binned output. "
+            "Full-day-missing days are always dropped regardless of this flag. "
+            "Ignored in cycle mode."
+        ),
+    )
+    p_aog.add_argument(
+        "--timezone",
+        default=None,
+        metavar="TZ",
+        help="Override the timezone from metadata.json (e.g. 'US/Pacific').",
+    )
+    p_aog.add_argument(
+        "--verbose",
+        action="store_true",
+        default=False,
+        help="Print full tracebacks for any errors.",
+    )
+    p_aog.set_defaults(func=handle_aog)
 
     # ------------------------------------------------------------------
     # plot-coordination

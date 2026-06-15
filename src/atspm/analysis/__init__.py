@@ -9,6 +9,7 @@ Modules:
 - decoders: Binary file parsing (DatZ format)
 - cycles:   Cycle detection and barrier logic
 - counts:   Vehicle and pedestrian count aggregations
+- aog:      Arrival on Green calculations
 """
 
 from .decoders import (
@@ -45,6 +46,11 @@ from .phases import (
     phase_splits,
 )
 
+from .aog import (
+    arrival_on_green,
+    bin_arrival_on_green,
+)
+
 __all__ = [
     # Decoders
     'DatZDecodingError',
@@ -70,4 +76,7 @@ __all__ = [
     'analyze_discrepancies',
     # Phases
     'phase_splits',
+    # AoG
+    'arrival_on_green',
+    'bin_arrival_on_green',
 ]

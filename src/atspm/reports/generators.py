@@ -166,7 +166,8 @@ class PlotGenerator:
             date_dir: Output directory for this date.
             tz_str: Timezone string for timestamp conversion.
         """
-        df_events = reader.get_legacy_dataframe(
+        # Changed: Updated function call to get_events_with_cycles_df
+        df_events = reader.get_events_with_cycles_df(
             db_path=self.db_path,
             start=start_dt,
             end=end_dt,
@@ -195,18 +196,6 @@ class PlotGenerator:
     ) -> None:
         """
         Fetch coordination data, build the figure, and write HTML.
-
-        ``df_det`` and ``det_config`` are passed only when they contain
-        meaningful data, so that ``plot_coordination`` suppresses the
-        arrival-offset slider on sparse datasets.
-
-        Args:
-            date_str: Human-readable date (for log messages).
-            start_dt: UTC-aware window start.
-            end_dt: UTC-aware window end.
-            metadata: Intersection metadata dict.
-            date_dir: Output directory for this date.
-            tz_str: Timezone string for timestamp conversion.
         """
         df_cycles, df_signal, df_det = reader.get_coordination_data(
             db_path=self.db_path,
@@ -223,14 +212,12 @@ class PlotGenerator:
             print(f"[{date_str}] Coordination: no signal events - skipping")
             return
 
-        # Detector config: fetch only if detector events exist
         det_config = None
         if not df_det.empty:
             det_config = reader.get_det_config(
                 db_path=self.db_path,
                 date=start_dt,
             )
-            # Treat an empty config the same as no detectors
             if not det_config:
                 det_config = None
                 df_det = None
@@ -256,44 +243,16 @@ class PlotGenerator:
         phases: Optional[List[int]] = None,
         lag_threshold_sec: float = 2.0,
     ) -> None:
-        """Fetch detector data, build the comparison figure, and write HTML.
-
-        Delegates all database access to
-        :class:`~atspm.data.detectors.DetectorEngine` via ``get_plot_data``,
-        then passes the results to the pure plotting function
-        :func:`~atspm.plotting.detectors.plot_detector_comparison`.
-
-        Output is written to a date-specific subdirectory consistent with
-        all other reports::
-
-            {output_dir}/{date_str}/Detector_Comparison_{date_str}.html
-            {output_dir}/{date_str}/Detector_Comparison_{date_str}_Ph2_6.html
-
-        The phase suffix is appended when ``phases`` is provided so multiple
-        phase-filtered calls to the same date directory do not clobber each
-        other.
-
-        Args:
-            start_dt: Window start (UTC-aware datetime produced by
-                ``_local_date_to_utc_datetimes``).
-            end_dt:   Window end, exclusive (UTC-aware datetime).
-            phases: Optional list of phase numbers to include.  ``None``
-                plots all configured pairs.
-            lag_threshold_sec: Minimum disagreement duration in seconds passed
-                to ``analyze_discrepancies``.  Defaults to ``2.0``.
-        """
+        """Fetch detector data, build the comparison figure, and write HTML."""
         from ..data.detectors import DetectorEngine
         from ..plotting.detectors import plot_detector_comparison
 
         tz_str   = self._get_timezone()
         metadata = self._get_metadata()
 
-        # Derive local date string from the UTC-aware start for folder/filename
         local_start = start_dt.astimezone(pytz.timezone(tz_str))
         date_str    = local_start.strftime("%Y-%m-%d")
 
-        # All detector-comparison outputs live in the same date subfolder as
-        # other reports, consistent with generate_for_date().
         date_dir = self.output_dir / date_str
         date_dir.mkdir(parents=True, exist_ok=True)
 
@@ -325,7 +284,6 @@ class PlotGenerator:
             metadata=metadata,
         )
 
-        # Filename: base date + optional phase suffix
         if phases:
             phase_tag = "_Ph" + "_".join(str(p) for p in sorted(phases))
         else:
@@ -341,13 +299,7 @@ class PlotGenerator:
     # ------------------------------------------------------------------
 
     def _get_metadata(self) -> dict:
-        """
-        Fetch and cache intersection metadata from the database.
-
-        Returns:
-            Metadata dict.  Returns a minimal dict with defaults if the
-            metadata table is absent or empty.
-        """
+        """Fetch and cache intersection metadata from the database."""
         if self._metadata is None:
             from ..data.manager import DatabaseManager
             try:
@@ -360,12 +312,7 @@ class PlotGenerator:
         return self._metadata
 
     def _get_timezone(self) -> str:
-        """
-        Return the intersection timezone string, reading from metadata once.
-
-        Returns:
-            pytz-compatible timezone string.  Defaults to ``'UTC'``.
-        """
+        """Return the intersection timezone string, reading from metadata once."""
         if self._timezone is None:
             meta = self._get_metadata()
             self._timezone = meta.get('timezone') or 'UTC'
@@ -380,17 +327,7 @@ def _local_date_to_utc_datetimes(
     local_date: 'date',
     tz_str: str,
 ) -> tuple[datetime, datetime]:
-    """
-    Convert a local calendar date to UTC-aware ``[start, end)`` datetimes.
-
-    Args:
-        local_date: Local date object.
-        tz_str: pytz timezone string.
-
-    Returns:
-        Tuple ``(start_utc, end_utc)`` as UTC-aware ``datetime`` objects
-        spanning midnight-to-midnight in the local timezone.
-    """
+    """Convert a local calendar date to UTC-aware ``[start, end)`` datetimes."""
     from datetime import timedelta, time as dt_time
 
     tz = pytz.timezone(tz_str)
@@ -401,22 +338,7 @@ def _local_date_to_utc_datetimes(
 
 
 def _strip_tz(dt: datetime) -> datetime:
-    """Return a naive copy of *dt* (drops tzinfo).
-
-    ``DetectorEngine._localize_epoch`` expects naive datetimes and applies
-    its own pytz localisation.  This helper bridges UTC-aware datetimes
-    (produced by ``_local_date_to_utc_datetimes``) to that interface.
-
-    Note: the engine will re-localise using the intersection timezone stored
-    in its ``timezone`` attribute, so callers must ensure the datetimes were
-    originally derived from that same timezone.
-
-    Args:
-        dt: Any ``datetime`` (aware or naive).
-
-    Returns:
-        Timezone-naive ``datetime`` with identical date/time components.
-    """
+    """Return a naive copy of *dt* (drops tzinfo)."""
     return dt.replace(tzinfo=None)
 
 
@@ -429,23 +351,5 @@ def generate_reports(
     output_dir: Path,
     date_str: str,
 ) -> None:
-    """
-    Convenience function: create a ``PlotGenerator`` and run one date.
-
-    Args:
-        db_path: Path to the intersection SQLite database.
-        output_dir: Root output directory.
-        date_str: Local date in ``'YYYY-MM-DD'`` format.
-
-    Example::
-
-        from pathlib import Path
-        from atspm.reports.generators import generate_reports
-
-        generate_reports(
-            db_path=Path("2068_data.db"),
-            output_dir=Path("reports/2068"),
-            date_str="2025-06-15",
-        )
-    """
+    """Convenience function: create a ``PlotGenerator`` and run one date."""
     PlotGenerator(db_path=db_path, output_dir=output_dir).generate_for_date(date_str)

@@ -10,6 +10,7 @@ Modules:
 - processing: Cycle detection processing
 - reader:     Adapter for reading data in flat format
 - counts:     Vehicle and pedestrian count orchestration
+- aog:        Arrival on Green calculation orchestration
 """
 
 from .manager import DatabaseManager, init_db, import_config
@@ -45,6 +46,11 @@ from .phases import (
     get_phase_splits,
 )
 
+from .aog import (
+    AogEngine,
+    get_arrival_on_green,
+)
+
 __all__ = [
     # Manager
     'DatabaseManager',
@@ -78,4 +84,7 @@ __all__ = [
     # Phases
     'PhaseEngine',
     'get_phase_splits',
+    #AoG
+    'AogEngine',
+    'get_arrival_on_green',
 ]
