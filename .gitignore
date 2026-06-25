@@ -34,3 +34,17 @@ intersections/*
 # --- Documentation ---
 # (Optional) If you build Sphinx docs later
 docs/_build/
+
+# --- Build / Packaging Artifacts ---
+build/
+dist/
+*.egg-info/
+wheels/
+
+# --- Test & Lint Caches ---
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
