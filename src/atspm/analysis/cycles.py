@@ -516,7 +516,7 @@ def _merge_coordination_plan(
     backward-fill join.
 
     For each cycle_start timestamp, the coord plan is the parameter value
-    of the most recent Code 131 or 132 event at or before that timestamp.
+    of the most recent Code 131 event at or before that timestamp.
     Uses pd.merge_asof (O(n log n)) rather than a Python loop (O(n*m)).
 
     Args:
@@ -526,8 +526,10 @@ def _merge_coordination_plan(
     Returns:
         cycles_df with column [coord_plan] added (float, 0.0 if unknown).
     """
+    # Code 132's parameter is a cycle length in seconds, not a plan ID -
+    # pooling it with 131 would intermittently tag coord_plan with that value.
     coord_events = (
-        events_df[events_df['event_code'].isin([131, 132])]
+        events_df[events_df['event_code'] == 131]
         [['timestamp', 'parameter']]
         .sort_values('timestamp')
         .drop_duplicates(subset='timestamp', keep='last')
