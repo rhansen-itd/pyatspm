@@ -11,6 +11,7 @@ Modules:
 - reader:     Adapter for reading data in flat format
 - counts:     Vehicle and pedestrian count orchestration
 - aog:        Arrival on Green calculation orchestration
+- video:      Per-camera shape config (loop/stopbar/approach) round-trip
 """
 
 from .manager import DatabaseManager, init_db, import_config
@@ -51,6 +52,8 @@ from .aog import (
     get_arrival_on_green,
 )
 
+from .video import ShapeConfig, resolve_stopbar_target, OVERLAP_LETTER_MAP
+
 __all__ = [
     # Manager
     'DatabaseManager',
@@ -87,4 +90,8 @@ __all__ = [
     #AoG
     'AogEngine',
     'get_arrival_on_green',
+    # Video
+    'ShapeConfig',
+    'resolve_stopbar_target',
+    'OVERLAP_LETTER_MAP',
 ]

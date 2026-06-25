@@ -13,6 +13,8 @@ Exposes subcommands from intersection configuration setup through reporting and 
     atspm plot-detectors     --targetid <id> [...]       Generate interactive detector comparison plots
     atspm plot-coordination  --targetid <id> [...]       Generate interactive coordination diagram plots
     atspm plot-termination   --targetid <id> [...]       Generate interactive phase termination plots
+    atspm video-calibrate-shapes --targetid <id> [...]   Interactively draw/edit camera shape config
+    atspm video-overlay      --targetid <id> [...]       Render a video with live status overlays
 
 The package must be installed (``pip install -e .``) for the ``atspm`` entry
 point to be available.  All logic uses clean absolute imports from the
@@ -1171,6 +1173,121 @@ def handle_plot_detectors(args: argparse.Namespace) -> None:
 
 
 # ---------------------------------------------------------------------------
+# video-calibrate-shapes / video-overlay
+#
+# Both are single-target only -- no --all.  video-calibrate-shapes is an
+# interactive, one-time-per-camera session; video-overlay's --video always
+# names one specific file, which inherently belongs to one camera/
+# intersection.  See docs/ROADMAP.md's Video Overlay planning entry.
+# ---------------------------------------------------------------------------
+
+def _video_shape_path(target_dir: Path, camera: str) -> Path:
+    """Resolve the per-camera shape config path for an intersection.
+
+    Args:
+        target_dir: Absolute path to the intersection directory.
+        camera: Camera name (used verbatim as a filename stem).
+
+    Returns:
+        ``intersections/<folder>/video/<camera>_shapes.csv``
+    """
+    return target_dir / "video" / f"{camera}_shapes.csv"
+
+
+def handle_video_calibrate_shapes(args: argparse.Namespace) -> None:
+    """Open the interactive shape-calibration tool for one camera.
+
+    Args:
+        args: Parsed CLI arguments from the ``video-calibrate-shapes``
+            subcommand.
+    """
+    from atspm.video import calibrate_shapes
+    from atspm.data.video import ShapeConfig
+
+    target_name = _resolve_target_name(args.target, args.targetid)
+    target_dir = _get_target_dir(target_name)
+    shape_path = _video_shape_path(target_dir, args.camera)
+    shape_path.parent.mkdir(parents=True, exist_ok=True)
+
+    existing = ShapeConfig.load(shape_path) if shape_path.exists() else None
+    if existing:
+        print(f"\n🎯  Editing existing shape config: {shape_path} ({len(existing.shapes)} shapes)")
+    else:
+        print(f"\n🎯  Creating new shape config: {shape_path}")
+
+    try:
+        config = calibrate_shapes(args.video, existing)
+    except Exception as exc:
+        if args.verbose:
+            traceback.print_exc()
+        _die(f"Calibration failed: {exc}")
+
+    config.save(shape_path)
+    print(f"\n✅  Saved {len(config.shapes)} shapes to {shape_path}")
+
+
+def handle_video_overlay(args: argparse.Namespace) -> None:
+    """Render a video with live phase/overlap/detector status overlays.
+
+    Args:
+        args: Parsed CLI arguments from the ``video-overlay`` subcommand.
+    """
+    import pytz
+    from atspm.video import render_overlay
+    from atspm.data.video import ShapeConfig
+
+    target_name = _resolve_target_name(args.target, args.targetid)
+    target_dir = _get_target_dir(target_name)
+    meta = _load_metadata(target_dir)
+    db_path = _resolve_db_path(target_dir, meta)
+
+    if not db_path.exists():
+        _die(f"Database not found: {db_path}\nRun 'atspm process --target {target_name}' first.")
+
+    shape_path = _video_shape_path(target_dir, args.camera)
+    if not shape_path.exists():
+        _die(
+            f"Shape config not found: {shape_path}\n"
+            f"Run 'atspm video-calibrate-shapes --target {target_name} "
+            f"--camera {args.camera} --video <video>' first."
+        )
+    shape_config = ShapeConfig.load(shape_path)
+
+    tz_str = args.timezone or meta.get("timezone") or "US/Mountain"
+    tz = pytz.timezone(tz_str)
+    try:
+        start_dt = tz.localize(datetime.fromisoformat(args.start))
+    except ValueError as exc:
+        _die(f"Invalid datetime format for --start: {exc}. Use ISO-8601 (e.g. 2024-06-01T06:00:00).")
+
+    output_path = Path(args.output) if args.output else target_dir / "outputs" / f"{args.camera}_overlay.mp4"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    int_name = meta.get("intersection_name", target_name)
+    print(f"\n🎬  Rendering video overlay for {int_name}")
+    print(f"    Video:  {args.video}")
+    print(f"    Start:  {start_dt.isoformat()}")
+    print(f"    Output: {output_path}")
+
+    try:
+        result = render_overlay(
+            db_path,
+            shape_config,
+            args.video,
+            output_path,
+            start_dt,
+            lookback_minutes=args.lookback,
+            lookahead_minutes=args.lookback,
+        )
+    except Exception as exc:
+        if args.verbose:
+            traceback.print_exc()
+        _die(f"Video overlay rendering failed: {exc}")
+
+    print(f"\n✅  Wrote {result.frame_count} frames @ {result.fps:.2f} fps to {result.output_path}")
+
+
+# ---------------------------------------------------------------------------
 # Report helper shims (bridge between new anchor-based processor and the
 # date-level stats / reprocess API that test_reporting.py relied on)
 # ---------------------------------------------------------------------------
@@ -1731,6 +1848,52 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Print full tracebacks for any errors.",
     )
     p_det.set_defaults(func=handle_plot_detectors)
+
+    # ------------------------------------------------------------------
+    # video-calibrate-shapes (single-target only, no --all -- interactive)
+    # ------------------------------------------------------------------
+    p_vidcal = subs.add_parser(
+        "video-calibrate-shapes",
+        help="Interactively draw/edit loop and stopbar shapes for one camera.",
+        description=(
+            "Opens an interactive OpenCV window over a video's first frame to draw,\n"
+            "edit, and save loop/stopbar/approach shapes for video-overlay. One\n"
+            "camera at a time -- this is a calibration session, not a batch operation."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    group_vidcal = p_vidcal.add_mutually_exclusive_group(required=True)
+    group_vidcal.add_argument("--target", metavar="FOLDER", help="Exact intersection folder name.")
+    group_vidcal.add_argument("--targetid", metavar="ID", help="Intersection ID prefix (e.g. '2068').")
+    p_vidcal.add_argument("--camera", required=True, metavar="NAME", help="Camera name (used as the shape-config filename stem).")
+    p_vidcal.add_argument("--video", required=True, metavar="PATH", help="Video file to calibrate against (first frame is used).")
+    p_vidcal.add_argument("--verbose", action="store_true", default=False, help="Print full tracebacks for any errors.")
+    p_vidcal.set_defaults(func=handle_video_calibrate_shapes)
+
+    # ------------------------------------------------------------------
+    # video-overlay (single-target only, no --all -- one video = one camera)
+    # ------------------------------------------------------------------
+    p_vidov = subs.add_parser(
+        "video-overlay",
+        help="Render a video with live phase/overlap/detector status overlays.",
+        description=(
+            "Recolors loop and stopbar shapes (drawn via video-calibrate-shapes) by\n"
+            "their actual phase, overlap, and detector status pulled from the\n"
+            "events/cycles database, and writes a new output video."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    group_vidov = p_vidov.add_mutually_exclusive_group(required=True)
+    group_vidov.add_argument("--target", metavar="FOLDER", help="Exact intersection folder name.")
+    group_vidov.add_argument("--targetid", metavar="ID", help="Intersection ID prefix (e.g. '2068').")
+    p_vidov.add_argument("--camera", required=True, metavar="NAME", help="Camera name (matches the shape-config filename stem).")
+    p_vidov.add_argument("--video", required=True, metavar="PATH", help="Input video file to overlay.")
+    p_vidov.add_argument("--start", required=True, metavar="ISO8601", help="Real-world timestamp of the video's first frame (local time, ISO-8601).")
+    p_vidov.add_argument("--output", default=None, metavar="PATH", help="Output video path. Defaults to <target>/outputs/<camera>_overlay.mp4.")
+    p_vidov.add_argument("--lookback", type=float, default=10.0, metavar="MIN", help="Minutes of event data to fetch before/after the video window, for correct status at the clip's edges (default: 10.0).")
+    p_vidov.add_argument("--timezone", default=None, metavar="TZ", help="Override the timezone from metadata.json.")
+    p_vidov.add_argument("--verbose", action="store_true", default=False, help="Print full tracebacks for any errors.")
+    p_vidov.set_defaults(func=handle_video_overlay)
 
     return parser
 
