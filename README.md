@@ -1,375 +1,101 @@
 # pyATSPM
 
-A high-performance Python package for Automated Traffic Signal Performance Measures (ATSPM), built on a normalized SQLite architecture with a Functional Core / Imperative Shell design pattern.
+A Python package for Automated Traffic Signal Performance Measures (ATSPM) analysis: ingest raw signal controller event logs (`.datZ`), store them in a normalized per-intersection SQLite database, and compute signal performance measures (Arrival on Green, counts, phase splits, detector discrepancies) with Plotly visualizations.
 
-Replaces a legacy flat-file system (CSV/Pickle + complex pandas logic) with a modern, queryable, per-intersection database backend — while maintaining backward compatibility with existing analysis and plotting code.
+Built on two principles:
+- **One SQLite database per intersection** — normalized, indexed, WAL-mode.
+- **Functional Core / Imperative Shell** — pure analysis/plotting functions, kept separate from all I/O.
 
----
+See [docs/architecture.md](docs/architecture.md) for how the layers fit together.
 
 ## Project Structure
 
 ```
 pyatspm/
 ├── README.md
-├── LICENSE
-├── .gitignore
+├── pyproject.toml
 ├── requirements.txt
+├── .gitignore
 │
 ├── docs/
-│   ├── architecture.md          # Functional Core / Imperative Shell explained
-│   ├── configuration_guide.md   # How to edit int_cfg.csv
-│   └── database_schema.md       # events, cycles, config, metadata tables
+│   ├── architecture.md       # Functional Core / Imperative Shell, design principles
+│   ├── database_schema.md    # events, cycles, config, metadata, ingestion_log tables
+│   ├── configuration.md      # metadata.json and int_cfg.csv reference
+│   ├── cli_reference.md      # every `atspm` subcommand and flag
+│   ├── api_reference.md      # public functions/classes per package
+│   └── ROADMAP.md
 │
 ├── src/
 │   └── atspm/
-│       ├── data/                # Imperative Shell (I/O, DB, state)
-│       │   ├── manager.py       # DB init, config import, metadata
-│       │   ├── ingestion.py     # DatZ ingestion with timezone handling
-│       │   ├── processing.py    # Cycle detection orchestration
-│       │   └── reader.py        # Legacy adapter (flat DataFrame output)
-│       └── analysis/            # Functional Core (pure transformations)
-│           ├── decoders.py      # Binary DatZ parsing
-│           └── cycles.py        # Cycle detection logic
+│       ├── data/           # Imperative Shell — DB I/O, ingestion, engines
+│       ├── analysis/       # Functional Core — pure transformations
+│       ├── plotting/       # Functional Core — pure Plotly figure builders
+│       ├── reports/        # Imperative Shell — report orchestration, HTML output
+│       └── cli.py          # argparse CLI (entry point: `atspm`)
 │
-├── scripts/
-│   ├── setup_intersection.py    # Create folder structure + metadata.json
-│   └── run_ingestion.py         # Ingest data for a target intersection
+├── notebooks/              # exploratory analysis
 │
-└── intersections/               # Data (gitignored)
+└── intersections/          # per-intersection data (gitignored)
     └── 2068_US-95_and_SH-8/
         ├── metadata.json
         ├── int_cfg.csv
         ├── 2068_data.db
-        ├── raw_data/            # .datZ files go here
-        └── outputs/
+        ├── raw_data/        # .datZ files go here
+        └── outputs/         # generated reports/CSVs
 ```
 
----
-
-## Architecture
-
-### Functional Core / Imperative Shell
-
-**Functional Core** (`src/atspm/analysis/`) — pure functions, no I/O, no side effects. Takes DataFrames in, returns DataFrames out. Fully testable in isolation.
-
-**Imperative Shell** (`src/atspm/data/`) — manages all state: DB connections, file I/O, transactions. Calls the Functional Core for logic, persists results.
-
-```
-DatZ files
-    │
-    ▼
-IngestionEngine          ← Imperative Shell
-    │  calls
-    ▼
-parse_datz_bytes()       ← Functional Core
-    │  returns DataFrame
-    ▼
-DatabaseManager          ← Imperative Shell
-    │  writes to
-    ▼
-events table (SQLite)
-    │
-    ▼
-CycleProcessor           ← Imperative Shell
-    │  calls
-    ▼
-calculate_cycles()       ← Functional Core
-    │  returns DataFrame
-    ▼
-cycles table (SQLite)
-    │
-    ▼
-get_legacy_dataframe()   ← Reader / Legacy Adapter
-    │  SQL JOIN + merge_asof
-    ▼
-Flat DataFrame           ← legacy plotting/analysis code works unchanged
-```
-
-### Design Principles
-
-- **One SQLite file per intersection** — e.g., `2068_data.db`
-- **WAL mode** — always enabled for concurrent read/write
-- **No ORMs** — raw `sqlite3` for ingestion (speed), `pandas.read_sql` for analysis (convenience)
-- **UTC epoch floats** — all timestamps stored as `REAL` (8-byte float), converted from local time at ingestion boundary
-- **Vectorization** — no row-iteration; pandas vectorization or SQL aggregations throughout
-
----
-
-## Database Schema
-
-### `events` — Raw Data
-
-```sql
-CREATE TABLE events (
-    timestamp   REAL    NOT NULL,   -- UTC epoch float
-    event_code  INTEGER NOT NULL,   -- e.g., 1=Green, 82=Det On, -1=Gap marker
-    parameter   INTEGER NOT NULL,   -- Phase or Detector ID
-    UNIQUE(timestamp, event_code, parameter) ON CONFLICT IGNORE
-)
-```
-
-Indices: `idx_events_timestamp`, `idx_events_code_param`, `idx_events_ts_code` (covering)
-
-### `cycles` — Derived Data (computed once, reusable)
-
-```sql
-CREATE TABLE cycles (
-    cycle_start      REAL    PRIMARY KEY,
-    coord_plan       INTEGER,
-    detection_method TEXT    -- 'barrier_pulse' | 'ring_barrier_config' | 'single_cycle_fallback'
-)
-```
-
-### `config` — Hybrid Schema (temporal, wide columns)
-
-```sql
-CREATE TABLE config (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    start_date TEXT    NOT NULL,
-    end_date   TEXT,
-    -- Dynamic columns added at import time, e.g.:
-    TM_EBL         TEXT,
-    TM_SBThru      TEXT,
-    TM_Exclusions  TEXT,   -- JSON: [{"detector":33,"phase":2,"status":"Red"}, ...]
-    RB_R1          TEXT,
-    RB_R2          TEXT,
-    Det_P2_Arrival TEXT,
-    -- ...one column per CSV row, prefixed by category (TM_, RB_, Det_, WD_)
-    UNIQUE(start_date) ON CONFLICT REPLACE
-)
-```
-
-### `metadata` — Static Intersection Attributes
-
-```sql
-CREATE TABLE metadata (
-    lock_id           INTEGER PRIMARY KEY CHECK (lock_id = 1),  -- enforces single row
-    intersection_id   TEXT,
-    intersection_name TEXT,
-    controller_ip     TEXT,
-    detection_type    TEXT,    -- e.g., 'Radar', 'Loops', 'Video'
-    detection_ip      TEXT,
-    major_road_route  TEXT,    -- e.g., 'US-95'
-    major_road_name   TEXT,    -- e.g., 'Main St'
-    minor_road_route  TEXT,
-    minor_road_name   TEXT,
-    latitude          REAL,
-    longitude         REAL,
-    timezone          TEXT NOT NULL DEFAULT 'US/Mountain',
-    agency_id         TEXT
-)
-```
-
-### `ingestion_log` — State Tracking
-
-```sql
-CREATE TABLE ingestion_log (
-    filename        TEXT PRIMARY KEY,
-    file_timestamp  REAL NOT NULL,   -- UTC epoch of file (parsed from filename)
-    processed_at    TEXT NOT NULL,   -- ISO timestamp of ingestion run
-    row_count       INTEGER NOT NULL
-)
-```
-
----
-
-## Common Event Codes
-
-| Code | Meaning |
-|------|---------|
-| 1 | Green Start |
-| 4 | Gap Out |
-| 5 | Max Out |
-| 6 | Force Off |
-| 8 | Yellow Start |
-| 9 | Red Clearance Start |
-| 11 | Red Start |
-| 31 | Barrier Event (cycle detection) |
-| 81 | Detector Off |
-| 82 | Detector On |
-| 131/132 | Coordination Plan |
-| -1 | Data gap marker (inserted by ingestion) |
-
----
-
-## Workflow
-
-### 1. Set Up a New Intersection
+## Installation
 
 ```bash
-python scripts/setup_intersection.py --id 2068 --name "US-95 & SH-8" --tz "US/Mountain"
+pip install -e .
 ```
 
-Creates:
-```
-intersections/2068_US-95_and_SH-8/
-├── metadata.json    ← fill in IPs, coordinates, detection type
-├── int_cfg.csv      ← placeholder; replace with real config
-├── raw_data/        ← drop .datZ files here
-└── outputs/
-```
+Requires Python ≥ 3.9. Dependencies: `pandas`, `pytz`, `plotly` (see `pyproject.toml`/`requirements.txt`).
 
-Then edit `metadata.json` to fill in optional fields before running ingestion.
-
-### 2. Run Ingestion
+## Quickstart
 
 ```bash
-python scripts/run_ingestion.py --target "2068_US-95_and_SH-8"
+# 1. Scaffold a new intersection
+atspm setup --target 2068_US-95_and_SH-8 --timezone US/Mountain
+# → fill in intersections/2068_US-95_and_SH-8/metadata.json and int_cfg.csv,
+#   then drop .datZ files into raw_data/
 
-# Full reprocess (re-reads all files, recomputes all cycles):
-python scripts/run_ingestion.py --target "2068_US-95_and_SH-8" --full
+# 2. Ingest events and detect cycles
+atspm process --target 2068_US-95_and_SH-8
+
+# 3. Generate reports for a date
+atspm report --target 2068_US-95_and_SH-8 --dates 2025-01-15
+
+# Or pull a specific measure straight to CSV
+atspm aog --target 2068_US-95_and_SH-8 --start 2025-01-01 --end 2025-01-07 --phases 2 6
 ```
 
-This script:
-1. Initializes the DB (`init_db`)
-2. Syncs `metadata.json` → `metadata` table (`set_metadata`)
-3. Imports `int_cfg.csv` → `config` table (`import_config`)
-4. Ingests `.datZ` files → `events` table (`run_ingestion`)
-5. Detects cycles → `cycles` table (`run_cycle_processing`)
+Every subcommand also accepts `--targetid <numeric id>` or `--all` instead of `--target` to run against one-by-ID or every intersection in `intersections/`. Full subcommand/flag reference: [docs/cli_reference.md](docs/cli_reference.md).
 
-### 3. Read Data (Legacy Format)
+## Documentation
+
+| Doc | Contents |
+|---|---|
+| [docs/architecture.md](docs/architecture.md) | Functional Core / Imperative Shell, data flow, design principles, terminology |
+| [docs/database_schema.md](docs/database_schema.md) | Full SQLite schema, event codes, gap-marker rule |
+| [docs/configuration.md](docs/configuration.md) | `metadata.json` and `int_cfg.csv` reference |
+| [docs/cli_reference.md](docs/cli_reference.md) | Every `atspm` subcommand and flag |
+| [docs/api_reference.md](docs/api_reference.md) | Public functions/classes for scripting against the package directly |
+
+## Scripting Example
 
 ```python
 from pathlib import Path
 from datetime import datetime
-from src.atspm.data import get_legacy_dataframe, get_config_df
+from atspm.data import get_events_with_cycles_df, get_config_df
 
 db_path = Path("intersections/2068_US-95_and_SH-8/2068_data.db")
 
-df = get_legacy_dataframe(
+df = get_events_with_cycles_df(
     db_path,
     start=datetime(2025, 1, 1),
-    end=datetime(2025, 1, 2)
+    end=datetime(2025, 1, 2),
 )
-# Returns: DataFrame['TS_start', 'Code', 'ID', 'Cycle_start', 'Coord_plan']
-# All timestamps are UTC epoch floats — identical to legacy pickle format
 
 config = get_config_df(db_path, datetime(2025, 1, 1))
-# Returns: pd.Series — access as config['TM_EBL'], config['RB_R1'], etc.
-```
-
-### 4. Direct DB Access
-
-```python
-from src.atspm.data import DatabaseManager
-
-with DatabaseManager(db_path) as manager:
-    # Read metadata
-    meta = manager.get_metadata()
-
-    # Set/update metadata
-    manager.set_metadata(
-        intersection_id='2068',
-        major_road_route='US-95',
-        latitude=46.732,
-        longitude=-117.001
-    )
-
-    # Raw event query
-    df = manager.query_events(
-        start_time=datetime(2025, 1, 1).timestamp(),
-        end_time=datetime(2025, 1, 2).timestamp(),
-        event_codes=[1, 8, 82]
-    )
-```
-
----
-
-## `metadata.json` Reference
-
-Created by `setup_intersection.py`. Edit before running ingestion.
-
-```json
-{
-    "intersection_id": "2068",
-    "intersection_name": "US-95 & SH-8",
-    "timezone": "US/Mountain",
-    "folder_name": "2068_US-95_and_SH-8",
-    "db_filename": "2068_data.db",
-
-    "controller_ip": "10.71.10.50",
-    "detection_type": "Radar",
-    "detection_ip": "10.71.10.51",
-    "agency_id": "ITD-D2",
-
-    "major_road_route": "US-95",
-    "major_road_name": "Main St",
-    "minor_road_route": "SH-8",
-    "minor_road_name": "Troy Hwy",
-
-    "latitude": 46.732,
-    "longitude": -117.001
-}
-```
-
----
-
-## `int_cfg.csv` Structure
-
-Multi-index CSV with `(Category, Parameter)` as the first two columns and date columns as headers. Each date column represents a configuration period; the system automatically calculates `end_date` as the start of the next period.
-
-| Category | Parameter | 2024-01-01 | 2024-06-15 |
-|----------|-----------|------------|------------|
-| TM: | EBL | 5,6,7 | 5,6,7 |
-| TM: | SBThru | 10,11,12 | 10,11 |
-| RB: | R1 | 1,2\|3,4 | 1,2\|3,4 |
-| RB: | R2 | 5,6\|7,8 | 5,6\|7,8 |
-| Det: | P2 Arrival | 33,34 | 33,34 |
-| Exc: | Detector | 33,34 | |
-| Exc: | Phase | 2,2 | |
-| Exc: | Status | Red,Yellow | |
-
-**Category prefixes in DB:** `TM_`, `RB_`, `Det_` (legacy `Plt:` normalized to `Det_`), `WD_`. Exclusion rows (`Exc:`) are bundled into `TM_Exclusions` as a JSON array.
-
----
-
-## API Reference
-
-### `src.atspm.data`
-
-| Function / Class | Description |
-|-----------------|-------------|
-| `init_db(db_path)` | Initialize DB with full schema |
-| `import_config(csv_path, db_path)` | Import `int_cfg.csv` |
-| `run_ingestion(db_path, data_dir, timezone, incremental, batch_size)` | Ingest `.datZ` files |
-| `run_cycle_processing(db_path, reprocess)` | Detect and store cycles |
-| `get_legacy_dataframe(db_path, start, end, event_codes)` | Main reader — legacy format |
-| `get_legacy_dataframe_by_date(db_path, date_str)` | Convenience — full day |
-| `get_config_df(db_path, date)` | Config as `pd.Series` |
-| `get_config_dict(db_path, date)` | Config as `dict` |
-| `get_date_range(db_path)` | Min/max timestamps in DB |
-| `get_available_dates(db_path)` | All dates with cycles |
-| `check_data_quality(db_path, start, end)` | Event/gap/cycle counts |
-| `DatabaseManager(db_path)` | Context manager for direct DB access |
-
-### `src.atspm.analysis`
-
-| Function | Description |
-|----------|-------------|
-| `parse_datz_bytes(raw_bytes, file_timestamp)` | Decode binary `.datZ` → DataFrame |
-| `parse_datz_batch(file_data)` | Multi-file batch decoding |
-| `validate_datz_file(raw_bytes)` | Quick validity check |
-| `calculate_cycles(events_df, config)` | Cycle detection — barrier pulse or ring-barrier fallback |
-| `validate_cycles(cycles_df)` | Check cycle lengths, duplicates |
-| `get_cycle_stats(cycles_df)` | Summary statistics |
-| `assign_events_to_cycles(events_df, cycles_df)` | `merge_asof` join |
-
----
-
-## Performance Notes
-
-- **Never aggregate on `events`** for date-level summaries — use `ingestion_log` or `cycles` instead (millions of rows vs. thousands)
-- `get_processing_stats()` and `_get_dates_to_process()` both use `ingestion_log` for this reason
-- The covering index `idx_events_ts_code (timestamp, event_code)` satisfies most range+filter queries without a full table scan
-
----
-
-## Dependencies
-
-```
-pandas
-pytz
-sqlite3    # stdlib
-zlib       # stdlib
-struct     # stdlib
 ```

@@ -49,5 +49,23 @@ Expert Python Data Engineer and Traffic Operations Specialist building a high-pe
 - Provide only the requested module/function, with Google-style docstrings.
 - Validate before delivering: syntax/contract checks (schema correctness, aliased imports, fallback presence, gap-marker handling, CLI argument completeness) before code is considered done.
 
+## Documentation Workflow
+
+Code correctness comes first. Documentation (`README.md`, `docs/*.md`) is updated in a deliberate, separate pass — never automatically alongside a code change, even if the change seems to make a doc stale.
+
+- **During coding tasks:** do not edit `README.md` or `docs/architecture.md`, `database_schema.md`, `configuration.md`, `cli_reference.md`, or `api_reference.md` unless explicitly asked to.
+- **After finishing a coding task**, append at most one terse bullet per touched file to `docs/PENDING_DOC_CHANGES.md` — but only if the change is doc-relevant:
+  - SQLite schema (`events`, `cycles`, `config`, `metadata`, `ingestion_log` — new/removed/renamed columns or tables)
+  - A CLI subcommand or flag (`src/atspm/cli.py`) — added, removed, renamed, default changed
+  - A public export in any `src/atspm/*/__init__.py`
+  - The Functional Core / Imperative Shell boundary (e.g. I/O introduced into `analysis/` or `plotting/`)
+  - Internal refactors, bug fixes with no signature/schema change, and perf tweaks are **not** logged — skip the bullet entirely.
+  - Format: `- [path/to/file.py] one short phrase`. No elaboration, no rationale — the commit history holds that.
+- **Doc sync, triggered only when the user explicitly asks** (e.g. "sync docs", "update the documentation"):
+  1. Read `docs/PENDING_DOC_CHANGES.md` for the targeted list and the `Last doc sync: <sha>` marker.
+  2. Cross-check completeness with `git diff <sha>..HEAD --stat -- src/` — catch anything doc-relevant that wasn't logged.
+  3. Update only the affected `docs/*.md` / `README.md` sections.
+  4. Clear the bullet list and bump `Last doc sync` to the current `HEAD` sha.
+
 ## Other agents in this repo
 - `AGENTS.md` governs Jules, a separate autonomous agent scoped to repo-wide search/replace, naming/style enforcement, file migrations, and DRY refactors — it is explicitly forbidden from touching vectorization logic, Plotly code, SQL/schema, or functional core business logic. Don't assume its constraints apply here; this file is authoritative for Claude Code.
