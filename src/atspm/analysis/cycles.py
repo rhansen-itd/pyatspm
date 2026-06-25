@@ -374,9 +374,16 @@ def _detect_cycles_from_barriers(events_df: pd.DataFrame) -> pd.DataFrame:
 
     # shift(1) within each segment so the first barrier after a gap is
     # never compared against a pre-gap barrier parameter.
+    #barriers['_prev_param'] = barriers.groupby('_seg')['parameter'].shift(1)
+    #wrap_mask = barriers['parameter'] < barriers['_prev_param']
+    #cycle_starts = barriers.loc[wrap_mask, 'timestamp'].values
+
     barriers['_prev_param'] = barriers.groupby('_seg')['parameter'].shift(1)
+    barriers['_prev_ts']    = barriers.groupby('_seg')['timestamp'].shift(1)
     wrap_mask = barriers['parameter'] < barriers['_prev_param']
-    cycle_starts = barriers.loc[wrap_mask, 'timestamp'].values
+    # Cycle begins at the coordinated/lead barrier group — the peak-param pulse
+    # immediately preceding the wrap-down, not the wrap pulse itself.
+    cycle_starts = barriers.loc[wrap_mask, '_prev_ts'].dropna().values    
 
     return pd.DataFrame({'cycle_start': cycle_starts})
 

@@ -459,7 +459,7 @@ def _phase_color(phase_id: int, gyr: str) -> str:
 # ---------------------------------------------------------------------------
 # Bar-chart construction
 # ---------------------------------------------------------------------------
-
+'''
 def _modal_phase_sequence(
     df_cycles: pd.DataFrame,
     ring_col: str,
@@ -490,7 +490,36 @@ def _modal_phase_sequence(
                 order[ph] = pos
                 seen.add(ph)
     return order
+'''
+def _modal_phase_sequence(df_cycles, ring_col, ring_phases):
+    """Build a phase -> display-position mapping from the modal ring-phase string."""
+    if ring_col not in df_cycles.columns:
+        return {p: i for i, p in enumerate(sorted(ring_phases))}
 
+    seq_series = df_cycles[ring_col].dropna().pipe(lambda s: s[s != 'None'])
+    if seq_series.empty:
+        return {p: i for i, p in enumerate(sorted(ring_phases))}
+
+    def _norm(cell):                       # keep first-occurrence order, drop repeats
+        seen, out = set(), []
+        for tok in str(cell).split(','):
+            tok = tok.strip()
+            if tok.isdigit() and tok not in seen:
+                seen.add(tok); out.append(tok)
+        return ','.join(out)
+
+    norm = seq_series.map(_norm)
+    norm = norm[norm != '']
+    if norm.empty:
+        return {p: i for i, p in enumerate(sorted(ring_phases))}
+    modal_seq = norm.mode().iloc[0]
+
+    order, seen = {}, set()
+    for pos, tok in enumerate(modal_seq.split(',')):
+        ph = int(tok)
+        if ph not in seen:
+            order[ph] = pos; seen.add(ph)
+    return order
 
 def _add_ring_bars(
     fig: go.Figure,

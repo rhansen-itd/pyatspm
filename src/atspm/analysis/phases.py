@@ -350,28 +350,37 @@ def _pivot_by_bin(
         intervals = intervals.copy()
         intervals["_bin"] = intervals["green_ts"].dt.floor(f"{bin_len}min")
 
+    # Bin by cycle_start so a cycle's components and its length share a bin.
+    sample_cs = intervals["cycle_start"].iloc[0]
+    is_float = isinstance(sample_cs, (int, float, np.floating, np.integer))
+    intervals = intervals.copy()
+    if is_float:
+        intervals["_bin"] = pd.to_datetime(
+            intervals["cycle_start"], unit="s", utc=True
+        ).dt.floor(f"{bin_len}min")
+    else:
+        intervals["_bin"] = intervals["cycle_start"].dt.floor(f"{bin_len}min")
+
+    # Common denominator: number of distinct cycles per bin (same set used for cycle length).
+    cyc_count = intervals.groupby("_bin")["cycle_start"].nunique()
+
     grp = intervals.groupby(["_bin", "phase"])
+    sum_g   = grp["green_dur"].sum().unstack("phase")
+    sum_yr  = grp["clear_dur"].sum().unstack("phase")
+    sum_spl = grp["split_dur"].sum().unstack("phase")
 
     if report_mode == "total":
-        agg_g   = grp["green_dur"].sum()
-        agg_yr  = grp["clear_dur"].sum()
-        agg_spl = grp["split_dur"].sum()
+        wide_g, wide_yr, wide_spl = sum_g, sum_yr, sum_spl
     elif report_mode == "proportion":
         mean_cycle = _mean_cycle_length_by_bin(intervals, bin_len)
-        mean_g_wide   = grp["green_dur"].mean().unstack("phase")
-        mean_yr_wide  = grp["clear_dur"].mean().unstack("phase")
-        mean_spl_wide = grp["split_dur"].mean().unstack("phase")
-        agg_g   = mean_g_wide.div(mean_cycle, axis=0).stack("phase")
-        agg_yr  = mean_yr_wide.div(mean_cycle, axis=0).stack("phase")
-        agg_spl = mean_spl_wide.div(mean_cycle, axis=0).stack("phase")
-    else:  
-        agg_g   = grp["green_dur"].mean()
-        agg_yr  = grp["clear_dur"].mean()
-        agg_spl = grp["split_dur"].mean()
-
-    wide_g   = agg_g.unstack("phase")
-    wide_yr  = agg_yr.unstack("phase")
-    wide_spl = agg_spl.unstack("phase")
+        # per-cycle mean first, then divide by mean cycle length -> ring proportions sum to ~1
+        wide_g   = sum_g.div(cyc_count, axis=0).div(mean_cycle, axis=0)
+        wide_yr  = sum_yr.div(cyc_count, axis=0).div(mean_cycle, axis=0)
+        wide_spl = sum_spl.div(cyc_count, axis=0).div(mean_cycle, axis=0)
+    else:  # "seconds": total phase seconds / common cycle count, NOT per-phase .mean()
+        wide_g   = sum_g.div(cyc_count, axis=0)
+        wide_yr  = sum_yr.div(cyc_count, axis=0)
+        wide_spl = sum_spl.div(cyc_count, axis=0)
 
     col_frames: List[pd.DataFrame] = []
     for ph in all_phases:
@@ -416,38 +425,27 @@ def _cycle_length_series(cycle_index: pd.Index) -> pd.Series:
     return pd.Series(diffs, index=idx)
 
 
-def _mean_cycle_length_by_bin(
-    intervals: pd.DataFrame,
-    bin_len: int,
-) -> pd.Series:
+def _mean_cycle_length_by_bin(intervals: pd.DataFrame, bin_len: int) -> pd.Series:
     sample_cs = intervals["cycle_start"].iloc[0]
-    if isinstance(sample_cs, (int, float, np.floating, np.integer)):
-        cs_bins = pd.to_datetime(
-            intervals["cycle_start"], unit="s", utc=True
+    is_float = isinstance(sample_cs, (int, float, np.floating, np.integer))
+
+    cyc = (
+        intervals[["cycle_start"]]
+        .drop_duplicates()
+        .sort_values("cycle_start")
+        .reset_index(drop=True)
+    )
+
+    if is_float:
+        cyc["_len"] = cyc["cycle_start"].astype(float).diff().shift(-1)
+        cyc["_bin"] = pd.to_datetime(
+            cyc["cycle_start"], unit="s", utc=True
         ).dt.floor(f"{bin_len}min")
     else:
-        cs_bins = intervals["cycle_start"].dt.floor(f"{bin_len}min")
+        cyc["_len"] = cyc["cycle_start"].diff().shift(-1).dt.total_seconds()
+        cyc["_bin"] = cyc["cycle_start"].dt.floor(f"{bin_len}min")
 
-    unique_cs = (
-        intervals.assign(_cs_bin=cs_bins)[["_cs_bin", "cycle_start"]]
-        .drop_duplicates()
-        .copy()
-    )
-    unique_cs = unique_cs.sort_values("cycle_start")
-
-    sample_cs2 = unique_cs["cycle_start"].iloc[0]
-    if isinstance(sample_cs2, (int, float, np.floating, np.integer)):
-        unique_cs["_cs_float"] = unique_cs["cycle_start"].astype(float)
-        unique_cs["_len"] = unique_cs.groupby("_cs_bin")["_cs_float"].diff().shift(-1)
-    else:
-        unique_cs["_len"] = (
-            unique_cs.groupby("_cs_bin")["cycle_start"]
-            .diff()
-            .shift(-1)
-            .dt.total_seconds()
-        )
-
-    mean_len = unique_cs.groupby("_cs_bin")["_len"].mean()
+    mean_len = cyc.groupby("_bin")["_len"].mean()
     mean_len.index.name = "Time"
     mean_len.name = "Cycle Length"
     return mean_len
