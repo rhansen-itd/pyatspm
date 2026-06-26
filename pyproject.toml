@@ -10,7 +10,9 @@ dependencies = [
     "pandas",
     "pytz",
     "plotly",
-    "opencv-python"
+    "opencv-python",
+    "paramiko",
+    "scp"
 ]
 
 [project.scripts]

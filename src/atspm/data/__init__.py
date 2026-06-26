@@ -6,6 +6,7 @@ and resource handling for the ATSPM system.
 
 Modules:
 - manager:    Database initialization and configuration import
+- retrieval:  Device (controller/secondary) .datZ retrieval via SCP
 - ingestion:  Event data ingestion from .datZ files
 - processing: Cycle detection processing
 - reader:     Adapter for reading data in flat format
@@ -15,6 +16,7 @@ Modules:
 """
 
 from .manager import DatabaseManager, init_db, import_config
+from .retrieval import RetrievalEngine, run_retrieval
 from .ingestion import IngestionEngine, run_ingestion
 from .processing import CycleProcessor, run_cycle_processing
 from .reader import (
@@ -59,6 +61,9 @@ __all__ = [
     'DatabaseManager',
     'init_db',
     'import_config',
+    # Retrieval
+    'RetrievalEngine',
+    'run_retrieval',
     # Ingestion
     'IngestionEngine',
     'run_ingestion',

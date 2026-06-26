@@ -4,6 +4,7 @@ ATSPM Unified Command-Line Interface
 Exposes subcommands from intersection configuration setup through reporting and visualization:
 
     atspm setup              --targetid <id>             Create a new intersection environment
+    atspm retrieve           --targetid <id> [...]       Pull new .datZ files from configured devices via SCP
     atspm process            --targetid <id> [...]       Ingest data and compute cycles
     atspm report             --targetid <id> [...]       Generate ATSPM performance reports
     atspm counts             --targetid <id> [...]       Generate vehicle and pedestrian counts
@@ -164,6 +165,28 @@ def _load_metadata(target_dir: Path) -> dict:
         _die(f"Failed to parse metadata.json: {exc}")
 
 
+def _load_devices_path(target_dir: Path) -> Path:
+    """Resolve the ``devices.json`` path for an intersection, erroring if absent.
+
+    Args:
+        target_dir: Absolute path to the intersection directory.
+
+    Returns:
+        Path to ``devices.json``.
+
+    Raises:
+        SystemExit: If ``devices.json`` is missing.
+    """
+    devices_path = target_dir / "devices.json"
+    if not devices_path.exists():
+        _die(
+            f"devices.json not found in {target_dir}.\n"
+            f"Tip: run 'atspm setup --target {target_dir.name}' to create it, "
+            f"then add controller/secondary device entries."
+        )
+    return devices_path
+
+
 def _resolve_db_path(target_dir: Path, meta: dict) -> Path:
     """Derive the SQLite database path from directory and metadata.
 
@@ -227,6 +250,7 @@ def handle_setup(args: argparse.Namespace) -> None:
     - ``intersections/<target>/outputs/``
     - ``intersections/<target>/metadata.json``  (template)
     - ``intersections/<target>/int_cfg.csv``    (empty placeholder)
+    - ``intersections/<target>/devices.json``   (empty placeholder)
 
     Args:
         args: Parsed CLI arguments.  Required field: ``args.target``.
@@ -240,6 +264,7 @@ def handle_setup(args: argparse.Namespace) -> None:
     outputs_dir   = target_dir / "outputs"
     metadata_path = target_dir / "metadata.json"
     config_path   = target_dir / "int_cfg.csv"
+    devices_path  = target_dir / "devices.json"
 
     print(f"\n📂  Setting up intersection environment: {target}")
     print(f"    Location: {target_dir}")
@@ -299,15 +324,72 @@ def handle_setup(args: argparse.Namespace) -> None:
         config_path.write_text("Category,Parameter,Value\n")
         print("    ✅  int_cfg.csv placeholder created")
 
+    # devices.json -----------------------------------------------------------------
+    if devices_path.exists():
+        print("    ⏭️   devices.json already exists — skipping")
+    else:
+        with devices_path.open("w") as fh:
+            json.dump([], fh, indent=4)
+        print("    ✅  devices.json placeholder created")
+
     # Summary --------------------------------------------------------------------
     rel = lambda p: p.relative_to(_find_project_root())  # noqa: E731
     print("\n✅  Setup complete.")
     print(f"    1. Edit metadata:       {rel(metadata_path)}")
-    print(f"    2. Add .datZ files to:  {rel(raw_dir)}")
+    print(f"    2. Configure devices:   {rel(devices_path)}")
+    print(f"    3. Add .datZ files to:  {rel(raw_dir)}")
     print(
-        f"    3. Ingest data:         "
+        f"    4. Ingest data:         "
         f"atspm process --target \"{target}\""
     )
+
+
+# ---------------------------------------------------------------------------
+# retrieve
+# ---------------------------------------------------------------------------
+
+def _retrieve_single_intersection(target_name: str, args: argparse.Namespace) -> None:
+    """Core logic to retrieve new .datZ files for a single intersection."""
+    from atspm.data import run_retrieval
+
+    target_dir   = _get_target_dir(target_name)
+    meta         = _load_metadata(target_dir)
+    devices_path = _load_devices_path(target_dir)
+
+    print(f"\n📡  Retrieving files for: {target_name}")
+    run_retrieval(target_dir, meta, devices_path)
+
+
+def handle_retrieve(args: argparse.Namespace) -> None:
+    """Pull new .datZ files from each intersection's configured devices.
+
+    Secondary devices (long-term storage, e.g. EVO radar) are always pulled
+    before the controller (short FIFO retention window) — see
+    ``atspm.data.retrieval`` for why pull order matters.
+
+    Args:
+        args: Parsed CLI arguments.
+    """
+    intersections_dir = _get_intersections_dir()
+
+    if getattr(args, "all", False):
+        targets = [p.name for p in intersections_dir.iterdir() if p.is_dir()]
+        if not targets:
+            _die(f"No intersection directories found in {intersections_dir}")
+        print(f"\n🌍 Batch retrieving for {len(targets)} intersections...")
+    else:
+        targets = [_resolve_target_name(args.target, args.targetid)]
+
+    for target_name in targets:
+        try:
+            _retrieve_single_intersection(target_name, args)
+        except SystemExit:
+            # Catch _die() to prevent a single failure from crashing the batch loop
+            print(f"\n⏭️ Skipping {target_name} due to errors.", file=sys.stderr)
+        except Exception as exc:
+            print(f"\n❌ Unexpected error retrieving {target_name}: {exc}", file=sys.stderr)
+            if getattr(args, "verbose", False):
+                traceback.print_exc()
 
 
 # ---------------------------------------------------------------------------
@@ -1421,6 +1503,32 @@ def _build_parser() -> argparse.ArgumentParser:
         help="IANA timezone for the new metadata.json (default: US/Mountain)."
     )
     p_setup.set_defaults(func=handle_setup)
+
+    # ------------------------------------------------------------------
+    # retrieve
+    # ------------------------------------------------------------------
+    p_retr = subs.add_parser(
+        "retrieve",
+        help="Pull new .datZ files from an intersection's configured devices via SCP.",
+        description=(
+            "Pull new .datZ files from each device listed in devices.json.\n\n"
+            "Secondary devices (long-term storage, e.g. EVO radar) are always\n"
+            "pulled before the controller (short FIFO retention window), so\n"
+            "the controller's bookmark never advances ahead of data the\n"
+            "secondary device hasn't reported yet."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    group_retr = p_retr.add_mutually_exclusive_group(required=True)
+    group_retr.add_argument("--target", metavar="FOLDER", help="Exact intersection folder name.")
+    group_retr.add_argument("--targetid", metavar="ID", help="Intersection ID (prefix of folder name).")
+    group_retr.add_argument("--all", action="store_true", help="Retrieve for all intersections in the directory.")
+    p_retr.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Print full tracebacks for unexpected per-intersection errors during --all."
+    )
+    p_retr.set_defaults(func=handle_retrieve)
 
     # ------------------------------------------------------------------
     # process
