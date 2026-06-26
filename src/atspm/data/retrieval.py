@@ -204,16 +204,26 @@ class RetrievalEngine:
                 print(f"  No new files (last_retrieved={last_retrieved}).")
                 return {"role": role, "host": host, "downloaded": 0, "error": None}
 
-            print(f"  {len(to_fetch)} new file(s) since {last_retrieved}.")
+            # Another device for this intersection (e.g. an EVO mirroring the
+            # controller via its own cron job) may have already landed some
+            # of these filenames in raw_data/. Skip re-downloading those --
+            # the bookmark still advances past them since we have them.
+            print(f"  {len(to_fetch)} candidate file(s) since {last_retrieved}.")
+            downloaded = 0
             with SCPClient(ssh.get_transport()) as scp:
                 for ts, fname in to_fetch:
-                    scp.get(f"{remote_folder}/{fname}", str(self.raw_dir / fname))
+                    if not (self.raw_dir / fname).exists():
+                        scp.get(f"{remote_folder}/{fname}", str(self.raw_dir / fname))
+                        downloaded += 1
                     if last_retrieved is None or ts > last_retrieved:
                         last_retrieved = ts
 
             device["last_retrieved"] = last_retrieved.isoformat()
-            print(f"  Downloaded {len(to_fetch)} file(s); bookmark advanced to {last_retrieved}.")
-            return {"role": role, "host": host, "downloaded": len(to_fetch), "error": None}
+            print(
+                f"  Downloaded {downloaded} file(s) ({len(to_fetch) - downloaded} already on disk); "
+                f"bookmark advanced to {last_retrieved}."
+            )
+            return {"role": role, "host": host, "downloaded": downloaded, "error": None}
 
         except paramiko.AuthenticationException:
             msg = f"Authentication failed for {user}@{host}"
