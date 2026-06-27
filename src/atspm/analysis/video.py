@@ -60,12 +60,14 @@ Package Location: src/atspm/analysis/video.py
 
 from __future__ import annotations
 
+from typing import Optional
+
 import numpy as np
 import pandas as pd
 
 from .aog import _ts_to_float
 from .detectors import _build_state_array, _reconstruct_intervals
-from .phases import _build_phase_intervals, _segment_id
+from .phases import _CODE_END_YELLOW, _CODE_YELLOW, _build_phase_intervals, _segment_id
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -396,3 +398,52 @@ def detector_status_at_timestamps(
 
     intervals = _reconstruct_intervals(events_df, det_id)
     return _build_state_array(intervals, query_ts)
+
+
+_TRANSITION_CODES = {
+    "green_to_yellow": _CODE_YELLOW,
+    "yellow_to_red": _CODE_END_YELLOW,
+}
+
+
+def nearest_phase_transition(
+    events_df: pd.DataFrame,
+    phase: int,
+    transition: str,
+    guess_ts: float,
+) -> Optional[float]:
+    """Real timestamp of *phase*'s visual color change nearest to *guess_ts*.
+
+    ``"yellow_to_red"`` resolves to Code 9 (Phase End Yellow Clearance)
+    rather than Code 10/11 (Begin/End Red Clearance) -- Code 9 fires at the
+    exact instant yellow ends, which is also the exact instant steady red
+    begins whether or not red clearance is served for this phase, so it is
+    the correct single code for the visual edge regardless of timing plan.
+
+    Args:
+        events_df: Flat events DataFrame with columns
+            ``[timestamp, event_code, parameter]``.
+        phase: Signal phase number.
+        transition: ``"green_to_yellow"`` or ``"yellow_to_red"``.
+        guess_ts: Epoch-second timestamp to search around.
+
+    Returns:
+        The nearest matching event's timestamp (epoch seconds), or ``None``
+        if *events_df* has no matching event for this phase.
+
+    Raises:
+        ValueError: If *transition* isn't a recognised edge.
+    """
+    if transition not in _TRANSITION_CODES:
+        raise ValueError(
+            f"Unrecognised transition {transition!r}: expected one of "
+            f"{sorted(_TRANSITION_CODES)}."
+        )
+    code = _TRANSITION_CODES[transition]
+    matches = events_df.loc[
+        (events_df["event_code"] == code) & (events_df["parameter"] == phase), "timestamp"
+    ]
+    if matches.empty:
+        return None
+    ts = matches.to_numpy(dtype=np.float64)
+    return float(ts[np.argmin(np.abs(ts - guess_ts))])

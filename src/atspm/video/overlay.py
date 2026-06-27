@@ -87,10 +87,6 @@ def draw_stopbar_overlay(frame: np.ndarray, shape: Dict[str, Any], status: str) 
 def draw_shape_overlay(frame: np.ndarray, shape: Dict[str, Any], status: Any) -> None:
     """Dispatch a single shape to the correct drawing function for its type.
 
-    ``"approach"`` shapes belong to the out-of-scope turning-movement
-    counter (see ``docs/ROADMAP.md``) and are intentionally not rendered
-    here.
-
     Args:
         frame: BGR image array to draw onto. Mutated in place.
         shape: A shape dict as produced by ``atspm.data.video.ShapeConfig``.

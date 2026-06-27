@@ -12,7 +12,7 @@ Modules:
 - reader:     Adapter for reading data in flat format
 - counts:     Vehicle and pedestrian count orchestration
 - aog:        Arrival on Green calculation orchestration
-- video:      Per-camera shape config (loop/stopbar/approach) round-trip
+- video:      Per-camera shape config (loop/stopbar) round-trip
 """
 
 from .manager import DatabaseManager, init_db, import_config

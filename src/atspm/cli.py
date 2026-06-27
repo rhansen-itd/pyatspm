@@ -16,6 +16,7 @@ Exposes subcommands from intersection configuration setup through reporting and 
     atspm plot-termination   --targetid <id> [...]       Generate interactive phase termination plots
     atspm video-calibrate-shapes --targetid <id> [...]   Interactively draw/edit camera shape config
     atspm video-overlay      --targetid <id> [...]       Render a video with live status overlays
+    atspm video-locate-phase-change --targetid <id> [...] Find a phase's exact transition time for --start alignment
 
 The package must be installed (``pip install -e .``) for the ``atspm`` entry
 point to be available.  All logic uses clean absolute imports from the
@@ -1276,6 +1277,25 @@ def _video_shape_path(target_dir: Path, camera: str) -> Path:
     return target_dir / "video" / f"{camera}_shapes.csv"
 
 
+def _resolve_video_path(target_dir: Path, video_arg: str) -> Path:
+    """Resolve a ``--video`` argument against the intersection's video directory.
+
+    A bare filename (or relative path) is resolved against
+    ``intersections/<folder>/video/`` -- the same directory the shape-config
+    CSVs live in -- rather than the process's working directory. An absolute
+    path is used as-is, as an escape hatch for videos stored elsewhere.
+
+    Args:
+        target_dir: Absolute path to the intersection directory.
+        video_arg: The raw ``--video`` CLI argument.
+
+    Returns:
+        The resolved video file path.
+    """
+    video_path = Path(video_arg)
+    return video_path if video_path.is_absolute() else target_dir / "video" / video_path
+
+
 def handle_video_calibrate_shapes(args: argparse.Namespace) -> None:
     """Open the interactive shape-calibration tool for one camera.
 
@@ -1290,22 +1310,25 @@ def handle_video_calibrate_shapes(args: argparse.Namespace) -> None:
     target_dir = _get_target_dir(target_name)
     shape_path = _video_shape_path(target_dir, args.camera)
     shape_path.parent.mkdir(parents=True, exist_ok=True)
+    video_path = _resolve_video_path(target_dir, args.video)
+    if not video_path.exists():
+        _die(f"Video not found: {video_path}")
 
     existing = ShapeConfig.load(shape_path) if shape_path.exists() else None
     if existing:
         print(f"\n🎯  Editing existing shape config: {shape_path} ({len(existing.shapes)} shapes)")
     else:
         print(f"\n🎯  Creating new shape config: {shape_path}")
+    print(f"    Video: {video_path}")
 
     try:
-        config = calibrate_shapes(args.video, existing)
+        config = calibrate_shapes(video_path, existing, save_path=shape_path)
     except Exception as exc:
         if args.verbose:
             traceback.print_exc()
         _die(f"Calibration failed: {exc}")
 
-    config.save(shape_path)
-    print(f"\n✅  Saved {len(config.shapes)} shapes to {shape_path}")
+    print(f"\n🏁  Calibration session ended ({len(config.shapes)} shapes in memory).")
 
 
 def handle_video_overlay(args: argparse.Namespace) -> None:
@@ -1335,6 +1358,10 @@ def handle_video_overlay(args: argparse.Namespace) -> None:
         )
     shape_config = ShapeConfig.load(shape_path)
 
+    video_path = _resolve_video_path(target_dir, args.video)
+    if not video_path.exists():
+        _die(f"Video not found: {video_path}")
+
     tz_str = args.timezone or meta.get("timezone") or "US/Mountain"
     tz = pytz.timezone(tz_str)
     try:
@@ -1342,12 +1369,17 @@ def handle_video_overlay(args: argparse.Namespace) -> None:
     except ValueError as exc:
         _die(f"Invalid datetime format for --start: {exc}. Use ISO-8601 (e.g. 2024-06-01T06:00:00).")
 
-    output_path = Path(args.output) if args.output else target_dir / "outputs" / f"{args.camera}_overlay.mp4"
+    if args.output:
+        output_path = Path(args.output)
+    else:
+        # Output to a date folder based on the start time, consistent with plotting outputs.
+        date_dir = target_dir / "outputs" / start_dt.strftime("%Y-%m-%d")
+        output_path = date_dir / f"{args.camera}_overlay.mp4"
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     int_name = meta.get("intersection_name", target_name)
     print(f"\n🎬  Rendering video overlay for {int_name}")
-    print(f"    Video:  {args.video}")
+    print(f"    Video:  {video_path}")
     print(f"    Start:  {start_dt.isoformat()}")
     print(f"    Output: {output_path}")
 
@@ -1355,7 +1387,7 @@ def handle_video_overlay(args: argparse.Namespace) -> None:
         result = render_overlay(
             db_path,
             shape_config,
-            args.video,
+            video_path,
             output_path,
             start_dt,
             lookback_minutes=args.lookback,
@@ -1367,6 +1399,90 @@ def handle_video_overlay(args: argparse.Namespace) -> None:
         _die(f"Video overlay rendering failed: {exc}")
 
     print(f"\n✅  Wrote {result.frame_count} frames @ {result.fps:.2f} fps to {result.output_path}")
+
+
+def handle_video_locate_phase_change(args: argparse.Namespace) -> None:
+    """Find a phase's exact color-change timestamp near a rough video-start guess.
+
+    See ``atspm.analysis.video.nearest_phase_transition`` for the event-code
+    rationale and ``atspm.video.extract_labeled_clip`` for the confirmation
+    clip. Call once without ``--observed-offset`` to get a labeled clip to
+    watch; call again with ``--observed-offset <value read off the clip>``
+    to get the corrected ``--start`` for ``video-overlay``.
+
+    Args:
+        args: Parsed CLI arguments from the ``video-locate-phase-change``
+            subcommand.
+    """
+    import pytz
+    from atspm.analysis.video import _TRANSITION_CODES, nearest_phase_transition
+    from atspm.data.reader import get_events_with_cycles_df
+    from atspm.utils.timezone import resolve_pytz
+    from atspm.video import extract_labeled_clip
+
+    target_name = _resolve_target_name(args.target, args.targetid)
+    target_dir = _get_target_dir(target_name)
+    meta = _load_metadata(target_dir)
+    db_path = _resolve_db_path(target_dir, meta)
+
+    if not db_path.exists():
+        _die(f"Database not found: {db_path}\nRun 'atspm process --target {target_name}' first.")
+
+    video_path = _resolve_video_path(target_dir, args.video)
+    if not video_path.exists():
+        _die(f"Video not found: {video_path}")
+
+    tz_str = args.timezone or meta.get("timezone") or "US/Mountain"
+    tz = resolve_pytz(tz_str)
+    try:
+        start_dt = tz.localize(datetime.fromisoformat(args.start))
+    except ValueError as exc:
+        _die(f"Invalid datetime format for --start: {exc}. Use ISO-8601 (e.g. 2024-06-01T06:00:00).")
+
+    guess_ts = start_dt.timestamp() + args.offset_guess
+    search_padding_sec = 30.0
+    fetch_start = datetime.fromtimestamp(guess_ts - search_padding_sec, tz=pytz.UTC)
+    fetch_end = datetime.fromtimestamp(guess_ts + search_padding_sec, tz=pytz.UTC)
+    event_code = _TRANSITION_CODES[args.transition]
+    events_df = get_events_with_cycles_df(db_path, fetch_start, fetch_end, event_codes=[event_code])
+
+    actual_ts = nearest_phase_transition(events_df, args.phase, args.transition, guess_ts)
+    if actual_ts is None:
+        _die(
+            f"No phase {args.phase} {args.transition} event found within "
+            f"{search_padding_sec:.0f}s of the guess.\n"
+            f"Check --phase and --transition, or adjust --offset-guess."
+        )
+
+    actual_dt = datetime.fromtimestamp(actual_ts, tz=pytz.UTC).astimezone(tz)
+    int_name = meta.get("intersection_name", target_name)
+    print(f"\n🔎  Locating phase {args.phase} {args.transition} for {int_name}")
+    print(f"    Nearest DB transition: {actual_dt.isoformat()} (Δ {actual_ts - guess_ts:+.3f}s from guess)")
+
+    if args.observed_offset is not None:
+        corrected_dt = datetime.fromtimestamp(
+            actual_ts - args.observed_offset, tz=pytz.UTC,
+        ).astimezone(tz)
+        print(f"\n✅  Corrected --start: {corrected_dt.isoformat()}")
+        return
+
+    date_dir = target_dir / "outputs" / start_dt.strftime("%Y-%m-%d")
+    date_dir.mkdir(parents=True, exist_ok=True)
+    clip_path = date_dir / f"{args.camera}_locate_phase{args.phase}_{args.transition}.mp4"
+
+    try:
+        result = extract_labeled_clip(video_path, clip_path, args.offset_guess, window_sec=args.window)
+    except Exception as exc:
+        if args.verbose:
+            traceback.print_exc()
+        _die(f"Clip extraction failed: {exc}")
+
+    print(f"    Clip: {result.output_path} ({result.frame_count} frames @ {result.fps:.2f} fps)")
+    print(
+        "\nWatch the clip, read off the elapsed video-time the change visually "
+        "happens, then rerun this command with --observed-offset <that value> "
+        "to get the corrected --start."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1965,7 +2081,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Interactively draw/edit loop and stopbar shapes for one camera.",
         description=(
             "Opens an interactive OpenCV window over a video's first frame to draw,\n"
-            "edit, and save loop/stopbar/approach shapes for video-overlay. One\n"
+            "edit, and save loop/stopbar shapes for video-overlay. One\n"
             "camera at a time -- this is a calibration session, not a batch operation."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -1974,7 +2090,7 @@ def _build_parser() -> argparse.ArgumentParser:
     group_vidcal.add_argument("--target", metavar="FOLDER", help="Exact intersection folder name.")
     group_vidcal.add_argument("--targetid", metavar="ID", help="Intersection ID prefix (e.g. '2068').")
     p_vidcal.add_argument("--camera", required=True, metavar="NAME", help="Camera name (used as the shape-config filename stem).")
-    p_vidcal.add_argument("--video", required=True, metavar="PATH", help="Video file to calibrate against (first frame is used).")
+    p_vidcal.add_argument("--video", required=True, metavar="PATH", help="Video file to calibrate against (first frame is used). A relative path is resolved against <target>/video/; an absolute path is used as-is.")
     p_vidcal.add_argument("--verbose", action="store_true", default=False, help="Print full tracebacks for any errors.")
     p_vidcal.set_defaults(func=handle_video_calibrate_shapes)
 
@@ -1995,13 +2111,45 @@ def _build_parser() -> argparse.ArgumentParser:
     group_vidov.add_argument("--target", metavar="FOLDER", help="Exact intersection folder name.")
     group_vidov.add_argument("--targetid", metavar="ID", help="Intersection ID prefix (e.g. '2068').")
     p_vidov.add_argument("--camera", required=True, metavar="NAME", help="Camera name (matches the shape-config filename stem).")
-    p_vidov.add_argument("--video", required=True, metavar="PATH", help="Input video file to overlay.")
+    p_vidov.add_argument("--video", required=True, metavar="PATH", help="Input video file to overlay. A relative path is resolved against <target>/video/; an absolute path is used as-is.")
     p_vidov.add_argument("--start", required=True, metavar="ISO8601", help="Real-world timestamp of the video's first frame (local time, ISO-8601).")
-    p_vidov.add_argument("--output", default=None, metavar="PATH", help="Output video path. Defaults to <target>/outputs/<camera>_overlay.mp4.")
+    p_vidov.add_argument("--output", default=None, metavar="PATH", help="Output video path. Defaults to <target>/outputs/<start-date>/<camera>_overlay.mp4.")
     p_vidov.add_argument("--lookback", type=float, default=10.0, metavar="MIN", help="Minutes of event data to fetch before/after the video window, for correct status at the clip's edges (default: 10.0).")
     p_vidov.add_argument("--timezone", default=None, metavar="TZ", help="Override the timezone from metadata.json.")
     p_vidov.add_argument("--verbose", action="store_true", default=False, help="Print full tracebacks for any errors.")
     p_vidov.set_defaults(func=handle_video_overlay)
+
+    # ------------------------------------------------------------------
+    # video-locate-phase-change (single-target only, no --all -- one video
+    # = one camera, same exception as the other two video commands)
+    # ------------------------------------------------------------------
+    p_vidloc = subs.add_parser(
+        "video-locate-phase-change",
+        help="Find a phase's exact color-change time near a rough --start guess.",
+        description=(
+            "Looks up the database's exact timestamp of a phase's green->yellow\n"
+            "or yellow->red transition near a rough --start guess. Call once\n"
+            "without --observed-offset to get a short labeled clip to watch (the\n"
+            "elapsed video-time is burned into every frame); call again with\n"
+            "--observed-offset <value read off the clip> to get the corrected\n"
+            "--start for video-overlay."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    group_vidloc = p_vidloc.add_mutually_exclusive_group(required=True)
+    group_vidloc.add_argument("--target", metavar="FOLDER", help="Exact intersection folder name.")
+    group_vidloc.add_argument("--targetid", metavar="ID", help="Intersection ID prefix (e.g. '2068').")
+    p_vidloc.add_argument("--camera", required=True, metavar="NAME", help="Camera name (used to name the output clip).")
+    p_vidloc.add_argument("--video", required=True, metavar="PATH", help="Input video file. A relative path is resolved against <target>/video/; an absolute path is used as-is.")
+    p_vidloc.add_argument("--phase", required=True, type=int, metavar="N", help="Signal phase number visible in the camera view.")
+    p_vidloc.add_argument("--transition", required=True, choices=["green_to_yellow", "yellow_to_red"], help="Which visual color change to locate.")
+    p_vidloc.add_argument("--start", required=True, metavar="ISO8601", help="Rough guess for the real-world timestamp of the video's first frame (local time, ISO-8601).")
+    p_vidloc.add_argument("--offset-guess", required=True, type=float, metavar="SEC", help="Roughly how many seconds into the video the transition appears to happen.")
+    p_vidloc.add_argument("--window", type=float, default=3.0, metavar="SEC", help="Half-width of the confirmation clip, in seconds (default: 3.0).")
+    p_vidloc.add_argument("--observed-offset", type=float, default=None, metavar="SEC", help="Exact elapsed video-time (read off the clip) the change visually happens. When given, prints the corrected --start instead of rendering a clip.")
+    p_vidloc.add_argument("--timezone", default=None, metavar="TZ", help="Override the timezone from metadata.json.")
+    p_vidloc.add_argument("--verbose", action="store_true", default=False, help="Print full tracebacks for any errors.")
+    p_vidloc.set_defaults(func=handle_video_locate_phase_change)
 
     return parser
 

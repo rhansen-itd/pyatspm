@@ -1,10 +1,10 @@
 """
 ATSPM Video Shape Configuration (Imperative Shell)
 
-Owns the per-camera shape-config CSV round-trip (loop/stopbar/approach
-shapes drawn over a fixed video resolution) and the small amount of
-identifier resolution needed to connect a shape to the right event-code
-lookup in ``atspm.analysis.video``.
+Owns the per-camera shape-config CSV round-trip (loop/stopbar shapes drawn
+over a fixed video resolution) and the small amount of identifier resolution
+needed to connect a shape to the right event-code lookup in
+``atspm.analysis.video``.
 
 Shape CSV location convention
 ------------------------------
@@ -13,6 +13,18 @@ existing ``raw_data/``, ``outputs/``, and ``int_cfg.csv`` per-intersection
 layout.  Unlike ``int_cfg.csv`` (signal-timing-period config), this file is
 tied to a specific camera and its recorded ``video_width``/``video_height``
 and is not date-versioned.
+
+File layout
+-----------
+A 2-section CSV: a one-row metadata header (``video_width``/``video_height``)
+followed by the per-shape table, so resolution is recorded once per file
+rather than repeated on every shape row::
+
+    video_width,video_height
+    1920,1080
+    type,points,color,input,phase,name
+    loop,100,100;200,100;200,200;100,200,"0,255,0",3,,South Loop 3
+    stopbar,50,300;250,300,"0,0,255",,2,Southbound Stop Bar
 
 Overlap numbering
 ------------------
@@ -37,10 +49,8 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 OVERLAP_LETTER_MAP: Dict[str, int] = {f"OL{chr(ord('A') + i)}": i + 1 for i in range(16)}
 
-_CSV_FIELDS = [
-    "type", "points", "color", "input", "phase", "direction",
-    "video_width", "video_height",
-]
+_META_FIELDS = ["video_width", "video_height"]
+_CSV_FIELDS = ["type", "points", "color", "input", "phase", "name"]
 
 
 def resolve_stopbar_target(phase_field: Union[int, str]) -> Tuple[str, int]:
@@ -71,10 +81,10 @@ def resolve_stopbar_target(phase_field: Union[int, str]) -> Tuple[str, int]:
 
 
 class ShapeConfig:
-    """Loop/stopbar/approach shape definitions for a single camera.
+    """Loop/stopbar shape definitions for a single camera.
 
     Mirrors the legacy ``VideoProcessor`` shape list (a list of dicts with
-    ``type`` in ``{"loop", "stopbar", "approach"}``), but as a standalone
+    ``type`` in ``{"loop", "stopbar"}``), but as a standalone
     Imperative Shell class rather than bundled into a video-processing god
     object.
     """
@@ -107,11 +117,16 @@ class ShapeConfig:
             raise FileNotFoundError(f"Shape config not found: {path}")
 
         shapes: List[Dict[str, Any]] = []
-        video_width = video_height = None
 
         with open(path, "r", newline="") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
+            reader = csv.reader(f)
+            next(reader, None)  # _META_FIELDS header row
+            meta_row = next(reader, None) or []
+            video_width = int(meta_row[0]) if len(meta_row) > 0 and meta_row[0] else None
+            video_height = int(meta_row[1]) if len(meta_row) > 1 and meta_row[1] else None
+
+            shape_header = next(reader, None) or _CSV_FIELDS
+            for row in csv.DictReader(f, fieldnames=shape_header):
                 points = []
                 for pt_str in row["points"].split(";"):
                     x, y = map(int, pt_str.split(","))
@@ -125,12 +140,8 @@ class ShapeConfig:
                     "color": color,
                     "input": int(row["input"]) if row["input"] else None,
                     "phase": row["phase"] or None,
-                    "direction": row["direction"] or None,
+                    "name": row.get("name") or None,
                 })
-
-                if row.get("video_width") and row.get("video_height"):
-                    video_width = int(row["video_width"])
-                    video_height = int(row["video_height"])
 
         return cls(shapes=shapes, video_width=video_width, video_height=video_height)
 
@@ -143,6 +154,8 @@ class ShapeConfig:
         path = Path(path)
         with open(path, "w", newline="") as f:
             writer = csv.writer(f)
+            writer.writerow(_META_FIELDS)
+            writer.writerow([self.video_width, self.video_height])
             writer.writerow(_CSV_FIELDS)
             for shape in self.shapes:
                 points_str = ";".join(f"{pt[0]},{pt[1]}" for pt in shape["points"])
@@ -154,9 +167,7 @@ class ShapeConfig:
                     color_str,
                     shape.get("input", ""),
                     shape.get("phase", ""),
-                    shape.get("direction", ""),
-                    self.video_width,
-                    self.video_height,
+                    shape.get("name", ""),
                 ])
 
     def validate_resolution(self, actual_width: int, actual_height: int) -> None:

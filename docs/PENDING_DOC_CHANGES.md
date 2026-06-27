@@ -19,3 +19,9 @@ See CLAUDE.md "Documentation Workflow" for the rules.
 - [src/atspm/data/__init__.py] New exports: `RetrievalEngine`, `run_retrieval`.
 - [src/atspm/data/retrieval.py] New module; new per-intersection config file convention: `intersections/<folder>/devices.json` (list of device entries: role/device_type/port/user/password/remote_folder/last_retrieved/host). Host resolves from an explicit `host` field if present; only `role: controller` may omit it and fall back to `metadata.json`'s `controller_ip` (one controller per intersection, unambiguous). Every other role must set `host` explicitly — no fallback to `detection_ip`.
 - [pyproject.toml] Added `paramiko`, `scp` dependencies.
+- [src/atspm/data/video.py] Shape CSV reworked: `direction`/per-row `video_width`/`video_height` columns removed, `name` column added; resolution now lives in a one-row metadata header instead of repeating per shape.
+- [src/atspm/video/calibrate.py] `calibrate_shapes()` gained a `save_path` param; it now owns saving (`'w'` to save, `'q'` prompts to save) instead of the caller saving afterward.
+- [src/atspm/cli.py] `video-calibrate-shapes`/`video-overlay --video` now resolves relative paths against `<target>/video/` instead of the working directory; `video-overlay`'s default `--output` now nests under a `<start-date>/` folder.
+- [src/atspm/cli.py] Added `video-locate-phase-change` subcommand (single-target only, no `--all`): finds a phase's exact DB transition time near a rough `--start` guess and renders a labeled confirmation clip, or computes a corrected `--start` given `--observed-offset`.
+- [src/atspm/analysis/video.py] New function `nearest_phase_transition` (nearest-event lookup backing `video-locate-phase-change`).
+- [src/atspm/video/__init__.py] New export: `extract_labeled_clip`.

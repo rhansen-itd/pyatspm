@@ -21,7 +21,7 @@ out of scope -- see ``docs/ROADMAP.md``'s "Future / deferred" section.
 
 from .overlay import draw_loop_overlay, draw_shape_overlay, draw_stopbar_overlay
 from .calibrate import calibrate_shapes
-from .processor import VideoOverlayResult, render_overlay
+from .processor import VideoOverlayResult, extract_labeled_clip, render_overlay
 
 __all__ = [
     "draw_loop_overlay",
@@ -30,4 +30,5 @@ __all__ = [
     "calibrate_shapes",
     "VideoOverlayResult",
     "render_overlay",
+    "extract_labeled_clip",
 ]

@@ -177,6 +177,81 @@ def render_overlay(
     return VideoOverlayResult(output_path=output_path, frame_count=frame_idx, fps=fps)
 
 
+def extract_labeled_clip(
+    video_path: Union[str, Path],
+    output_path: Union[str, Path],
+    center_offset_sec: float,
+    window_sec: float = 3.0,
+) -> VideoOverlayResult:
+    """Crop a short clip around *center_offset_sec* with elapsed-time labels.
+
+    Every frame gets its elapsed video-time burned in (``t=44.367s``), so a
+    user scrubbing the clip can read off the exact instant a visual event
+    (e.g. a signal head changing color) occurs, for time-alignment purposes
+    (see ``atspm.analysis.video.nearest_phase_transition``).
+
+    ``cv2``'s frame-seek can land on the nearest keyframe rather than the
+    exact requested frame on some codecs/containers, so the actual landed
+    position is re-read via ``CAP_PROP_POS_FRAMES`` immediately after
+    seeking and used as the basis for every label -- the label always
+    matches the frame actually written, even if the seek itself was
+    imprecise.
+
+    Args:
+        video_path: Input video file.
+        output_path: Destination clip file (created/overwritten).
+        center_offset_sec: Elapsed video-time (seconds from the start of
+            *video_path*) to center the clip on.
+        window_sec: Half-width of the clip, in seconds.
+
+    Returns:
+        ``VideoOverlayResult`` with the output path, frame count, and FPS.
+
+    Raises:
+        ValueError: If the video or output writer cannot be opened.
+    """
+    video_path = Path(video_path)
+    output_path = Path(output_path)
+
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        raise ValueError(f"Cannot open video: {video_path}")
+
+    width  = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    fps    = cap.get(cv2.CAP_PROP_FPS) or 30.0
+
+    requested_start_frame = max(0, int((center_offset_sec - window_sec) * fps))
+    end_sec = center_offset_sec + window_sec
+
+    cap.set(cv2.CAP_PROP_POS_FRAMES, requested_start_frame)
+    frame_idx = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
+
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    out = cv2.VideoWriter(str(output_path), fourcc, fps, (width, height))
+    if not out.isOpened():
+        cap.release()
+        raise ValueError(f"Cannot create output video: {output_path}")
+
+    written = 0
+    try:
+        while (frame_idx / fps) <= end_sec:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            elapsed = frame_idx / fps
+            cv2.putText(frame, f"t={elapsed:.3f}s", (10, height - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+            out.write(frame)
+            written += 1
+            frame_idx += 1
+    finally:
+        cap.release()
+        out.release()
+
+    return VideoOverlayResult(output_path=output_path, frame_count=written, fps=fps)
+
+
 def _build_status_lookup(
     events_df,
     relevant_phases,
