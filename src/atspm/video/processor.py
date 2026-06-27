@@ -180,15 +180,22 @@ def render_overlay(
 def extract_labeled_clip(
     video_path: Union[str, Path],
     output_path: Union[str, Path],
-    center_offset_sec: float,
+    expected_offset_sec: float,
     window_sec: float = 3.0,
 ) -> VideoOverlayResult:
-    """Crop a short clip around *center_offset_sec* with elapsed-time labels.
+    """Crop a short clip around *expected_offset_sec* with a normalized countdown label.
 
-    Every frame gets its elapsed video-time burned in (``t=44.367s``), so a
-    user scrubbing the clip can read off the exact instant a visual event
-    (e.g. a signal head changing color) occurs, for time-alignment purposes
-    (see ``atspm.analysis.video.nearest_phase_transition``).
+    Every frame gets a signed countdown to *expected_offset_sec* burned in
+    (``+0.300s`` / ``-0.300s``), not the raw elapsed video-time -- positive
+    while the clip hasn't yet reached the frame where the transition
+    *should* occur (assuming the caller's ``--start`` guess is exactly
+    right), negative after. A user reading the label off the frame where
+    the transition *actually*, visually happens gets a value that can be
+    added directly to that ``--start`` guess to correct it: if the
+    transition happens later than expected the label is negative there
+    (subtract), if earlier it's positive (add) -- see
+    ``atspm.analysis.video.first_phase_transition_after`` for how
+    *expected_offset_sec* is derived.
 
     ``cv2``'s frame-seek can land on the nearest keyframe rather than the
     exact requested frame on some codecs/containers, so the actual landed
@@ -200,8 +207,9 @@ def extract_labeled_clip(
     Args:
         video_path: Input video file.
         output_path: Destination clip file (created/overwritten).
-        center_offset_sec: Elapsed video-time (seconds from the start of
-            *video_path*) to center the clip on.
+        expected_offset_sec: Elapsed video-time (seconds from the start of
+            *video_path*) at which the transition is expected, and the
+            point the clip is centered on and labels are normalized to.
         window_sec: Half-width of the clip, in seconds.
 
     Returns:
@@ -221,8 +229,8 @@ def extract_labeled_clip(
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     fps    = cap.get(cv2.CAP_PROP_FPS) or 30.0
 
-    requested_start_frame = max(0, int((center_offset_sec - window_sec) * fps))
-    end_sec = center_offset_sec + window_sec
+    requested_start_frame = max(0, int((expected_offset_sec - window_sec) * fps))
+    end_sec = expected_offset_sec + window_sec
 
     cap.set(cv2.CAP_PROP_POS_FRAMES, requested_start_frame)
     frame_idx = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
@@ -240,7 +248,8 @@ def extract_labeled_clip(
             if not ret:
                 break
             elapsed = frame_idx / fps
-            cv2.putText(frame, f"t={elapsed:.3f}s", (10, height - 10),
+            label = expected_offset_sec - elapsed
+            cv2.putText(frame, f"{label:+.3f}s", (10, height - 10),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
             out.write(frame)
             written += 1

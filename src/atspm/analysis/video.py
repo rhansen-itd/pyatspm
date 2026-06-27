@@ -60,7 +60,7 @@ Package Location: src/atspm/analysis/video.py
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -406,13 +406,13 @@ _TRANSITION_CODES = {
 }
 
 
-def nearest_phase_transition(
+def first_phase_transition_after(
     events_df: pd.DataFrame,
     phase: int,
-    transition: str,
-    guess_ts: float,
-) -> Optional[float]:
-    """Real timestamp of *phase*'s visual color change nearest to *guess_ts*.
+    after_ts: float,
+    transition: Optional[str] = None,
+) -> Optional[Tuple[str, float]]:
+    """Earliest visual color change for *phase* at or after *after_ts*.
 
     ``"yellow_to_red"`` resolves to Code 9 (Phase End Yellow Clearance)
     rather than Code 10/11 (Begin/End Red Clearance) -- Code 9 fires at the
@@ -424,26 +424,35 @@ def nearest_phase_transition(
         events_df: Flat events DataFrame with columns
             ``[timestamp, event_code, parameter]``.
         phase: Signal phase number.
-        transition: ``"green_to_yellow"`` or ``"yellow_to_red"``.
-        guess_ts: Epoch-second timestamp to search around.
+        after_ts: Epoch-second timestamp; only events at or after this
+            instant are considered.
+        transition: Restrict to ``"green_to_yellow"`` or ``"yellow_to_red"``.
+            When ``None``, both are considered and whichever occurs first
+            wins -- useful for auto-selecting which edge to use for
+            alignment without the caller having to know in advance.
 
     Returns:
-        The nearest matching event's timestamp (epoch seconds), or ``None``
-        if *events_df* has no matching event for this phase.
+        ``(transition, timestamp)`` for the earliest match, or ``None`` if
+        *events_df* has no matching event for this phase at or after
+        *after_ts*.
 
     Raises:
-        ValueError: If *transition* isn't a recognised edge.
+        ValueError: If *transition* is given but isn't a recognised edge.
     """
-    if transition not in _TRANSITION_CODES:
+    if transition is not None and transition not in _TRANSITION_CODES:
         raise ValueError(
             f"Unrecognised transition {transition!r}: expected one of "
             f"{sorted(_TRANSITION_CODES)}."
         )
-    code = _TRANSITION_CODES[transition]
+    codes = [_TRANSITION_CODES[transition]] if transition else list(_TRANSITION_CODES.values())
+    code_to_transition = {v: k for k, v in _TRANSITION_CODES.items()}
+
     matches = events_df.loc[
-        (events_df["event_code"] == code) & (events_df["parameter"] == phase), "timestamp"
+        events_df["event_code"].isin(codes)
+        & (events_df["parameter"] == phase)
+        & (events_df["timestamp"] >= after_ts)
     ]
     if matches.empty:
         return None
-    ts = matches.to_numpy(dtype=np.float64)
-    return float(ts[np.argmin(np.abs(ts - guess_ts))])
+    row = matches.loc[matches["timestamp"].idxmin()]
+    return code_to_transition[row["event_code"]], float(row["timestamp"])

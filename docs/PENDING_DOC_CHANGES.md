@@ -21,7 +21,7 @@ See CLAUDE.md "Documentation Workflow" for the rules.
 - [pyproject.toml] Added `paramiko`, `scp` dependencies.
 - [src/atspm/data/video.py] Shape CSV reworked: `direction`/per-row `video_width`/`video_height` columns removed, `name` column added; resolution now lives in a one-row metadata header instead of repeating per shape.
 - [src/atspm/video/calibrate.py] `calibrate_shapes()` gained a `save_path` param; it now owns saving (`'w'` to save, `'q'` prompts to save) instead of the caller saving afterward.
-- [src/atspm/cli.py] `video-calibrate-shapes`/`video-overlay --video` now resolves relative paths against `<target>/video/` instead of the working directory; `video-overlay`'s default `--output` now nests under a `<start-date>/` folder.
-- [src/atspm/cli.py] Added `video-locate-phase-change` subcommand (single-target only, no `--all`): finds a phase's exact DB transition time near a rough `--start` guess and renders a labeled confirmation clip, or computes a corrected `--start` given `--observed-offset`.
-- [src/atspm/analysis/video.py] New function `nearest_phase_transition` (nearest-event lookup backing `video-locate-phase-change`).
+- [src/atspm/cli.py] `video-calibrate-shapes`/`video-overlay --video` now resolves relative paths against `<target>/video/` instead of the working directory; `video-overlay`'s default `--output` now nests under `<start-date>/` and includes `--start`'s time-of-day in the filename.
+- [src/atspm/cli.py] Added `video-locate-phase-change` subcommand (single-target only, no `--all`): auto-selects the first green-to-yellow/yellow-to-red change for a phase at least `--min-offset` seconds into the video, renders a confirmation clip with a normalized (signed, zero-at-expected-frame) countdown label, or computes a corrected `--start` (= original + `--observed-delta`) given `--observed-delta`.
+- [src/atspm/analysis/video.py] New function `first_phase_transition_after` (earliest-event-at-or-after lookup backing `video-locate-phase-change`).
 - [src/atspm/video/__init__.py] New export: `extract_labeled_clip`.

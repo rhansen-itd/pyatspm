@@ -32,7 +32,7 @@ import json
 import re
 import sys
 import traceback
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -1373,8 +1373,11 @@ def handle_video_overlay(args: argparse.Namespace) -> None:
         output_path = Path(args.output)
     else:
         # Output to a date folder based on the start time, consistent with plotting outputs.
+        # The filename includes --start's time-of-day (to a tenth of a second) so
+        # re-renders after correcting --start don't silently overwrite each other.
         date_dir = target_dir / "outputs" / start_dt.strftime("%Y-%m-%d")
-        output_path = date_dir / f"{args.camera}_overlay.mp4"
+        time_str = start_dt.strftime("%H%M%S") + f".{start_dt.microsecond // 100000}"
+        output_path = date_dir / f"{args.camera}_overlay_{time_str}.mp4"
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     int_name = meta.get("intersection_name", target_name)
@@ -1401,21 +1404,29 @@ def handle_video_overlay(args: argparse.Namespace) -> None:
     print(f"\n✅  Wrote {result.frame_count} frames @ {result.fps:.2f} fps to {result.output_path}")
 
 
-def handle_video_locate_phase_change(args: argparse.Namespace) -> None:
-    """Find a phase's exact color-change timestamp near a rough video-start guess.
+_PHASE_LOCATE_SEARCH_HORIZON_SEC = 240.0  # generous upper bound on cycle length
 
-    See ``atspm.analysis.video.nearest_phase_transition`` for the event-code
+
+def handle_video_locate_phase_change(args: argparse.Namespace) -> None:
+    """Auto-select and locate a phase's exact color-change timestamp for alignment.
+
+    By default, finds the first green->yellow or yellow->red change for
+    ``--phase`` at or after ``--start`` + ``--min-offset`` (whichever edge
+    comes first); pass ``--transition`` to pin it to one edge. See
+    ``atspm.analysis.video.first_phase_transition_after`` for the event-code
     rationale and ``atspm.video.extract_labeled_clip`` for the confirmation
-    clip. Call once without ``--observed-offset`` to get a labeled clip to
-    watch; call again with ``--observed-offset <value read off the clip>``
-    to get the corrected ``--start`` for ``video-overlay``.
+    clip's normalized countdown label. Call once without
+    ``--observed-delta`` to get a labeled clip to watch; call again with
+    ``--observed-delta <value read off the clip>`` to get the corrected
+    ``--start`` for ``video-overlay`` -- no DB lookup math required, just
+    add the signed value read off the screen to the original ``--start``.
 
     Args:
         args: Parsed CLI arguments from the ``video-locate-phase-change``
             subcommand.
     """
     import pytz
-    from atspm.analysis.video import _TRANSITION_CODES, nearest_phase_transition
+    from atspm.analysis.video import _TRANSITION_CODES, first_phase_transition_after
     from atspm.data.reader import get_events_with_cycles_df
     from atspm.utils.timezone import resolve_pytz
     from atspm.video import extract_labeled_clip
@@ -1439,39 +1450,43 @@ def handle_video_locate_phase_change(args: argparse.Namespace) -> None:
     except ValueError as exc:
         _die(f"Invalid datetime format for --start: {exc}. Use ISO-8601 (e.g. 2024-06-01T06:00:00).")
 
-    guess_ts = start_dt.timestamp() + args.offset_guess
-    search_padding_sec = 30.0
-    fetch_start = datetime.fromtimestamp(guess_ts - search_padding_sec, tz=pytz.UTC)
-    fetch_end = datetime.fromtimestamp(guess_ts + search_padding_sec, tz=pytz.UTC)
-    event_code = _TRANSITION_CODES[args.transition]
-    events_df = get_events_with_cycles_df(db_path, fetch_start, fetch_end, event_codes=[event_code])
+    start_epoch = start_dt.timestamp()
+    after_ts = start_epoch + args.min_offset
+    fetch_start = datetime.fromtimestamp(after_ts, tz=pytz.UTC)
+    fetch_end = datetime.fromtimestamp(after_ts + _PHASE_LOCATE_SEARCH_HORIZON_SEC, tz=pytz.UTC)
+    event_codes = (
+        [_TRANSITION_CODES[args.transition]] if args.transition
+        else list(_TRANSITION_CODES.values())
+    )
+    events_df = get_events_with_cycles_df(db_path, fetch_start, fetch_end, event_codes=event_codes)
 
-    actual_ts = nearest_phase_transition(events_df, args.phase, args.transition, guess_ts)
-    if actual_ts is None:
+    found = first_phase_transition_after(events_df, args.phase, after_ts, transition=args.transition)
+    if found is None:
         _die(
-            f"No phase {args.phase} {args.transition} event found within "
-            f"{search_padding_sec:.0f}s of the guess.\n"
-            f"Check --phase and --transition, or adjust --offset-guess."
+            f"No phase {args.phase} transition found within "
+            f"{_PHASE_LOCATE_SEARCH_HORIZON_SEC:.0f}s of --start + --min-offset.\n"
+            f"Check --phase, or that this video's phase is actually active that early."
         )
+    transition, actual_ts = found
+    expected_offset = actual_ts - start_epoch
 
     actual_dt = datetime.fromtimestamp(actual_ts, tz=pytz.UTC).astimezone(tz)
     int_name = meta.get("intersection_name", target_name)
-    print(f"\n🔎  Locating phase {args.phase} {args.transition} for {int_name}")
-    print(f"    Nearest DB transition: {actual_dt.isoformat()} (Δ {actual_ts - guess_ts:+.3f}s from guess)")
+    print(f"\n🔎  Locating phase {args.phase} {transition} for {int_name}")
+    print(f"    Nearest DB transition: {actual_dt.isoformat()}")
+    print(f"    Expected at {expected_offset:.3f}s into the video (per your --start guess)")
 
-    if args.observed_offset is not None:
-        corrected_dt = datetime.fromtimestamp(
-            actual_ts - args.observed_offset, tz=pytz.UTC,
-        ).astimezone(tz)
+    if args.observed_delta is not None:
+        corrected_dt = start_dt + timedelta(seconds=args.observed_delta)
         print(f"\n✅  Corrected --start: {corrected_dt.isoformat()}")
         return
 
     date_dir = target_dir / "outputs" / start_dt.strftime("%Y-%m-%d")
     date_dir.mkdir(parents=True, exist_ok=True)
-    clip_path = date_dir / f"{args.camera}_locate_phase{args.phase}_{args.transition}.mp4"
+    clip_path = date_dir / f"{args.camera}_locate_phase{args.phase}_{transition}.mp4"
 
     try:
-        result = extract_labeled_clip(video_path, clip_path, args.offset_guess, window_sec=args.window)
+        result = extract_labeled_clip(video_path, clip_path, expected_offset, window_sec=args.window)
     except Exception as exc:
         if args.verbose:
             traceback.print_exc()
@@ -1479,9 +1494,12 @@ def handle_video_locate_phase_change(args: argparse.Namespace) -> None:
 
     print(f"    Clip: {result.output_path} ({result.frame_count} frames @ {result.fps:.2f} fps)")
     print(
-        "\nWatch the clip, read off the elapsed video-time the change visually "
-        "happens, then rerun this command with --observed-offset <that value> "
-        "to get the corrected --start."
+        "\nWatch the clip -- its on-screen counter reads +0.000s at the frame the "
+        "transition should occur if your --start guess is exact, counting down to "
+        "0 and going negative after. Read off the value at the instant the change "
+        "actually, visually happens, then rerun this command with --observed-delta "
+        "<that value, with its sign> to get the corrected --start "
+        "(corrected = original --start + that value)."
     )
 
 
@@ -2113,7 +2131,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_vidov.add_argument("--camera", required=True, metavar="NAME", help="Camera name (matches the shape-config filename stem).")
     p_vidov.add_argument("--video", required=True, metavar="PATH", help="Input video file to overlay. A relative path is resolved against <target>/video/; an absolute path is used as-is.")
     p_vidov.add_argument("--start", required=True, metavar="ISO8601", help="Real-world timestamp of the video's first frame (local time, ISO-8601).")
-    p_vidov.add_argument("--output", default=None, metavar="PATH", help="Output video path. Defaults to <target>/outputs/<start-date>/<camera>_overlay.mp4.")
+    p_vidov.add_argument("--output", default=None, metavar="PATH", help="Output video path. Defaults to <target>/outputs/<start-date>/<camera>_overlay_<start-time>.mp4.")
     p_vidov.add_argument("--lookback", type=float, default=10.0, metavar="MIN", help="Minutes of event data to fetch before/after the video window, for correct status at the clip's edges (default: 10.0).")
     p_vidov.add_argument("--timezone", default=None, metavar="TZ", help="Override the timezone from metadata.json.")
     p_vidov.add_argument("--verbose", action="store_true", default=False, help="Print full tracebacks for any errors.")
@@ -2125,14 +2143,18 @@ def _build_parser() -> argparse.ArgumentParser:
     # ------------------------------------------------------------------
     p_vidloc = subs.add_parser(
         "video-locate-phase-change",
-        help="Find a phase's exact color-change time near a rough --start guess.",
+        help="Auto-locate a phase's exact color-change time to correct a --start guess.",
         description=(
-            "Looks up the database's exact timestamp of a phase's green->yellow\n"
-            "or yellow->red transition near a rough --start guess. Call once\n"
-            "without --observed-offset to get a short labeled clip to watch (the\n"
-            "elapsed video-time is burned into every frame); call again with\n"
-            "--observed-offset <value read off the clip> to get the corrected\n"
-            "--start for video-overlay."
+            "Finds the first green->yellow or yellow->red change for --phase at\n"
+            "or after --start + --min-offset (whichever edge comes first; pin it\n"
+            "with --transition), and reports its exact database timestamp. Call\n"
+            "once without --observed-delta to get a short confirmation clip (the\n"
+            "on-screen counter reads +0.000s at the frame the transition should\n"
+            "occur if --start is exact, counting down through 0 and negative\n"
+            "after). Watch it, read off the signed value at the instant the change\n"
+            "actually happens, then call again with --observed-delta <that value>\n"
+            "to get the corrected --start (= original --start + that value) --\n"
+            "no further database lookup needed."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -2142,11 +2164,11 @@ def _build_parser() -> argparse.ArgumentParser:
     p_vidloc.add_argument("--camera", required=True, metavar="NAME", help="Camera name (used to name the output clip).")
     p_vidloc.add_argument("--video", required=True, metavar="PATH", help="Input video file. A relative path is resolved against <target>/video/; an absolute path is used as-is.")
     p_vidloc.add_argument("--phase", required=True, type=int, metavar="N", help="Signal phase number visible in the camera view.")
-    p_vidloc.add_argument("--transition", required=True, choices=["green_to_yellow", "yellow_to_red"], help="Which visual color change to locate.")
+    p_vidloc.add_argument("--transition", default=None, choices=["green_to_yellow", "yellow_to_red"], help="Pin the search to one edge. Default: auto-pick whichever of green->yellow/yellow->red occurs first.")
     p_vidloc.add_argument("--start", required=True, metavar="ISO8601", help="Rough guess for the real-world timestamp of the video's first frame (local time, ISO-8601).")
-    p_vidloc.add_argument("--offset-guess", required=True, type=float, metavar="SEC", help="Roughly how many seconds into the video the transition appears to happen.")
+    p_vidloc.add_argument("--min-offset", type=float, default=5.0, metavar="SEC", help="Only consider transitions at least this many seconds into the video, per --start (default: 5.0).")
     p_vidloc.add_argument("--window", type=float, default=3.0, metavar="SEC", help="Half-width of the confirmation clip, in seconds (default: 3.0).")
-    p_vidloc.add_argument("--observed-offset", type=float, default=None, metavar="SEC", help="Exact elapsed video-time (read off the clip) the change visually happens. When given, prints the corrected --start instead of rendering a clip.")
+    p_vidloc.add_argument("--observed-delta", type=float, default=None, metavar="SEC", help="Signed value read off the clip's counter at the instant the change actually happens. When given, prints the corrected --start instead of rendering a clip.")
     p_vidloc.add_argument("--timezone", default=None, metavar="TZ", help="Override the timezone from metadata.json.")
     p_vidloc.add_argument("--verbose", action="store_true", default=False, help="Print full tracebacks for any errors.")
     p_vidloc.set_defaults(func=handle_video_locate_phase_change)
