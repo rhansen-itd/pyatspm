@@ -1,6 +1,6 @@
 # Configuration
 
-Each intersection folder (`intersections/<id>_<Name>/`) holds two human-edited config files: `metadata.json` (static attributes) and `int_cfg.csv` (temporal, per-period configuration). `atspm setup --target <folder>` scaffolds both as placeholders.
+Each intersection folder (`intersections/<id>_<Name>/`) holds human-edited config files: `metadata.json` (static attributes), `int_cfg.csv` (temporal, per-period configuration), and `devices.json` (retrieval device list). `atspm setup --target <folder>` scaffolds all three as placeholders. A fourth, per-camera config (`video/<camera>_shapes.csv`) is scaffolded separately by `atspm video-calibrate-shapes`.
 
 ## `metadata.json`
 
@@ -75,3 +75,52 @@ Loaded with `pd.read_csv(csv_path, index_col=[0, 1])`. Each date column becomes 
 ```
 
 Consumed by `parse_exclusions_from_config` / `vehicle_counts` to drop detector actuations that occur while the listed phase is in the listed state (e.g. a detector that double-counts during a particular signal state).
+
+## `devices.json`
+
+Created by `atspm setup` as an empty `[]` placeholder; consumed by `atspm retrieve` (`RetrievalEngine`/`run_retrieval`). A JSON list of device entries, one per device that `.datZ` files should be pulled from via SCP:
+
+```json
+[
+    {
+        "role":          "controller",
+        "device_type":   null,
+        "host":          null,
+        "port":          22,
+        "user":          "user",
+        "password":      "password",
+        "remote_folder": "/path/to/datz",
+        "last_retrieved": null
+    }
+]
+```
+
+- **`role`** — `"secondary"` devices (long-term storage, e.g. an EVO radar unit) are always pulled before `"controller"` devices, regardless of list order, so the controller's short FIFO retention window can't advance past data a secondary device hasn't reported yet.
+- **`host`** — explicit IP/hostname. Only a `"controller"` entry may omit it, in which case it falls back to `metadata.json`'s `controller_ip` (there is exactly one controller per intersection, so the fallback is unambiguous). Every other role must set `host` explicitly — there is no analogous `detection_ip`-style fallback for secondary devices.
+- **`device_type`** — selects the filename→timestamp parser used to find files newer than `last_retrieved`; falls back to a generic parser when `null` or unrecognized.
+- **`last_retrieved`** — ISO-8601 bookmark, advanced in place after each successful run; `atspm retrieve` rewrites `devices.json` with the updated value.
+
+## `video/<camera>_shapes.csv`
+
+Per-camera loop/stopbar shape definitions, scaffolded and edited interactively by `atspm video-calibrate-shapes` (`ShapeConfig.load`/`.save`) and consumed by `atspm video-overlay` (`render_overlay`). Lives at `intersections/<folder>/video/<camera>_shapes.csv` — a sibling of `raw_data/`/`outputs/`, but tied to a specific camera and its recorded resolution rather than date-versioned like `int_cfg.csv`.
+
+A 2-section CSV: a one-row metadata header (`video_width`/`video_height`) followed by the per-shape table, so resolution is recorded once per file instead of repeated on every shape row:
+
+```
+video_width,video_height
+1920,1080
+type,points,color,input,phase,name
+loop,100,100;200,100;200,200;100,200,"0,255,0",3,,South Loop 3
+stopbar,50,300;250,300,"0,0,255",,2,Southbound Stop Bar
+```
+
+| Column | Meaning |
+|---|---|
+| `type` | `"loop"` or `"stopbar"` |
+| `points` | `;`-separated `x,y` pixel coordinates |
+| `color` | `R,G,B` outline color |
+| `input` | Detector channel number (loop shapes only) |
+| `phase` | Phase number, or an overlap letter `"OLA"`-`"OLP"` (stopbar shapes only) — resolved by `resolve_stopbar_target` |
+| `name` | Free-text label |
+
+Overlap letters map to numbers `1`-`16` (`A=1, B=2, ...`) via `OVERLAP_LETTER_MAP`, matching the Indiana/Purdue Hi-Res Logger Enumerations spec's overlap-number convention for event codes 61-66. `render_overlay` rejects a shape config whose recorded `video_width`/`video_height` doesn't match the actual video's resolution — shapes are calibrated pixel-exact and are not rescaled.

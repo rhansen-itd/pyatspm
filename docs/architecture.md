@@ -6,6 +6,7 @@ pyATSPM splits every feature into two layers:
 
 - **Functional Core** (`src/atspm/analysis/`, `src/atspm/plotting/`) — pure functions only. Input/output is DataFrames, dicts, or Plotly `go.Figure` objects. No SQL connections, no file I/O, no `.write_html()`. Fully testable in isolation.
 - **Imperative Shell** (`src/atspm/data/`, `src/atspm/reports/`) — owns all state: DB connections, file paths, transactions. Fetches data via SQL, calls the Core to do the math/rendering, then persists or writes the result.
+- **`src/atspm/video/`** — a peer package to all four above, not a submodule of `plotting/` (OpenCV video frames are a different output shape and library than Plotly). Mostly Imperative Shell (`calibrate.py`, `processor.py` own all DB/OpenCV I/O), with one documented Functional Core exception: `overlay.py`'s in-place `cv2` frame drawing — see the Vectorization bullet below.
 
 ```
 .datZ files
@@ -46,7 +47,7 @@ Flat events+cycles DataFrame ── fed into analysis/* and plotting/* functions
 - **No ORMs** — raw `sqlite3` for ingestion (speed), `pandas.read_sql_query` for analysis (convenience).
 - **UTC epoch floats** — all timestamps are stored as `REAL` (UTC epoch seconds); conversion to local time happens only at the CLI/display boundary.
 - **Gap markers** — `event_code = -1` marks a data discontinuity (controller reset, missing file, etc.). Any logic computing a duration or pairing sequential events must stop at a gap marker rather than bridge across it. See [database_schema.md](database_schema.md#gap-markers).
-- **Vectorization** — no row-iteration in hot paths; pandas vectorization or SQL aggregation is the default. A few `.iterrows()` calls remain in `analysis/detectors.py` and `plotting/*` where the input is a small, pre-filtered DataFrame and the logic is an inherently sequential state machine (e.g. tracking open/close detector intervals) — these are deliberate exceptions, not oversights.
+- **Vectorization** — no row-iteration in hot paths; pandas vectorization or SQL aggregation is the default. A few `.iterrows()` calls remain in `analysis/detectors.py` and `plotting/*` where the input is a small, pre-filtered DataFrame and the logic is an inherently sequential state machine (e.g. tracking open/close detector intervals) — these are deliberate exceptions, not oversights. `video/overlay.py`'s shape-drawing functions mutate a `cv2` frame array in place (no return value) for the same reason `plotting/detectors.py` mutates a `go.Figure` in place — redrawing per-frame/per-trace would be wasteful copy overhead, not a meaningful purity gain.
 
 ## Terminology
 
@@ -56,4 +57,4 @@ Flat events+cycles DataFrame ── fed into analysis/* and plotting/* functions
 
 ## CLI as the user-facing layer
 
-`src/atspm/cli.py` is an `argparse` CLI (entry point `atspm`) sitting on top of the Shell. Every subcommand other than `setup` accepts a mutually exclusive target group — `--target` (exact folder name), `--targetid` (numeric intersection ID prefix), or `--all` (batch over every folder in `intersections/`, skipping failures). See [cli_reference.md](cli_reference.md) for the full subcommand list.
+`src/atspm/cli.py` is an `argparse` CLI (entry point `atspm`) sitting on top of the Shell. Every subcommand other than `setup` accepts a mutually exclusive target group — `--target` (exact folder name), `--targetid` (numeric intersection ID prefix), or `--all` (batch over every folder in `intersections/`, skipping failures). The three `video-*` subcommands are single-target only (`--target`/`--targetid`, no `--all`) — one video file corresponds to one camera, so there's no meaningful batch form. See [cli_reference.md](cli_reference.md) for the full subcommand list.

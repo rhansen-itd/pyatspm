@@ -9,6 +9,8 @@ Public exports per package, as declared in each `__init__.py`. Most users should
 | `DatabaseManager(db_path)` | Context manager for direct DB access (raw `sqlite3`); `get_metadata()`, `set_metadata()`, `import_config()`, span/anchor queries |
 | `init_db(db_path)` | Create a new intersection DB with the full schema (WAL mode, all tables/indexes) |
 | `import_config(csv_path, db_path)` | Import `int_cfg.csv` into the `config` table |
+| `RetrievalEngine(target_dir, meta, devices)` | Pulls new `.datZ` files for every device in a parsed `devices.json`, secondary devices before controller; `run()` returns per-device result dicts |
+| `run_retrieval(target_dir, meta, devices_path)` | Module-level convenience wrapper around `RetrievalEngine` — loads/saves `devices.json` for the caller |
 | `IngestionEngine` | Orchestrates `.datZ` file scanning, parsing, gap detection, and triggers cycle processing |
 | `run_ingestion(db_path, data_dir, timezone, incremental, batch_size)` | Ingest `.datZ` files into `events` |
 | `CycleProcessor` | Orchestrates cycle detection re-entry (fast-append vs. gap-fill paths) |
@@ -31,6 +33,9 @@ Public exports per package, as declared in each `__init__.py`. Most users should
 | `get_arrival_on_green(...)` | Module-level convenience wrapper around `AogEngine` |
 | `DetectorEngine` | Detector-discrepancy orchestration; `get_discrepancies()`, `get_plot_data()` |
 | `get_detector_discrepancies(...)` | Module-level convenience wrapper around `DetectorEngine` |
+| `ShapeConfig` | Per-camera loop/stopbar shape config; `load(path)`/`save(path)` round-trip a `<camera>_shapes.csv`, `validate_resolution(w, h)`, `relevant_phases()`/`relevant_overlaps()`/`relevant_detectors()` |
+| `resolve_stopbar_target(phase_field)` | Resolves a stopbar shape's `phase` field to a `(kind, number)` lookup target — `kind` is `"phase"` or `"overlap"` |
+| `OVERLAP_LETTER_MAP` | `dict` mapping overlap letters `"OLA"`-`"OLP"` to numbers `1`-`16` |
 
 ## `atspm.analysis` — Functional Core
 
@@ -59,6 +64,10 @@ Pure functions: DataFrames/dicts in, DataFrames/dicts/figures out. No I/O.
 | `phase_splits(events_df, bin_len="cycle", report_mode="seconds", phases=None, include_no_clearance=False)` | `phases` | Per-cycle/binned green-yellow-red-clearance timing table |
 | `arrival_on_green(events_df, phase, detector_ids, arrival_offset_sec=0.0)` | `aog` | Per-cycle Arrival on Green for one phase |
 | `bin_arrival_on_green(cycle_df, bin_len=60)` | `aog` | Aggregates per-cycle AOG into fixed time bins |
+| `phase_status_at_timestamps(events_df, phase, query_ts)` | `video` | Per-frame `'G'`/`'Y'`/`'R'`/`'na'` status for one signal phase |
+| `overlap_status_at_timestamps(events_df, overlap_num, query_ts)` | `video` | Per-frame `'G'`/`'Y'`/`'R'`/`'na'` status for one overlap (Codes 61/63/64/65/66) |
+| `detector_status_at_timestamps(events_df, det_id, query_ts)` | `video` | Per-frame On/Off boolean status for one detector; reuses `analysis.detectors._reconstruct_intervals` |
+| `first_phase_transition_after(events_df, phase, after_ts, transition=None)` | `video` | Earliest green→yellow/yellow→red color change for a phase at or after a timestamp |
 
 ## `atspm.plotting` — Functional Core
 
@@ -76,3 +85,17 @@ Pure functions: DataFrames/metadata in, `plotly.graph_objects.Figure` out. No fi
 |---|---|
 | `PlotGenerator(db_path, output_dir)` | `generate_for_date(date_str)` and `generate_date_range(start_date, end_date)` — fetches data via `atspm.data.reader`, builds figures via `atspm.plotting`, writes HTML to `{output_dir}/{YYYY-MM-DD}/` |
 | `generate_reports(db_path, output_dir, date_str)` | Convenience wrapper around `PlotGenerator` |
+
+## `atspm.video` — Imperative Shell (one documented exception)
+
+A peer of `data`/`analysis`/`plotting`/`reports`, not a submodule of `plotting` — see [architecture.md](architecture.md).
+
+| Function / Class | Module | Description |
+|---|---|---|
+| `calibrate_shapes(video_path, shape_config=None, save_path=None)` | `calibrate` | Interactive Tkinter+OpenCV session to draw/edit loop/stopbar shapes; owns saving when `save_path` is given |
+| `draw_shape_overlay(frame, shape, status)` | `overlay` | Dispatches to `draw_loop_overlay`/`draw_stopbar_overlay` by `shape["type"]`; mutates `frame` in place |
+| `draw_loop_overlay(frame, shape, is_on)` | `overlay` | In-place loop-detector outline recolor |
+| `draw_stopbar_overlay(frame, shape, status)` | `overlay` | In-place stopbar outline recolor by `'G'`/`'Y'`/`'R'`/`'na'` |
+| `render_overlay(db_path, shape_config, video_path, output_path, start_dt, lookback_minutes=10.0, lookahead_minutes=10.0, chunk_frames=150)` | `processor` | Renders a full video with live phase/overlap/detector overlays; returns `VideoOverlayResult` |
+| `extract_labeled_clip(video_path, output_path, expected_offset_sec, window_sec=3.0)` | `processor` | Crops a short clip around an expected transition time with a signed countdown label burned in; returns `VideoOverlayResult` |
+| `VideoOverlayResult` | `processor` | Dataclass: `output_path`, `frame_count`, `fps` |

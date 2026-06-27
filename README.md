@@ -27,9 +27,10 @@ pyatspm/
 │
 ├── src/
 │   └── atspm/
-│       ├── data/           # Imperative Shell — DB I/O, ingestion, engines
+│       ├── data/           # Imperative Shell — DB I/O, ingestion, retrieval, engines
 │       ├── analysis/       # Functional Core — pure transformations
 │       ├── plotting/       # Functional Core — pure Plotly figure builders
+│       ├── video/          # Imperative Shell (one exception) — OpenCV overlay rendering
 │       ├── reports/        # Imperative Shell — report orchestration, HTML output
 │       └── cli.py          # argparse CLI (entry point: `atspm`)
 │
@@ -39,8 +40,10 @@ pyatspm/
     └── 2068_US-95_and_SH-8/
         ├── metadata.json
         ├── int_cfg.csv
+        ├── devices.json
         ├── 2068_data.db
         ├── raw_data/        # .datZ files go here
+        ├── video/           # camera videos + <camera>_shapes.csv configs
         └── outputs/         # generated reports/CSVs
 ```
 
@@ -50,7 +53,7 @@ pyatspm/
 pip install -e .
 ```
 
-Requires Python ≥ 3.9. Dependencies: `pandas`, `pytz`, `plotly` (see `pyproject.toml`/`requirements.txt`).
+Requires Python ≥ 3.9. Dependencies: `pandas`, `pytz`, `plotly`, `opencv-python`, `paramiko`, `scp` (see `pyproject.toml`/`requirements.txt`).
 
 ## Quickstart
 

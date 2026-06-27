@@ -38,8 +38,14 @@ Indexes: `idx_events_timestamp`, `idx_events_code_param`, `idx_events_ts_code` (
 | 45 | Pedestrian Call Registered |
 | 81 | Detector Off |
 | 82 | Detector On |
+| 61 | Overlap Begin Green |
+| 63 | Overlap Begin Yellow |
+| 64 | Overlap Begin Red Clearance (only present if RC served) |
+| 65 | Overlap Off (inactive, red indication still shown) |
+| 66 | Overlap Dark (no active output) |
 | 105 | Preemption |
-| 131 / 132 | Coordination plan change |
+| 131 | Coordination plan change — `parameter` is the plan ID |
+| 132 | Cycle length (seconds) — `parameter` is a duration, not a plan ID; not a `coord_plan` source |
 
 ## `cycles` — derived data
 
