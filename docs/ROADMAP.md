@@ -23,12 +23,12 @@ The remaining work is split across two execution models, chosen by the rule **sp
 | Fable #3 | B — `_compute_bin_quality` dedup + drift audit | Fable | ✅ done |
 | Sonnet #4 | E Phase 2 — SQLite fixture scaffolding | Sonnet/Opus | ⬜ pending |
 | Fable #4 | D — `assign_ring_phases()` refactor | Fable | ✅ done (1 gap-rule bug found → Session F) |
-| Fable #5 | Video Overlay — audit + edge-case tests | Fable | ⬜ pending (feature already shipped; see below) |
+| Fable #5 | Video Overlay — audit + edge-case tests | Fable | ✅ done (residual-bug hypothesis disproven; 1 new bug found → pinned xfail) |
 | Fable #6 | F — fix the two deferred gap-rule bugs | Fable | ⬜ pending (see Session F) |
 
 Hard dependency: Fable #2 needs Sonnet #1 (done). Everything else is parallelizable.
 
-**Test suite:** 86 passed, 2 xfailed. The two `xfail(strict=True)` markers are the deferred gap-rule bugs tracked in Session F — they are not failures, they are pinned known defects that flip to failures the moment the buggy behavior changes.
+**Test suite:** 163 passed, 3 xfailed. The `xfail(strict=True)` markers are pinned known defects (they flip to failures the moment the buggy behavior changes): two are the deferred gap-rule bugs tracked in Session F; the third is the phase red-clearance mislabel found by Fable #5 (see the Video Overlay follow-up section).
 
 Highest-value Fable targets in the remaining window, ranked: **Fable #2** (edge-case test suite is foundational and pure adversarial-reasoning work), **Fable #5** (audits brand-new, untested, math-heavy video code that ships with a self-documented residual bug), **Fable #1** (the *audit* for other injection points, not the two known patches), **Fable #4** (Functional Core cycle logic just touched by a bug fix, high regression risk), then **Fable #3** (mostly DRY, but the drift check is correctness-sensitive).
 
@@ -90,13 +90,14 @@ The Video Overlay feature described in earlier revisions of this roadmap **has b
 - **CLI packaging (Q5):** three single-target subcommands — `video-calibrate-shapes`, `video-overlay`, `video-locate-phase-change` (`cli.py:1259+`), documented as no-`--all` because calibration is interactive and overlay targets one camera's video.
 - **Gap markers:** `_GAP_CODE = -1` filtered in the status builders; the `np.searchsorted` interval-containment pattern (`analysis/video.py:279`) is used as intended.
 
-### Follow-up — Video Overlay audit + edge-case tests — Fable #5 ⬜
+### Follow-up — Video Overlay audit + edge-case tests — Fable #5 ✅ DONE
 
-The feature is built but **untested**, math-heavy, and gap-marker-sensitive — a top Fable target. Audit and lock behavior down with tests; do not rewrite wholesale.
+77 tests added (`tests/analysis/test_video_status.py`, `tests/data/test_video_shapes.py`). Findings:
 
-- **Gap-marker audit (priority):** trace every status-lookup path (`_status_at_timestamps` and the overlap/phase/detector builders) and prove no status forward-fills across a `-1` marker — a frame after a gap but before the next real event must read "unknown/reset", never the stale pre-gap color.
-- **Known residual bug:** `analysis/video.py:52` documents a real risk — an *inferred* steady-red period whose gap crosses a segment boundary can be mislabeled `'R'`. Reproduce with a concrete failing test, characterize exactly when it fires (check the `side='right'-1` searchsorted at line 279 against markers landing exactly on `green_ts`), and propose the fix.
-- **Edge-case matrix:** searchsorted query before first / after last / exactly on a boundary / empty interval frame; `ShapeConfig` malformed CSV, save→load round-trip fidelity, `validate_resolution` off-by-one; overlap event→status mapping against real controller codes (flag any unvalidated parameter-ID-range assumption).
+- **Gap-marker audit: PASSED.** No status-lookup path forward-fills across a `-1` marker. Frames after a gap but before the next real event read `'na'` (phase/overlap) or `False` (detector — the boolean API can't express "unknown", but it never shows the stale pre-gap ON). Pinned by `TestPhaseStatusGapRule` including marker/green_ts timestamp ties in both physical row orders.
+- **Residual-bug hypothesis DISPROVEN.** The `analysis/video.py:52` risk (inferred steady-red mislabeled `'R'` across a segment boundary) cannot fire: probed with ~1,100 exhaustive single/double marker placements (every event-tie position × row order) plus 12,000 randomized trials against an evidence-based checker — zero violations. Structural proof: `'R'` requires equal segment ids on adjacent intervals, and every emitted interval's events lie wholly within its segment's time span, so equal-segment neighbours can never bracket a marker; ties can only *drop* an interval (widening `'na'`), never leak a stale color.
+- **New bug found (pinned, strict xfail at `tests/analysis/test_video_status.py::TestPhaseRedClearance`):** a phase serving red clearance shows `'Y'` throughout red clearance, because `_build_phase_intervals` emits `clear_end_ts` = Code 11 (End RC) — right for `phase_splits`' combined-YR reporting, wrong for a visual lookup. The overlap builder already handles this correctly (Code 64 ends its `'Y'`). **Fix candidate (behavior change, future session):** expose the end-of-yellow boundary separately (e.g. a `yellow_end_ts` column on phase intervals) and have the video lookup use it, leaving `phase_splits` untouched.
+- **Characterized quirks (tests pin, no action):** `1→8→12` with no Code 9 labels the real yellow `'R'`; a green with no yellow logged (`1→12`, `61→65`) is dropped and reads `'na'`; trailing red after the last known interval reads `'na'` (the documented reason `processor.py` fetches lookahead). Overlap Code 62 (Begin Trailing Green) is correctly ignorable — the display stays green from Code 61. Flagged looseness: `resolve_stopbar_target` accepts any integer as a phase number with no range check.
 
 ### Future / deferred
 
