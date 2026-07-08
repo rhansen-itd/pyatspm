@@ -55,6 +55,7 @@ import pandas as pd
 
 from .manager import DatabaseManager
 from .reader import get_events_with_cycles_df
+from ..utils.quality import compute_bin_quality
 from ..analysis.counts import (
     parse_exclusions_from_config,
     parse_movements_from_config,
@@ -349,8 +350,10 @@ class CountEngine:
         if counts_df.empty:
             return counts_df
 
-        quality = self._compute_bin_quality(
-            counts_df.index, events_df, start, end, bin_len
+        with DatabaseManager(self.db_path) as m:
+            spans_df = m.get_ingestion_spans()
+        quality = compute_bin_quality(
+            events_df, spans_df, start, end, bin_len, self.timezone
         )
 
         result = counts_df.copy()
@@ -370,116 +373,6 @@ class CountEngine:
             result = result.loc[result["data_quality"] == "ok"]
 
         return result
-
-    def _compute_bin_quality(
-        self,
-        bin_index: pd.DatetimeIndex,
-        events_df: pd.DataFrame,
-        start: datetime,
-        end: datetime,
-        bin_len: int,
-    ) -> pd.DataFrame:
-        """
-        Compute coverage fraction and quality label for each bin.
-
-        Coverage is computed from ``ingestion_log`` spans (cheap).  Any bin
-        that also contains a gap marker event is downgraded to at most
-        ``"partial"`` regardless of span coverage.
-
-        A full bin grid is built from *start* to *end* so that bins with
-        zero counts (true zeros) are present alongside missing-data bins.
-
-        Args:
-            bin_index: Index from the aggregated counts DataFrame.
-            events_df: Raw events (used only to locate gap marker timestamps).
-            start:     Query start (naive local datetime).
-            end:       Query end (naive local datetime).
-            bin_len:   Bin width in minutes.
-
-        Returns:
-            DataFrame indexed by bin start with columns
-            ``["coverage", "data_quality"]``.
-        """
-        bin_td = timedelta(minutes=bin_len)
-
-        # Build complete bin grid so every possible bin in the range is
-        # represented, even those with no events at all.
-        import pytz
-        tz = pytz.timezone(self.timezone)
-        grid_start = tz.localize(start)
-        grid_end   = tz.localize(end)
-        full_grid = pd.date_range(
-            start=grid_start, end=grid_end - bin_td,
-            freq=f"{bin_len}min", tz=self.timezone,
-        )
-
-        bin_starts_utc = full_grid.map(lambda t: t.timestamp())
-        bin_ends_utc   = bin_starts_utc + bin_len * 60.0
-
-        # ------------------------------------------------------------------
-        # 1. Coverage from ingestion_log spans
-        # ------------------------------------------------------------------
-        with DatabaseManager(self.db_path) as m:
-            spans_df = m.get_ingestion_spans()
-
-        # Filter to spans that overlap the query range at all
-        query_start_epoch = grid_start.timestamp()
-        query_end_epoch   = grid_end.timestamp()
-        spans_df = spans_df.loc[
-            (spans_df["span_end"] > query_start_epoch) &
-            (spans_df["span_start"] < query_end_epoch)
-        ].copy()
-
-        coverage = np.zeros(len(full_grid), dtype=float)
-
-        if not spans_df.empty:
-            span_starts = spans_df["span_start"].values
-            span_ends   = spans_df["span_end"].values
-
-            for i, (b_start, b_end) in enumerate(
-                zip(bin_starts_utc, bin_ends_utc)
-            ):
-                # Covered seconds = sum of overlap between bin and each span
-                overlaps = np.maximum(
-                    0.0,
-                    np.minimum(span_ends, b_end) - np.maximum(span_starts, b_start),
-                )
-                coverage[i] = overlaps.sum() / (bin_len * 60.0)
-
-        coverage = np.clip(coverage, 0.0, 1.0)
-
-        # ------------------------------------------------------------------
-        # 2. Downgrade bins that contain a gap marker
-        # ------------------------------------------------------------------
-        gap_ts = events_df.loc[
-            events_df["event_code"] == _GAP_CODE, "timestamp"
-        ]
-        # Convert to UTC epoch floats for comparison
-        if not gap_ts.empty:
-            if hasattr(gap_ts.iloc[0], "timestamp"):
-                gap_epochs = np.array([t.timestamp() for t in gap_ts])
-            else:
-                gap_epochs = gap_ts.values.astype(float)
-
-            for i, (b_start, b_end) in enumerate(
-                zip(bin_starts_utc, bin_ends_utc)
-            ):
-                if np.any((gap_epochs >= b_start) & (gap_epochs < b_end)):
-                    # Has a gap marker — cap coverage so it never labels "ok"
-                    coverage[i] = min(coverage[i], 0.9999)
-
-        # ------------------------------------------------------------------
-        # 3. Assign quality labels
-        # ------------------------------------------------------------------
-        quality_labels = np.where(
-            coverage == 1.0, "ok",
-            np.where(coverage == 0.0, "missing", "partial"),
-        )
-
-        return pd.DataFrame(
-            {"coverage": coverage, "data_quality": quality_labels},
-            index=full_grid,
-        )
 
     def _drop_missing_days(self, df: pd.DataFrame) -> pd.DataFrame:
         """
