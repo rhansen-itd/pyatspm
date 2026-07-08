@@ -24,6 +24,9 @@ import pandas as pd
 
 _DET_PAIRS_RE = re.compile(r"^Det_P(\d+)_Pairs$")
 
+# SQLite type affinities permitted for dynamically added config columns.
+_ALLOWED_COLUMN_TYPES = frozenset({"TEXT", "INTEGER", "REAL", "BLOB", "NUMERIC"})
+
 
 def _parse_detector_pairs(cfg: Dict[str, Any]) -> List[Dict[str, int]]:
     """Scan a config dict for ``Det_P<X>_Pairs`` columns and parse them.
@@ -192,19 +195,30 @@ class DatabaseManager:
 
         Args:
             column_name: Name of the column to add.
-            column_type: SQL type (default ``TEXT``).
+            column_type: SQL type affinity (default ``TEXT``).  Must be one of
+                ``TEXT``, ``INTEGER``, ``REAL``, ``BLOB``, ``NUMERIC``
+                (case-insensitive).
+
+        Raises:
+            ValueError: If ``column_type`` is not an allowed SQLite affinity.
         """
         if not self.conn:
             raise RuntimeError("No active connection.")
+        normalized_type = column_type.strip().upper()
+        if normalized_type not in _ALLOWED_COLUMN_TYPES:
+            raise ValueError(
+                f"Invalid column_type {column_type!r}; must be one of "
+                f"{sorted(_ALLOWED_COLUMN_TYPES)}"
+            )
         if column_name not in self.get_config_columns():
             safe = column_name.replace('"', '""')
             self.conn.cursor().execute(
-                f'ALTER TABLE config ADD COLUMN "{safe}" {column_type}'
+                f'ALTER TABLE config ADD COLUMN "{safe}" {normalized_type}'
             )
             self.conn.commit()
 
     def import_config(self, csv_path: Path) -> None:
-        """Import intersection configuration from the legacy CSV format.
+        """Import intersection configuration from the ``int_cfg.csv`` format.
 
         Transforms ``int_cfg.csv`` into the hybrid schema:
         - Standard rows (TM, RB, Det, WD) become wide columns.
@@ -330,7 +344,7 @@ class DatabaseManager:
         if not self.conn:
             raise RuntimeError("No active connection.")
         cols  = list(row_data.keys())
-        names = ", ".join(f'"{c}"' for c in cols)
+        names = ", ".join('"{}"'.format(c.replace('"', '""')) for c in cols)
         ph    = ", ".join("?" for _ in cols)
         self.conn.cursor().execute(
             f"INSERT OR REPLACE INTO config ({names}) VALUES ({ph})",
@@ -471,6 +485,39 @@ class DatabaseManager:
         row = cur.fetchone()
         return row[0] if row and row[0] is not None else None
 
+    def _get_gap_boundary(self, anchor: float, direction: str) -> Optional[float]:
+        """Return the gap-marker timestamp nearest ``anchor`` in ``direction``.
+
+        Gap markers are ``event_code = -1`` rows.  Both bounds are inclusive:
+        a marker exactly at ``anchor`` is returned.
+
+        Args:
+            anchor:    UTC epoch to search from.
+            direction: ``"prev"`` for ``MAX(timestamp) <= anchor``,
+                       ``"next"`` for ``MIN(timestamp) >= anchor``.
+
+        Returns:
+            UTC epoch float, or ``None`` if no gap marker exists on that side.
+        """
+        if not self.conn:
+            raise RuntimeError("No active connection.")
+        if direction == "prev":
+            sql = (
+                "SELECT MAX(timestamp) FROM events "
+                "WHERE event_code = -1 AND timestamp <= ?"
+            )
+        elif direction == "next":
+            sql = (
+                "SELECT MIN(timestamp) FROM events "
+                "WHERE event_code = -1 AND timestamp >= ?"
+            )
+        else:
+            raise ValueError(f"direction must be 'prev' or 'next', got {direction!r}")
+        cur = self.conn.cursor()
+        cur.execute(sql, (anchor,))
+        row = cur.fetchone()
+        return row[0] if row and row[0] is not None else None
+
     def get_gap_prev(self, t_start: float) -> Optional[float]:
         """Return the most recent gap-marker timestamp ``<= t_start``.
 
@@ -483,16 +530,7 @@ class DatabaseManager:
         Returns:
             UTC epoch float, or ``None`` if no preceding gap marker exists.
         """
-        if not self.conn:
-            raise RuntimeError("No active connection.")
-        cur = self.conn.cursor()
-        cur.execute(
-            "SELECT MAX(timestamp) FROM events "
-            "WHERE event_code = -1 AND timestamp <= ?",
-            (t_start,),
-        )
-        row = cur.fetchone()
-        return row[0] if row and row[0] is not None else None
+        return self._get_gap_boundary(t_start, "prev")
 
     def get_gap_next(self, t_end: float) -> Optional[float]:
         """Return the earliest gap-marker timestamp ``>= t_end``.
@@ -506,16 +544,7 @@ class DatabaseManager:
         Returns:
             UTC epoch float, or ``None`` if no following gap marker exists.
         """
-        if not self.conn:
-            raise RuntimeError("No active connection.")
-        cur = self.conn.cursor()
-        cur.execute(
-            "SELECT MIN(timestamp) FROM events "
-            "WHERE event_code = -1 AND timestamp >= ?",
-            (t_end,),
-        )
-        row = cur.fetchone()
-        return row[0] if row and row[0] is not None else None
+        return self._get_gap_boundary(t_end, "next")
 
     def get_cs_prev_bounded(
         self,
