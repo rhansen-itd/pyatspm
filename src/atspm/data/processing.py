@@ -230,18 +230,18 @@ class CycleProcessor:
         if spans_df.empty:
             return
 
-        for _, row in spans_df.iterrows():
+        for row in spans_df.itertuples():
             try:
                 self.process_span(
-                    float(row["span_start"]),
-                    float(row["span_end"]),
+                    float(row.span_start),
+                    float(row.span_end),
                     fill_gaps=fill_gaps,
                 )
             except Exception as exc:
                 print(
                     f"CycleProcessor ERROR – span "
-                    f"{self._fmt(row['span_start'])} → "
-                    f"{self._fmt(row['span_end'])}: {exc}"
+                    f"{self._fmt(row.span_start)} → "
+                    f"{self._fmt(row.span_end)}: {exc}"
                 )
 
     def backfill_ring_phases(self) -> int:

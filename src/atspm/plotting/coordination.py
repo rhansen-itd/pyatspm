@@ -563,11 +563,14 @@ def _add_ring_bars(
     combos['_disp']    = combos['parameter'].map(lambda p: display_order.get(p, 999))
     combos['_gyr_ord'] = combos['gyr'].map(gyr_order)
     combos = combos.sort_values(['_disp', '_seq_pos', '_gyr_ord'])
+    # itertuples() mangles leading-underscore column names into positional
+    # fields, so give the one we read by name a valid identifier first.
+    combos = combos.rename(columns={'_seq_pos': 'seq_pos_val'})
 
-    for _, combo_row in combos.iterrows():
-        phase_id = int(combo_row['parameter'])
-        gyr      = combo_row['gyr']
-        seq_pos  = int(combo_row['_seq_pos'])
+    for combo_row in combos.itertuples():
+        phase_id = int(combo_row.parameter)
+        gyr      = combo_row.gyr
+        seq_pos  = int(combo_row.seq_pos_val)
         color    = _phase_color(phase_id, gyr)
 
         mask = (
@@ -608,8 +611,8 @@ def _add_ring_bars(
             gyr_lookup: Dict[Any, Dict[str, Tuple[float, float]]] = {}
             for cs_v, grp in phase_sig.groupby('cycle_start'):
                 gyr_lookup[cs_v] = {
-                    r['gyr']: (r['t_start'], r['Duration'])
-                    for _, r in grp.iterrows()
+                    r.gyr: (r.t_start, r.Duration)
+                    for r in grp.itertuples()
                 }
 
             def _fmt_gyr(cycle_val: Any, gyr_key: str) -> str:

@@ -41,25 +41,25 @@ def _reconstruct_intervals(events_df: pd.DataFrame, det_id: int) -> pd.DataFrame
     intervals: list[dict] = []
     open_ts: float | None = None
 
-    for _, row in det.iterrows():
-        code = int(row["event_code"])
+    for row in det.itertuples():
+        code = int(row.event_code)
 
         if code == -1:                          # Hard reset — close any open interval
             if open_ts is not None:
-                intervals.append({"on_ts": open_ts, "off_ts": row["timestamp"]})
+                intervals.append({"on_ts": open_ts, "off_ts": row.timestamp})
                 open_ts = None
             continue
 
-        if int(row["parameter"]) != det_id:
+        if int(row.parameter) != det_id:
             continue
 
         if code == 82:                          # ON
             if open_ts is None:
-                open_ts = float(row["timestamp"])
+                open_ts = float(row.timestamp)
 
         elif code == 81:                        # OFF
             if open_ts is not None:
-                intervals.append({"on_ts": open_ts, "off_ts": float(row["timestamp"])})
+                intervals.append({"on_ts": open_ts, "off_ts": float(row.timestamp)})
                 open_ts = None
 
     if not intervals:
