@@ -17,3 +17,6 @@ dependencies = [
 
 [project.scripts]
 atspm = "atspm.cli:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
