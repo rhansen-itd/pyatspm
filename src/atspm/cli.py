@@ -1592,28 +1592,8 @@ def _reprocess_date(processor, date_str: str, timezone: Optional[str] = None) ->
 # Argument parser construction
 # ===========================================================================
 
-def _build_parser() -> argparse.ArgumentParser:
-    """Construct and return the top-level argument parser.
-
-    Returns:
-        Configured ``ArgumentParser`` with ``setup``, ``process``,
-        ``report``, ``counts``, ``splits``, and ``discrepancies``
-        subcommands attached.
-    """
-    parser = argparse.ArgumentParser(
-        prog="atspm",
-        description=(
-            "ATSPM – Automated Traffic Signal Performance Measures\n"
-            "Unified CLI for intersection setup, data ingestion, reporting, counts, splits, and discrepancy analysis."
-        ),
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    subs = parser.add_subparsers(dest="command", metavar="<command>")
-    subs.required = True
-
-    # ------------------------------------------------------------------
-    # setup
-    # ------------------------------------------------------------------
+def _add_setup_parser(subs: argparse._SubParsersAction) -> None:
+    """Attach the ``setup`` subcommand parser."""
     p_setup = subs.add_parser(
         "setup",
         help="Create a new intersection folder, metadata template, and config stub.",
@@ -1638,9 +1618,9 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_setup.set_defaults(func=handle_setup)
 
-    # ------------------------------------------------------------------
-    # retrieve
-    # ------------------------------------------------------------------
+
+def _add_retrieve_parser(subs: argparse._SubParsersAction) -> None:
+    """Attach the ``retrieve`` subcommand parser."""
     p_retr = subs.add_parser(
         "retrieve",
         help="Pull new .datZ files from an intersection's configured devices via SCP.",
@@ -1664,9 +1644,9 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_retr.set_defaults(func=handle_retrieve)
 
-    # ------------------------------------------------------------------
-    # process
-    # ------------------------------------------------------------------
+
+def _add_process_parser(subs: argparse._SubParsersAction) -> None:
+    """Attach the ``process`` subcommand parser."""
     p_proc = subs.add_parser(
         "process",
         help="Ingest .datZ files and compute signal cycles.",
@@ -1718,9 +1698,9 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_proc.set_defaults(func=handle_process)
 
-    # ------------------------------------------------------------------
-    # report
-    # ------------------------------------------------------------------
+
+def _add_report_parser(subs: argparse._SubParsersAction) -> None:
+    """Attach the ``report`` subcommand parser."""
     p_rep = subs.add_parser(
         "report",
         help="Generate ATSPM performance reports for one or more dates.",
@@ -1763,9 +1743,9 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_rep.set_defaults(func=handle_report)
 
-    # ------------------------------------------------------------------
-    # counts
-    # ------------------------------------------------------------------
+
+def _add_counts_parser(subs: argparse._SubParsersAction) -> None:
+    """Attach the ``counts`` subcommand parser."""
     p_counts = subs.add_parser(
         "counts",
         help="Generate vehicle and pedestrian counts.",
@@ -1792,9 +1772,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p_counts.add_argument("--verbose", action="store_true", help="Print full tracebacks for any errors.")
     p_counts.set_defaults(func=handle_counts)
 
-    # ------------------------------------------------------------------
-    # splits
-    # ------------------------------------------------------------------
+
+def _add_splits_parser(subs: argparse._SubParsersAction) -> None:
+    """Attach the ``splits`` subcommand parser."""
     p_splits = subs.add_parser(
         "splits",
         help="Generate phase split and timing records.",
@@ -1821,9 +1801,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p_splits.add_argument("--verbose", action="store_true", help="Print full tracebacks for any errors.")
     p_splits.set_defaults(func=handle_splits)
 
-    # ------------------------------------------------------------------
-    # aog
-    # ------------------------------------------------------------------
+
+def _add_aog_parser(subs: argparse._SubParsersAction) -> None:
+    """Attach the ``aog`` subcommand parser."""
     p_aog = subs.add_parser(
         "aog",
         help="Generate Arrival on Green (AOG) tables.",
@@ -1919,9 +1899,9 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_aog.set_defaults(func=handle_aog)
 
-    # ------------------------------------------------------------------
-    # plot-coordination
-    # ------------------------------------------------------------------
+
+def _add_plot_coordination_parser(subs: argparse._SubParsersAction) -> None:
+    """Attach the ``plot-coordination`` subcommand parser."""
     p_coord = subs.add_parser(
         "plot-coordination",
         help="Generate a coordination / split diagram for a specific time window.",
@@ -1938,9 +1918,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p_coord.add_argument("--verbose", action="store_true", default=False, help="Print full tracebacks for any errors.")
     p_coord.set_defaults(func=handle_plot_coordination)
 
-    # ------------------------------------------------------------------
-    # plot-termination
-    # ------------------------------------------------------------------
+
+def _add_plot_termination_parser(subs: argparse._SubParsersAction) -> None:
+    """Attach the ``plot-termination`` subcommand parser."""
     p_term = subs.add_parser(
         "plot-termination",
         help="Generate a phase termination plot for a specific time window.",
@@ -1957,9 +1937,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p_term.add_argument("--verbose", action="store_true", default=False, help="Print full tracebacks for any errors.")
     p_term.set_defaults(func=handle_plot_termination)
 
-    # ------------------------------------------------------------------
-    # discrepancies
-    # ------------------------------------------------------------------
+
+def _add_discrepancies_parser(subs: argparse._SubParsersAction) -> None:
+    """Attach the ``discrepancies`` subcommand parser."""
     p_disc = subs.add_parser(
         "discrepancies",
         help="Analyze co-located detector discrepancies for a time window.",
@@ -2012,9 +1992,9 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_disc.set_defaults(func=handle_discrepancies)
 
-    # ------------------------------------------------------------------
-    # plot-detectors
-    # ------------------------------------------------------------------
+
+def _add_plot_detectors_parser(subs: argparse._SubParsersAction) -> None:
+    """Attach the ``plot-detectors`` subcommand parser."""
     p_det = subs.add_parser(
         "plot-detectors",
         help="Generate interactive detector comparison plots.",
@@ -2091,9 +2071,13 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_det.set_defaults(func=handle_plot_detectors)
 
-    # ------------------------------------------------------------------
-    # video-calibrate-shapes (single-target only, no --all -- interactive)
-    # ------------------------------------------------------------------
+
+def _add_video_calibrate_shapes_parser(subs: argparse._SubParsersAction) -> None:
+    """Attach the ``video-calibrate-shapes`` subcommand parser.
+
+    Single-target only, no ``--all`` -- this is an interactive calibration
+    session, not a batch operation.
+    """
     p_vidcal = subs.add_parser(
         "video-calibrate-shapes",
         help="Interactively draw/edit loop and stopbar shapes for one camera.",
@@ -2112,9 +2096,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p_vidcal.add_argument("--verbose", action="store_true", default=False, help="Print full tracebacks for any errors.")
     p_vidcal.set_defaults(func=handle_video_calibrate_shapes)
 
-    # ------------------------------------------------------------------
-    # video-overlay (single-target only, no --all -- one video = one camera)
-    # ------------------------------------------------------------------
+
+def _add_video_overlay_parser(subs: argparse._SubParsersAction) -> None:
+    """Attach the ``video-overlay`` subcommand parser.
+
+    Single-target only, no ``--all`` -- one video = one camera.
+    """
     p_vidov = subs.add_parser(
         "video-overlay",
         help="Render a video with live phase/overlap/detector status overlays.",
@@ -2137,10 +2124,13 @@ def _build_parser() -> argparse.ArgumentParser:
     p_vidov.add_argument("--verbose", action="store_true", default=False, help="Print full tracebacks for any errors.")
     p_vidov.set_defaults(func=handle_video_overlay)
 
-    # ------------------------------------------------------------------
-    # video-locate-phase-change (single-target only, no --all -- one video
-    # = one camera, same exception as the other two video commands)
-    # ------------------------------------------------------------------
+
+def _add_video_locate_phase_change_parser(subs: argparse._SubParsersAction) -> None:
+    """Attach the ``video-locate-phase-change`` subcommand parser.
+
+    Single-target only, no ``--all`` -- one video = one camera, same
+    exception as the other two video commands.
+    """
     p_vidloc = subs.add_parser(
         "video-locate-phase-change",
         help="Auto-locate a phase's exact color-change time to correct a --start guess.",
@@ -2172,6 +2162,41 @@ def _build_parser() -> argparse.ArgumentParser:
     p_vidloc.add_argument("--timezone", default=None, metavar="TZ", help="Override the timezone from metadata.json.")
     p_vidloc.add_argument("--verbose", action="store_true", default=False, help="Print full tracebacks for any errors.")
     p_vidloc.set_defaults(func=handle_video_locate_phase_change)
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    """Construct and return the top-level argument parser.
+
+    Returns:
+        Configured ``ArgumentParser`` with ``setup``, ``process``,
+        ``report``, ``counts``, ``splits``, and ``discrepancies``
+        subcommands attached.
+    """
+    parser = argparse.ArgumentParser(
+        prog="atspm",
+        description=(
+            "ATSPM – Automated Traffic Signal Performance Measures\n"
+            "Unified CLI for intersection setup, data ingestion, reporting, counts, splits, and discrepancy analysis."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    subs = parser.add_subparsers(dest="command", metavar="<command>")
+    subs.required = True
+
+    _add_setup_parser(subs)
+    _add_retrieve_parser(subs)
+    _add_process_parser(subs)
+    _add_report_parser(subs)
+    _add_counts_parser(subs)
+    _add_splits_parser(subs)
+    _add_aog_parser(subs)
+    _add_plot_coordination_parser(subs)
+    _add_plot_termination_parser(subs)
+    _add_discrepancies_parser(subs)
+    _add_plot_detectors_parser(subs)
+    _add_video_calibrate_shapes_parser(subs)
+    _add_video_overlay_parser(subs)
+    _add_video_locate_phase_change_parser(subs)
 
     return parser
 

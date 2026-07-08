@@ -165,21 +165,61 @@ def assign_ring_phases(
     # Determine ring membership from config or legacy defaults
     r1_members, r2_members = _resolve_ring_membership(config)
 
-    # Code 1 = green start; these define which phases ran in a cycle.
-    # Exclude gap markers explicitly (they carry event_code == -1).
-    green_events = events_df[
-        (events_df['event_code'] == 1) &
-        (events_df['event_code'] != _GAP_CODE)
-    ][['timestamp', 'parameter']].copy()
+    green_events = _extract_green_events(events_df)
 
     if green_events.empty or cycles_out.empty:
         cycles_out['r1_phases'] = 'None'
         cycles_out['r2_phases'] = 'None'
         return cycles_out
 
-    # Assign each green event to its cycle via backward merge_asof.
-    # This is O(n log n) and fully vectorized.
-    cycles_sorted = cycles_out[['cycle_start']].sort_values('cycle_start').copy()
+    assigned = _assign_greens_to_cycles(green_events, cycles_out)
+
+    r1_map = _ring_phase_strings(assigned, r1_members, 'r1_phases')
+    r2_map = _ring_phase_strings(assigned, r2_members, 'r2_phases')
+
+    return _merge_ring_phase_strings(cycles_out, r1_map, r2_map)
+
+
+def _extract_green_events(events_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Select green-start events used for ring/phase grouping.
+
+    Code 1 = green start; these define which phases ran in a cycle.
+    Gap markers can never pass the filter (they carry event_code == -1),
+    so a discontinuity row can never be misread as a phase.
+
+    Args:
+        events_df: Raw events with [timestamp, event_code, parameter].
+
+    Returns:
+        Copy with columns [timestamp, parameter], code 1 rows only.
+    """
+    return events_df[
+        events_df['event_code'] == 1
+    ][['timestamp', 'parameter']].copy()
+
+
+def _assign_greens_to_cycles(
+    green_events: pd.DataFrame,
+    cycles_df: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    Attach each green event to its containing cycle via backward merge_asof.
+
+    Each event is paired with the most recent cycle_start at or before its
+    timestamp (no tolerance); events preceding the first cycle are dropped.
+    O(n log n) and fully vectorized.
+
+    Args:
+        green_events: DataFrame with [timestamp, parameter].
+        cycles_df: DataFrame with at least [cycle_start] (numeric UNIX
+            epoch or datetime64).
+
+    Returns:
+        green_events sorted by timestamp with a ``_cs`` column holding the
+        owning cycle_start.
+    """
+    cycles_sorted = cycles_df[['cycle_start']].sort_values('cycle_start').copy()
     green_sorted = green_events.sort_values('timestamp')
 
     # Align timestamp types – both must be the same dtype for merge_asof.
@@ -187,15 +227,12 @@ def assign_ring_phases(
     cs_col = cycles_sorted['cycle_start']
     ts_col = green_sorted['timestamp']
 
-    if pd.api.types.is_datetime64_any_dtype(cs_col):
-        if not pd.api.types.is_datetime64_any_dtype(ts_col):
-            green_sorted = green_sorted.copy()
-            green_sorted['timestamp'] = pd.to_datetime(
-                green_sorted['timestamp'], unit='s', utc=True
-            )
-    else:
-        # Keep as numeric
-        pass
+    if (pd.api.types.is_datetime64_any_dtype(cs_col)
+            and not pd.api.types.is_datetime64_any_dtype(ts_col)):
+        green_sorted = green_sorted.copy()
+        green_sorted['timestamp'] = pd.to_datetime(
+            green_sorted['timestamp'], unit='s', utc=True
+        )
 
     assigned = pd.merge_asof(
         green_sorted,
@@ -205,39 +242,60 @@ def assign_ring_phases(
         direction='backward',
     )
     # Drop unmatched (events before the first cycle)
-    assigned = assigned.dropna(subset=['_cs'])
-    assigned['_cs'] = assigned['_cs']
+    return assigned.dropna(subset=['_cs'])
 
-    # Build per-cycle phase strings with vectorized groupby
-    r1_set = set(r1_members)
-    r2_set = set(r2_members)
 
-    assigned['_phase'] = assigned['parameter'].astype(int)
-    assigned['_in_r1'] = assigned['_phase'].isin(r1_set)
-    assigned['_in_r2'] = assigned['_phase'].isin(r2_set)
-    assigned['_phase_str'] = assigned['_phase'].astype(str)
+def _ring_phase_strings(
+    assigned: pd.DataFrame,
+    ring_members: List[int],
+    column_name: str,
+) -> pd.Series:
+    """
+    Build per-cycle comma-joined phase strings for one ring.
 
-    def _join_phases(series: pd.Series) -> str:
-        phases = series.tolist()
-        return ','.join(phases) if phases else 'None'
+    Args:
+        assigned: Green events with [parameter, _cs] where ``_cs`` is the
+            owning cycle_start, sorted by timestamp so joined strings stay
+            chronological within each cycle.
+        ring_members: Phase IDs belonging to this ring.
+        column_name: Name for the returned Series (``r1_phases`` /
+            ``r2_phases``).
 
-    # R1 strings
-    r1_map = (
-        assigned[assigned['_in_r1']]
-        .groupby('_cs')['_phase_str']
-        .agg(_join_phases)
-        .rename('r1_phases')
+    Returns:
+        Series indexed by cycle_start with strings like ``"2,6"``.  Cycles
+        with no phases in this ring are absent (filled with ``"None"`` at
+        merge time by :func:`_merge_ring_phase_strings`).
+    """
+    phases = assigned['parameter'].astype(int)
+    in_ring = phases.isin(set(ring_members))
+
+    return (
+        phases[in_ring].astype(str)
+        .groupby(assigned.loc[in_ring, '_cs'])
+        .agg(','.join)
+        .rename(column_name)
     )
 
-    # R2 strings
-    r2_map = (
-        assigned[assigned['_in_r2']]
-        .groupby('_cs')['_phase_str']
-        .agg(_join_phases)
-        .rename('r2_phases')
-    )
 
-    # Merge back onto cycles
+def _merge_ring_phase_strings(
+    cycles_out: pd.DataFrame,
+    r1_map: pd.Series,
+    r2_map: pd.Series,
+) -> pd.DataFrame:
+    """
+    Left-join per-ring phase strings back onto the cycles frame.
+
+    Row order and index of *cycles_out* are preserved; cycles absent from a
+    ring map get the literal string ``"None"``.
+
+    Args:
+        cycles_out: Cycles frame with a ``cycle_start`` column.
+        r1_map: Ring 1 strings indexed by cycle_start.
+        r2_map: Ring 2 strings indexed by cycle_start.
+
+    Returns:
+        cycles_out with ``r1_phases`` and ``r2_phases`` columns appended.
+    """
     cycles_out = cycles_out.merge(
         r1_map, left_on='cycle_start', right_index=True, how='left'
     )

@@ -484,14 +484,14 @@ def _add_anomaly_overlays(
     has_disagree_b = False
     has_pulse      = False
 
-    for _, row in anomalies_df.iterrows():
-        atype   = str(row["anomaly_type"])
-        t_start = float(row["start_timestamp"])
-        t_end   = float(row["end_timestamp"])
-        desc    = str(row.get("description", ""))
-        det_a   = int(row["det_a_id"])
-        det_b   = int(row["det_b_id"])
-        on_det  = int(row.get("on_det_id", det_a))
+    for row in anomalies_df.itertuples():
+        atype   = str(row.anomaly_type)
+        t_start = float(row.start_timestamp)
+        t_end   = float(row.end_timestamp)
+        desc    = str(getattr(row, "description", ""))
+        det_a   = int(row.det_a_id)
+        det_b   = int(row.det_b_id)
+        on_det  = int(getattr(row, "on_det_id", det_a))
 
         y_a = det_y.get(det_a)
         y_b = det_y.get(det_b)
