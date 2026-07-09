@@ -18,14 +18,16 @@ Join:   code 1 (green start) events attach to cycles via
         before its timestamp; greens before the first cycle are dropped.
 
 Gap-rule note (CLAUDE.md §5): gap marker rows themselves (event_code == -1)
-can never become phases — the event_code == 1 filter excludes them.  But
-because the backward merge_asof has no tolerance and no segment awareness,
-a green event that lands AFTER a -1 hard reset yet BEFORE the first
-post-gap cycle_start is attributed to the last PRE-gap cycle.  That
-pairing across a discontinuity is exposed (not papered over) by the xfail
-test at the bottom of this module; the passing characterization test next
-to it guards the current output so the structural refactor cannot silently
-change it.
+can never become phases — the event_code == 1 filter excludes them.  The
+backward join is additionally segment-constrained: segments increment at
+each -1 marker, and a green only attaches to a cycle_start within its own
+segment.  A green landing AFTER a hard reset yet BEFORE the first post-gap
+cycle_start therefore attaches to no cycle at all — sequential pairing
+never crosses the reset, no matter how close the marker sits to either
+side (the rule is purely order-based; there is no time tolerance, so a
+short mid-cycle blip and an hour-long outage bound the join identically).
+Timestamp ties resolve independently of physical row order: a green or
+cycle_start exactly at a marker timestamp belongs to the post-gap segment.
 """
 
 import pandas as pd
@@ -219,14 +221,10 @@ class TestGapMarkers:
         assert list(out['r1_phases']) == ['2', 'None']
         assert list(out['r2_phases']) == ['None', '8']
 
-    def test_characterization_stranded_postgap_greens_attach_to_pregap_cycle(self):
-        # CHARACTERIZATION of current behavior, guarded so the structural
-        # refactor cannot silently change output: a green AFTER the -1
-        # marker but BEFORE the first post-gap cycle_start is attributed
-        # backward to the pre-gap cycle (merge_asof has no tolerance and no
-        # segment awareness).  This is the CLAUDE.md §5 violation exposed by
-        # the xfail test below; fixing it is a behavior change reserved for
-        # a future session.
+    def test_stranded_green_dropped_while_postgap_cycle_keeps_its_greens(self):
+        # Session F guard (was the pre-fix characterization): the stranded
+        # green (post-gap, pre-first-new-cycle) attaches nowhere, while
+        # greens inside the post-gap cycle attach normally.
         events = _events([
             (T0 + 10, 1, 2),
             (T0 + 200, -1, 0),
@@ -234,22 +232,9 @@ class TestGapMarkers:
             (T0 + 3810, 1, 8),
         ])
         out = assign_ring_phases(_cycles([T0, T0 + 3800.0]), events, {})
-        assert list(out['r1_phases']) == ['2,4', 'None']
+        assert list(out['r1_phases']) == ['2', 'None']
         assert list(out['r2_phases']) == ['None', '8']
 
-    @pytest.mark.xfail(
-        reason=(
-            "CLAUDE.md §5 gap rule: sequential pairing must stop at an "
-            "event_code == -1 hard reset. assign_ring_phases attaches "
-            "greens to cycles with a backward merge_asof that has no "
-            "tolerance and no segment awareness, so a green landing after "
-            "a -1 marker but before the first post-gap cycle_start is "
-            "attributed to the last pre-gap cycle. Fixing this requires "
-            "segment-aware assignment (e.g. _segment_id) — a behavior "
-            "change out of scope for the Session D structural refactor."
-        ),
-        strict=True,
-    )
     def test_stranded_postgap_greens_are_not_paired_across_the_reset(self):
         events = _events([
             (T0 + 10, 1, 2),
@@ -257,14 +242,20 @@ class TestGapMarkers:
             (T0 + 3700, 1, 4),
         ])
         out = assign_ring_phases(_cycles([T0, T0 + 3800.0]), events, {})
-        # Correct behavior: phase 4 crossed a hard reset relative to the
-        # pre-gap cycle and precedes any post-gap cycle — attribute nowhere.
+        # Phase 4 crossed a hard reset relative to the pre-gap cycle and
+        # precedes any post-gap cycle — attribute nowhere (CLAUDE.md §5).
         assert list(out['r1_phases']) == ['2', 'None']
+        assert list(out['r2_phases']) == ['None', 'None']
 
-    def test_midcycle_gap_keeps_same_cycle_attribution(self):
-        # Marker mid-cycle: greens on both sides of the marker but inside
-        # the same detected cycle stay with that cycle (current behavior —
-        # covered here so the refactor cannot alter it).
+    def test_midcycle_marker_stops_attribution_at_the_reset(self):
+        # Session F behavior change: a green after a marker but before the
+        # next cycle_start attaches nowhere, even when the marker is a
+        # short mid-cycle blip.  This input is order-isomorphic to the
+        # stranded-green case above (c0 < green < marker < green < c1 in
+        # both; they differ only in second counts), so no order-based rule
+        # can keep this green while dropping the stranded one — and the §5
+        # gap rule has no time tolerance.  Pre-marker greens keep their
+        # cycle; the post-marker green is conservatively unattributed.
         events = _events([
             (T0 + 10, 1, 2),
             (T0 + 30, -1, 0),
@@ -272,7 +263,74 @@ class TestGapMarkers:
         ])
         out = assign_ring_phases(_cycles([T0, T0 + 90.0]), events, {})
         assert list(out['r1_phases']) == ['2', 'None']
-        assert list(out['r2_phases']) == ['6', 'None']
+        assert list(out['r2_phases']) == ['None', 'None']
+
+    def test_greens_after_the_first_postgap_cycle_resume_normally(self):
+        # Only the stranded window (marker -> next cycle_start) is dropped;
+        # attribution inside post-gap cycles is unaffected, including for
+        # a second gap later in the frame.
+        events = _events([
+            (T0 + 10, 1, 2),
+            (T0 + 200, -1, 0),
+            (T0 + 3805, 1, 4), (T0 + 3840, 1, 6),
+            (T0 + 3900, -1, 0),
+            (T0 + 3950, 1, 8),   # stranded again: before next cycle_start
+            (T0 + 8010, 1, 1),
+        ])
+        cycles = _cycles([T0, T0 + 3800.0, T0 + 8000.0])
+        out = assign_ring_phases(cycles, events, {})
+        assert list(out['r1_phases']) == ['2', '4', '1']
+        assert list(out['r2_phases']) == ['None', '6', 'None']
+
+    @pytest.mark.parametrize('rows', [
+        pytest.param(
+            [(T0 + 10, 1, 2), (T0 + 50, -1, 0), (T0 + 50, 1, 6)],
+            id='marker-row-first',
+        ),
+        pytest.param(
+            [(T0 + 10, 1, 2), (T0 + 50, 1, 6), (T0 + 50, -1, 0)],
+            id='green-row-first',
+        ),
+    ])
+    def test_green_tied_with_marker_timestamp_is_postgap_in_both_row_orders(
+        self, rows
+    ):
+        # A green at exactly the marker's timestamp belongs to the post-gap
+        # segment regardless of physical row order (segments come from
+        # searchsorted on marker timestamps, not row-order cumsum), so it
+        # never attaches to the pre-gap cycle.
+        out = assign_ring_phases(_cycles([T0, T0 + 90.0]), _events(rows), {})
+        assert list(out['r1_phases']) == ['2', 'None']
+        assert list(out['r2_phases']) == ['None', 'None']
+
+    def test_datetime_cycles_with_marker_still_stop_at_the_reset(self):
+        # Exercises the dtype-normalization branch: datetime64 cycles with
+        # float event timestamps convert marker timestamps too, so the
+        # segment constraint holds in either time base.
+        cycles = pd.DataFrame({
+            'cycle_start': pd.to_datetime([T0, T0 + 3800.0], unit='s', utc=True)
+        })
+        events = _events([
+            (T0 + 10, 1, 2),
+            (T0 + 200, -1, 0),
+            (T0 + 3700, 1, 4),
+            (T0 + 3810, 1, 8),
+        ])
+        out = assign_ring_phases(cycles, events, {})
+        assert list(out['r1_phases']) == ['2', 'None']
+        assert list(out['r2_phases']) == ['None', '8']
+
+    def test_cycle_start_tied_with_marker_timestamp_owns_postgap_greens(self):
+        # A cycle_start at exactly the marker's timestamp is post-gap, so
+        # greens at/after it attach to it — resumption is not delayed.
+        events = _events([
+            (T0 + 10, 1, 2),
+            (T0 + 90, -1, 0),
+            (T0 + 95, 1, 6),
+        ])
+        out = assign_ring_phases(_cycles([T0, T0 + 90.0]), events, {})
+        assert list(out['r1_phases']) == ['2', 'None']
+        assert list(out['r2_phases']) == ['None', '6']
 
 
 class TestCoordPlanBoundaries:

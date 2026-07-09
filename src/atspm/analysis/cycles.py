@@ -14,6 +14,11 @@ Gap Marker Rule:
     assign_events_to_cycles explicitly preserves gap marker rows with
     NaT / NaN cycle assignments so that downstream consumers are never
     handed a gap marker silently attributed to a real cycle.
+    assign_ring_phases constrains the green->cycle backward join to within
+    a data segment, so a green landing after a hard reset is never
+    attributed to a pre-gap cycle.  validate_cycles accepts the gap marker
+    timestamps and suppresses cycle-length checks for intervals that span
+    a marker (missing data, not a cycle length).
 
 Ring/Phase Assignment (Task 0):
     assign_ring_phases() adds r1_phases and r2_phases columns to a cycles
@@ -138,7 +143,11 @@ def assign_ring_phases(
     ``add_r1r2`` output.
 
     Gap markers (event_code == -1) in *events_df* are excluded before phase
-    grouping so they cannot corrupt ring strings.
+    grouping so they cannot corrupt ring strings.  They also bound the
+    green->cycle join (CLAUDE.md gap rule): greens only attach to a
+    cycle_start within the same data segment, so a green landing after a
+    hard reset but before the first post-gap cycle_start is attributed to
+    no cycle at all rather than paired backward across the reset.
 
     Args:
         cycles_df: DataFrame with at least a ``cycle_start`` column (numeric
@@ -172,7 +181,10 @@ def assign_ring_phases(
         cycles_out['r2_phases'] = 'None'
         return cycles_out
 
-    assigned = _assign_greens_to_cycles(green_events, cycles_out)
+    gap_timestamps = events_df.loc[
+        events_df['event_code'] == _GAP_CODE, 'timestamp'
+    ]
+    assigned = _assign_greens_to_cycles(green_events, cycles_out, gap_timestamps)
 
     r1_map = _ring_phase_strings(assigned, r1_members, 'r1_phases')
     r2_map = _ring_phase_strings(assigned, r2_members, 'r2_phases')
@@ -202,6 +214,7 @@ def _extract_green_events(events_df: pd.DataFrame) -> pd.DataFrame:
 def _assign_greens_to_cycles(
     green_events: pd.DataFrame,
     cycles_df: pd.DataFrame,
+    gap_timestamps: Optional[pd.Series] = None,
 ) -> pd.DataFrame:
     """
     Attach each green event to its containing cycle via backward merge_asof.
@@ -210,10 +223,21 @@ def _assign_greens_to_cycles(
     timestamp (no tolerance); events preceding the first cycle are dropped.
     O(n log n) and fully vectorized.
 
+    Gap rule: when *gap_timestamps* is given, the join is constrained to
+    within a data segment (segments increment at each gap marker, computed
+    by searchsorted so the result is independent of physical row order for
+    timestamp ties — a green or cycle_start exactly at a marker timestamp
+    belongs to the post-gap segment).  A green whose segment holds no
+    earlier cycle_start attaches to no cycle: pairing never crosses an
+    event_code == -1 hard reset.
+
     Args:
         green_events: DataFrame with [timestamp, parameter].
         cycles_df: DataFrame with at least [cycle_start] (numeric UNIX
             epoch or datetime64).
+        gap_timestamps: Timestamps of event_code == -1 gap marker rows, in
+            the same time base as green_events.  None or empty means no
+            discontinuities.
 
     Returns:
         green_events sorted by timestamp with a ``_cs`` column holding the
@@ -233,6 +257,22 @@ def _assign_greens_to_cycles(
         green_sorted['timestamp'] = pd.to_datetime(
             green_sorted['timestamp'], unit='s', utc=True
         )
+        if gap_timestamps is not None:
+            gap_timestamps = pd.to_datetime(
+                gap_timestamps, unit='s', utc=True
+            )
+
+    merge_kwargs = {}
+    if gap_timestamps is not None and len(gap_timestamps) > 0:
+        gaps = np.sort(np.asarray(gap_timestamps))
+        cycles_sorted['_seg'] = np.searchsorted(
+            gaps, cycles_sorted['cycle_start'].to_numpy(), side='right'
+        )
+        green_sorted = green_sorted.copy()
+        green_sorted['_seg'] = np.searchsorted(
+            gaps, green_sorted['timestamp'].to_numpy(), side='right'
+        )
+        merge_kwargs['by'] = '_seg'
 
     assigned = pd.merge_asof(
         green_sorted,
@@ -240,9 +280,10 @@ def _assign_greens_to_cycles(
         left_on='timestamp',
         right_on='_cs',
         direction='backward',
+        **merge_kwargs,
     )
-    # Drop unmatched (events before the first cycle)
-    return assigned.dropna(subset=['_cs'])
+    # Drop unmatched (events before the first cycle or stranded after a gap)
+    return assigned.dropna(subset=['_cs']).drop(columns='_seg', errors='ignore')
 
 
 def _ring_phase_strings(
@@ -622,15 +663,27 @@ def _merge_coordination_plan(
 def validate_cycles(
     cycles_df: pd.DataFrame,
     min_cycle_length: float = 10.0,
-    max_cycle_length: float = 300.0
+    max_cycle_length: float = 300.0,
+    gap_timestamps: Optional[pd.Series] = None,
 ) -> Tuple[bool, List[str]]:
     """
     Validate detected cycles for reasonableness.
+
+    Gap rule: an interval between consecutive cycle starts that strictly
+    contains an event_code == -1 gap marker is missing data, not a cycle
+    length — it is excluded from the min/max length checks rather than
+    misreported as an over-long (or, pathologically, under-short) cycle.
+    A marker exactly at a cycle_start does not suppress the check: the
+    interval on either side of it holds contiguous data.  Duplicate and
+    ordering checks are unaffected by gaps.
 
     Args:
         cycles_df: Cycles DataFrame with [cycle_start] column.
         min_cycle_length: Minimum acceptable inter-cycle gap in seconds.
         max_cycle_length: Maximum acceptable inter-cycle gap in seconds.
+        gap_timestamps: Timestamps of event_code == -1 gap marker rows, in
+            the same time base as cycle_start.  None or empty means no
+            discontinuities (every interval is length-checked).
 
     Returns:
         Tuple of (is_valid, list_of_warning_strings).
@@ -650,7 +703,21 @@ def validate_cycles(
     if not cycles_df['cycle_start'].is_monotonic_increasing:
         warnings_out.append("Cycles are not sorted by cycle_start")
 
-    lengths = sorted_starts.diff().dropna()
+    lengths = sorted_starts.diff()
+
+    if gap_timestamps is not None and len(gap_timestamps) > 0:
+        gaps = np.sort(np.asarray(gap_timestamps))
+        # Interval (prev, curr) spans a marker iff a marker lies strictly
+        # inside it; searchsorted keeps this vectorized and boundary-exact.
+        curr = sorted_starts.to_numpy()
+        prev = sorted_starts.shift(1).to_numpy()
+        spans_gap = (
+            np.searchsorted(gaps, curr, side='left')
+            > np.searchsorted(gaps, prev, side='right')
+        )
+        lengths = lengths[~spans_gap]
+
+    lengths = lengths.dropna()
 
     too_short = lengths < min_cycle_length
     if too_short.any():
