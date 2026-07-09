@@ -53,7 +53,7 @@ Pure functions: DataFrames/dicts in, DataFrames/dicts/figures out. No I/O.
 | `calculate_cycles(events_df, config)` | `cycles` | Cycle-start detection (Code-31 barrier pulses, or ring-barrier fallback) |
 | `assign_ring_phases(cycles_df, events_df, config)` | `cycles` | Adds `r1_phases`/`r2_phases` to a cycles DataFrame |
 | `assign_events_to_cycles(events_df, cycles_df)` | `cycles` | `merge_asof` join of events onto their owning cycle |
-| `validate_cycles(cycles_df, min_cycle_length=10.0, max_cycle_length=300.0)` | `cycles` | Sanity checks (duplicate/short/long cycles) |
+| `validate_cycles(cycles_df, min_cycle_length=10.0, max_cycle_length=300.0, gap_timestamps=None)` | `cycles` | Sanity checks (duplicate/short/long cycles); pass `gap_timestamps` (a Series of `event_code = -1` marker times) to exclude intervals straddling a hard reset from the length checks |
 | `get_cycle_stats(cycles_df)` | `cycles` | Summary statistics dict |
 | `CycleDetectionError` | `cycles` | Raised when cycle detection cannot proceed |
 | `vehicle_counts(events_df, movements, exclusions=None, bin_len=60, hourly=False, include_detectors=False)` | `counts` | Per-movement vehicle volume table |
