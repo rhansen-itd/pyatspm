@@ -563,6 +563,30 @@ def _detect_cycles_from_config(
     return pd.DataFrame({'cycle_start': cycle_starts})
 
 
+def _parse_ring_groups(ring_str: Any) -> List[List[int]]:
+    """
+    Parse one ring's pipe-delimited phase-group string into ordered groups.
+
+    Format: ``'1,2|3,4'`` → ``[[1, 2], [3, 4]]`` — one inner list per
+    barrier group, phases in listed (sequence) order.
+
+    Args:
+        ring_str: Raw ``RB_R1`` / ``RB_R2`` config value.
+
+    Returns:
+        List of phase-ID groups; empty list if the value is absent or
+        unparseable.
+    """
+    if not ring_str or (isinstance(ring_str, float) and pd.isna(ring_str)):
+        return []
+    groups = []
+    for group_str in str(ring_str).split('|'):
+        ids = [int(x) for x in group_str.split(',') if x.strip().isdigit()]
+        if ids:
+            groups.append(ids)
+    return groups
+
+
 def _parse_ring_barrier_config(config: Dict[str, Any]) -> List[List[int]]:
     """
     Parse Ring-Barrier configuration into phase groups.
@@ -578,18 +602,8 @@ def _parse_ring_barrier_config(config: Dict[str, Any]) -> List[List[int]]:
     Returns:
         List of phase groups; empty list if config is absent or unparseable.
     """
-    def parse_ring(ring_str: Any) -> List[List[int]]:
-        if not ring_str or (isinstance(ring_str, float) and pd.isna(ring_str)):
-            return []
-        groups = []
-        for group_str in str(ring_str).split('|'):
-            ids = [int(x) for x in group_str.split(',') if x.strip().isdigit()]
-            if ids:
-                groups.append(ids)
-        return groups
-
-    r1_groups = parse_ring(config.get('RB_R1'))
-    r2_groups = parse_ring(config.get('RB_R2'))
+    r1_groups = _parse_ring_groups(config.get('RB_R1'))
+    r2_groups = _parse_ring_groups(config.get('RB_R2'))
 
     if not r1_groups and not r2_groups:
         return []
