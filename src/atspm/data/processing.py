@@ -271,10 +271,12 @@ class CycleProcessor:
         start_epoch, end_epoch = min(epochs), max(epochs)
 
         with DatabaseManager(self.db_path) as m:
+            # Gap markers (-1) are always included so assign_ring_phases
+            # can stop the green->cycle join at a hard reset.
             events_df = m.query_events(
                 start_time=start_epoch,
                 end_time=end_epoch + 1,
-                event_codes=[1],
+                event_codes=[1, -1],
             )
             config = m.get_config_at_date(
                 datetime.fromtimestamp(start_epoch, self.tz)

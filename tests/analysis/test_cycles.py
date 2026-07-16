@@ -4,16 +4,16 @@ Target: src/atspm/analysis/cycles.py — validate_cycles.
 Pure function: takes a cycles DataFrame, returns (is_valid, warnings).
 No mocking, no DB.
 
-Gap-rule note (CLAUDE.md §5): validate_cycles receives only cycle_start
-values — the cycles DataFrame carries no gap information, so the function
-currently diffs every consecutive pair of cycle starts, including pairs
-that straddle an event_code == -1 hard reset in the underlying events.
-That pairing across a discontinuity is exposed (not papered over) by the
-xfail test at the bottom of this module.
+Gap-rule note (CLAUDE.md §5): validate_cycles accepts the timestamps of
+event_code == -1 gap markers via the optional gap_timestamps argument.
+An interval between consecutive cycle starts that strictly contains a
+marker is missing data, not a cycle length, and is excluded from the
+min/max length checks.  Without gap_timestamps the function has no gap
+information and length-checks every consecutive pair — that fallback is
+pinned below so callers know omitting the argument forfeits the gap rule.
 """
 
 import pandas as pd
-import pytest
 
 from atspm.analysis.cycles import validate_cycles
 
@@ -112,26 +112,63 @@ class TestValidateCyclesOrderingAndDuplicates:
 
 class TestValidateCyclesGapRule:
 
-    @pytest.mark.xfail(
-        reason=(
-            "CLAUDE.md §5 gap rule: duration/pairing logic must stop at an "
-            "event_code == -1 hard reset. validate_cycles has no gap "
-            "awareness — its signature only receives cycle_start values — so "
-            "it diffs the last pre-gap cycle against the first post-gap "
-            "cycle and misreports the data outage as an over-long cycle. "
-            "Fixing this requires passing gap information (e.g. gap "
-            "timestamps or the events frame) into validate_cycles."
-        ),
-        strict=True,
-    )
     def test_cycles_straddling_a_hard_reset_are_not_paired_across_it(self):
         # Healthy 90 s cycles, then an event_code == -1 hard reset at
         # T0 + 200 (an hour of missing data), then healthy cycles resume.
         pre_gap = [T0, T0 + 90.0, T0 + 180.0]
         post_gap = [T0 + 3800.0, T0 + 3890.0, T0 + 3980.0]
-        is_valid, warnings = validate_cycles(_cycles(pre_gap + post_gap))
+        is_valid, warnings = validate_cycles(
+            _cycles(pre_gap + post_gap),
+            gap_timestamps=pd.Series([T0 + 200.0]),
+        )
 
         # The 3620 s pre/post-gap diff is missing data, not a cycle length.
         # Correct behavior: no cycle-length warning derived from that pair.
         assert is_valid is True
         assert warnings == []
+
+    def test_without_gap_info_the_outage_is_still_flagged(self):
+        # Pins the fallback: omitting gap_timestamps means no gap awareness,
+        # so the pre/post-gap diff is (mis)reported as an over-long cycle.
+        is_valid, warnings = validate_cycles(_cycles([T0, T0 + 3800.0]))
+        assert is_valid is False
+        assert "longer than" in warnings[0]
+
+    def test_real_defects_outside_the_gap_interval_still_warn(self):
+        # Suppression is per-interval: the 400 s cycle in the post-gap
+        # segment must still be flagged even though a marker exists.
+        starts = [T0, T0 + 90.0, T0 + 3800.0, T0 + 4200.0]
+        is_valid, warnings = validate_cycles(
+            _cycles(starts), gap_timestamps=pd.Series([T0 + 200.0])
+        )
+        assert is_valid is False
+        assert len(warnings) == 1
+        assert "1 cycles longer than 300.0s" in warnings[0]
+
+    def test_marker_exactly_at_a_cycle_start_does_not_suppress(self):
+        # A marker at the boundary leaves both adjacent intervals holding
+        # contiguous data — strictly-inside containment, so both intervals
+        # are still checked and the over-long one warns.
+        starts = [T0, T0 + 400.0, T0 + 490.0]
+        is_valid, warnings = validate_cycles(
+            _cycles(starts), gap_timestamps=pd.Series([T0 + 400.0])
+        )
+        assert is_valid is False
+        assert "longer than" in warnings[0]
+
+    def test_multiple_markers_inside_one_interval_suppress_it_once(self):
+        is_valid, warnings = validate_cycles(
+            _cycles([T0, T0 + 7200.0, T0 + 7290.0]),
+            gap_timestamps=pd.Series([T0 + 100.0, T0 + 3600.0]),
+        )
+        assert is_valid is True
+        assert warnings == []
+
+    def test_duplicate_and_ordering_checks_are_unaffected_by_gap_info(self):
+        is_valid, warnings = validate_cycles(
+            _cycles([T0 + 90.0, T0, T0]),
+            gap_timestamps=pd.Series([T0 + 30.0]),
+        )
+        assert is_valid is False
+        assert any("duplicate cycle start times" in w for w in warnings)
+        assert any("not sorted" in w for w in warnings)

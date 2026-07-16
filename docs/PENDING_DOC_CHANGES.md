@@ -7,3 +7,5 @@ Only log changes to: SQLite schema, CLI subcommands/flags, public
 __init__.py exports, or the Functional Core/Imperative Shell boundary.
 See CLAUDE.md "Documentation Workflow" for the rules.
 -->
+
+- [src/atspm/analysis/cycles.py] validate_cycles: new optional gap_timestamps arg; assign_ring_phases green→cycle join now stops at -1 markers
