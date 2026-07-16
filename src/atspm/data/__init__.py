@@ -54,6 +54,16 @@ from .aog import (
     get_arrival_on_green,
 )
 
+from .flow import (
+    FlowRateEngine,
+    get_flow_rate,
+)
+
+from .critical import (
+    CriticalMovementEngine,
+    get_critical_movements,
+)
+
 from .video import ShapeConfig, resolve_stopbar_target, OVERLAP_LETTER_MAP
 
 __all__ = [
@@ -95,6 +105,12 @@ __all__ = [
     #AoG
     'AogEngine',
     'get_arrival_on_green',
+    # Flow
+    'FlowRateEngine',
+    'get_flow_rate',
+    # Critical
+    'CriticalMovementEngine',
+    'get_critical_movements',
     # Video
     'ShapeConfig',
     'resolve_stopbar_target',

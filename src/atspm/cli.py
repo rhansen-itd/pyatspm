@@ -796,6 +796,207 @@ def handle_aog(args: argparse.Namespace) -> None:
 
 
 # ---------------------------------------------------------------------------
+# flow
+# ---------------------------------------------------------------------------
+
+def _flow_single_intersection(target_name: str, args: argparse.Namespace) -> None:
+    """Core logic to generate split flow-rate outputs for one intersection.
+
+    Resolves the database path and timezone from ``metadata.json``, then
+    delegates entirely to :class:`atspm.data.flow.FlowRateEngine`.  All I/O
+    (event queries, CSV/HTML writing) is handled inside the engine; this
+    function is responsible only for path resolution, argument forwarding,
+    and error surfacing.
+
+    Args:
+        target_name: Exact intersection folder name
+            (e.g., ``'2068_US-95_and_SH-8'``).
+        args: Parsed CLI arguments from the ``flow`` subcommand.
+    """
+    from atspm.data.flow import FlowRateEngine
+
+    target_dir = _get_target_dir(target_name)
+    meta = _load_metadata(target_dir)
+    db_path = _resolve_db_path(target_dir, meta)
+
+    output_dir = target_dir / "outputs"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    int_name = meta.get("intersection_name", target_name)
+    timezone = args.timezone or meta.get("timezone") or "US/Mountain"
+
+    if not db_path.exists():
+        _die(
+            f"Database not found: {db_path}\n"
+            f"Run 'atspm process --target {target_name}' first."
+        )
+
+    print(f"\n🚗  Generating split flow rate for {int_name}")
+    print(f"    DB:     {db_path.name}")
+    print(f"    Window: {args.start} → {args.end}")
+    print(f"    Normalize: {args.normalize}")
+    if args.phases:
+        print(f"    Phases: {args.phases}")
+    if args.plans:
+        print(f"    Plans:  {args.plans}")
+
+    engine = FlowRateEngine(db_path=db_path, timezone=timezone)
+
+    try:
+        engine.flow(
+            start=args.start,
+            end=args.end,
+            phases=args.phases,
+            plans=args.plans,
+            pct=args.pct,
+            max_lost=args.max_lost,
+            split_tolerance=args.split_tolerance,
+            normalize=args.normalize,
+            fixed_lost=args.fixed_lost,
+            rolling=args.rolling,
+            make_plot=not args.no_plot,
+            output_dir=output_dir,
+        )
+    except Exception as exc:
+        if args.verbose:
+            traceback.print_exc()
+        _die(f"Flow-rate generation failed: {exc}")
+
+
+def handle_flow(args: argparse.Namespace) -> None:
+    """Generate split flow-rate tables and plots for one or more intersections.
+
+    Reads stop-bar detector mappings from the active configuration
+    (``Det_P{N}_Stopbar`` keys) and writes per-cycle CSVs, wide rate
+    profiles, and interactive HTML plots to
+    ``intersections/<target>/outputs/``.
+
+    Args:
+        args: Parsed CLI arguments from the ``flow`` subcommand.
+    """
+    intersections_dir = _get_intersections_dir()
+
+    if getattr(args, "all", False):
+        targets = [p.name for p in intersections_dir.iterdir() if p.is_dir()]
+        if not targets:
+            _die(f"No intersection directories found in {intersections_dir}")
+        print(f"\n🌍 Batch generating flow rate for {len(targets)} intersections...")
+    else:
+        targets = [_resolve_target_name(args.target, args.targetid)]
+
+    for target_name in targets:
+        try:
+            _flow_single_intersection(target_name, args)
+        except SystemExit:
+            print(f"\n⏭️ Skipping {target_name} due to errors.", file=sys.stderr)
+        except Exception as exc:
+            print(
+                f"\n❌ Unexpected error generating flow rate for {target_name}: {exc}",
+                file=sys.stderr,
+            )
+            if getattr(args, "verbose", False):
+                traceback.print_exc()
+
+
+# ---------------------------------------------------------------------------
+# critical
+# ---------------------------------------------------------------------------
+
+def _critical_single_intersection(target_name: str, args: argparse.Namespace) -> None:
+    """Core logic to run critical movement analysis for one intersection.
+
+    Resolves the database path and timezone from ``metadata.json``, then
+    delegates entirely to
+    :class:`atspm.data.critical.CriticalMovementEngine`.  All I/O (count
+    queries, cycle queries, CSV writing) is handled inside the engine;
+    this function is responsible only for path resolution, argument
+    forwarding, and error surfacing.
+
+    Args:
+        target_name: Exact intersection folder name
+            (e.g., ``'2068_US-95_and_SH-8'``).
+        args: Parsed CLI arguments from the ``critical`` subcommand.
+    """
+    from atspm.data.critical import CriticalMovementEngine
+
+    target_dir = _get_target_dir(target_name)
+    meta = _load_metadata(target_dir)
+    db_path = _resolve_db_path(target_dir, meta)
+
+    output_dir = target_dir / "outputs"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    int_name = meta.get("intersection_name", target_name)
+    timezone = args.timezone or meta.get("timezone") or "US/Mountain"
+
+    if not db_path.exists():
+        _die(
+            f"Database not found: {db_path}\n"
+            f"Run 'atspm process --target {target_name}' first."
+        )
+
+    print(f"\n🚦  Critical movement analysis for {int_name}")
+    print(f"    DB:     {db_path.name}")
+    print(f"    Window: {args.start} → {args.end}")
+    print(f"    Basis:  {args.basis}")
+
+    engine = CriticalMovementEngine(db_path=db_path, timezone=timezone)
+
+    try:
+        engine.critical(
+            start=args.start,
+            end=args.end,
+            bin_len=args.bin_len,
+            basis=args.basis,
+            exclude_missing=not args.include_missing,
+            output_dir=output_dir,
+        )
+    except Exception as exc:
+        if args.verbose:
+            traceback.print_exc()
+        _die(f"Critical movement analysis failed: {exc}")
+
+
+def handle_critical(args: argparse.Namespace) -> None:
+    """Run critical movement analysis for one or more intersections.
+
+    Derives the ring/barrier structure from ``RB_*`` config and observed
+    cycle sequences, maps movement counts (``TM_*``) to phases via
+    stop-bar detector overlap, and writes per-phase and per-barrier-group
+    criticality tables to ``intersections/<target>/outputs/``.
+
+    Args:
+        args: Parsed CLI arguments from the ``critical`` subcommand.
+    """
+    intersections_dir = _get_intersections_dir()
+
+    if getattr(args, "all", False):
+        targets = [p.name for p in intersections_dir.iterdir() if p.is_dir()]
+        if not targets:
+            _die(f"No intersection directories found in {intersections_dir}")
+        print(
+            f"\n🌍 Batch critical movement analysis for "
+            f"{len(targets)} intersections..."
+        )
+    else:
+        targets = [_resolve_target_name(args.target, args.targetid)]
+
+    for target_name in targets:
+        try:
+            _critical_single_intersection(target_name, args)
+        except SystemExit:
+            print(f"\n⏭️ Skipping {target_name} due to errors.", file=sys.stderr)
+        except Exception as exc:
+            print(
+                f"\n❌ Unexpected error in critical movement analysis for "
+                f"{target_name}: {exc}",
+                file=sys.stderr,
+            )
+            if getattr(args, "verbose", False):
+                traceback.print_exc()
+
+
+# ---------------------------------------------------------------------------
 # report
 # ---------------------------------------------------------------------------
 
@@ -1900,6 +2101,249 @@ def _add_aog_parser(subs: argparse._SubParsersAction) -> None:
     p_aog.set_defaults(func=handle_aog)
 
 
+def _add_flow_parser(subs: argparse._SubParsersAction) -> None:
+    """Attach the ``flow`` subcommand parser."""
+    p_flow = subs.add_parser(
+        "flow",
+        help="Generate split flow-rate tables and plots.",
+        description=(
+            "Compute effective cumulative flow-rate profiles from stop-bar\n"
+            "detector departures (Code 81) within each phase split window.\n"
+            "Stop-bar detector IDs are read from the active configuration\n"
+            "(Det_P{N}_Stopbar keys in int_cfg.csv).\n\n"
+            "Only near-capacity cycles qualify (end slack <= --max-lost);\n"
+            "cycles are then restricted to the modal split and the busiest\n"
+            "--pct percent.  The peak of the mean profile identifies the\n"
+            "throughput-optimal split length.\n\n"
+            "Outputs (CSV + interactive HTML) are saved to:\n"
+            "  intersections/<target>/outputs/"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    group_flow = p_flow.add_mutually_exclusive_group(required=True)
+    group_flow.add_argument(
+        "--target",
+        metavar="FOLDER",
+        help="Exact intersection folder name (e.g. '2068_US-95_and_SH-8').",
+    )
+    group_flow.add_argument(
+        "--targetid",
+        metavar="ID",
+        help="Intersection ID prefix (e.g. '2068').",
+    )
+    group_flow.add_argument(
+        "--all",
+        action="store_true",
+        help="Generate flow rate for all intersections in the directory.",
+    )
+    p_flow.add_argument(
+        "--start",
+        required=True,
+        metavar="YYYY-MM-DD",
+        help="Query window start date (local time, inclusive).",
+    )
+    p_flow.add_argument(
+        "--end",
+        required=True,
+        metavar="YYYY-MM-DD",
+        help="Query window end date (local time, inclusive).",
+    )
+    p_flow.add_argument(
+        "--phases",
+        nargs="+",
+        type=int,
+        metavar="N",
+        default=None,
+        help=(
+            "Signal phase numbers to analyse, e.g. --phases 2 6. "
+            "Omit to analyse all phases with a configured Det_P{N}_Stopbar key."
+        ),
+    )
+    p_flow.add_argument(
+        "--plans",
+        nargs="+",
+        type=int,
+        metavar="P",
+        default=None,
+        help=(
+            "Coordination plan numbers to include, e.g. --plans 1 2. "
+            "Omit to analyse all plans."
+        ),
+    )
+    p_flow.add_argument(
+        "--pct",
+        type=float,
+        default=1.0,
+        metavar="PCT",
+        help=(
+            "Keep the busiest PCT percent of modal-split cycles by total "
+            "vehicles (default: 1.0)."
+        ),
+    )
+    p_flow.add_argument(
+        "--max-lost",
+        type=float,
+        default=10.0,
+        metavar="SEC",
+        help=(
+            "Maximum seconds between the last detector departure and the "
+            "end of the split window for a cycle to qualify as "
+            "near-capacity (default: 10.0)."
+        ),
+    )
+    p_flow.add_argument(
+        "--split-tolerance",
+        type=float,
+        default=0.10,
+        metavar="FRAC",
+        help=(
+            "Fractional tolerance around the modal split length "
+            "(default: 0.10 = ±10%%)."
+        ),
+    )
+    p_flow.add_argument(
+        "--normalize",
+        choices=["end_shift", "pooled", "clearance", "fixed", "none"],
+        default="end_shift",
+        help=(
+            "Split-termination overhead added to elapsed time when computing "
+            "the effective cumulative rate: 'end_shift' = each cycle's "
+            "measured end slack (default), 'pooled' = per-detector median "
+            "slack, 'clearance' = actual yellow+red clearance duration, "
+            "'fixed' = constant --fixed-lost seconds, 'none' = raw rate."
+        ),
+    )
+    p_flow.add_argument(
+        "--fixed-lost",
+        type=float,
+        default=None,
+        metavar="SEC",
+        help="Constant overhead in seconds (required with --normalize fixed).",
+    )
+    p_flow.add_argument(
+        "--rolling",
+        type=int,
+        default=5,
+        metavar="N",
+        help=(
+            "Centred rolling-mean window (grid rows) applied to the "
+            "instantaneous-rate traces in the plot (default: 5; 1 disables)."
+        ),
+    )
+    p_flow.add_argument(
+        "--no-plot",
+        action="store_true",
+        help="Skip HTML plot generation; write CSV tables only.",
+    )
+    p_flow.add_argument(
+        "--timezone",
+        default=None,
+        metavar="TZ",
+        help="Override the timezone from metadata.json (e.g. 'US/Pacific').",
+    )
+    p_flow.add_argument(
+        "--verbose",
+        action="store_true",
+        default=False,
+        help="Print full tracebacks for any errors.",
+    )
+    p_flow.set_defaults(func=handle_flow)
+
+
+def _add_critical_parser(subs: argparse._SubParsersAction) -> None:
+    """Attach the ``critical`` subcommand parser."""
+    p_crit = subs.add_parser(
+        "critical",
+        help="Run critical movement analysis.",
+        description=(
+            "Identify the critical phases and the critical path per barrier\n"
+            "group for a chosen period.  The ring/barrier structure comes\n"
+            "from RB_R1/RB_R2 config (NEMA-standard fallback), cross-checked\n"
+            "against observed cycle sequences; movement counts (TM_* keys)\n"
+            "are mapped to phases by stop-bar detector overlap\n"
+            "(Det_P{N}_Stopbar keys).\n\n"
+            "Demand (vph, or vphpl with --basis per_lane) is the\n"
+            "required-time proxy: per barrier group, the ring with the\n"
+            "larger demand sum is the critical path.\n\n"
+            "Outputs (CSV) are saved to:\n"
+            "  intersections/<target>/outputs/"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    group_crit = p_crit.add_mutually_exclusive_group(required=True)
+    group_crit.add_argument(
+        "--target",
+        metavar="FOLDER",
+        help="Exact intersection folder name (e.g. '2068_US-95_and_SH-8').",
+    )
+    group_crit.add_argument(
+        "--targetid",
+        metavar="ID",
+        help="Intersection ID prefix (e.g. '2068').",
+    )
+    group_crit.add_argument(
+        "--all",
+        action="store_true",
+        help="Run the analysis for all intersections in the directory.",
+    )
+    p_crit.add_argument(
+        "--start",
+        required=True,
+        metavar="DATETIME",
+        help=(
+            "Period start (local time): 'YYYY-MM-DD' or 'YYYY-MM-DD HH:MM' "
+            "for sub-day peak periods."
+        ),
+    )
+    p_crit.add_argument(
+        "--end",
+        required=True,
+        metavar="DATETIME",
+        help=(
+            "Period end (local time): 'YYYY-MM-DD' (inclusive whole day) or "
+            "'YYYY-MM-DD HH:MM' (exclusive)."
+        ),
+    )
+    p_crit.add_argument(
+        "--bin-len",
+        type=int,
+        default=15,
+        metavar="N",
+        help="Demand-aggregation bin width in minutes (default: 15).",
+    )
+    p_crit.add_argument(
+        "--basis",
+        choices=["per_lane", "total"],
+        default="per_lane",
+        help=(
+            "Demand basis for criticality: 'per_lane' = vph per detector "
+            "(lane-count proxy; default), 'total' = raw vph."
+        ),
+    )
+    p_crit.add_argument(
+        "--include-missing",
+        action="store_true",
+        help=(
+            "Keep bins with partial/missing data when averaging demand "
+            "(by default only quality-'ok' bins are used, since zero-filled "
+            "missing bins bias mean demand downward)."
+        ),
+    )
+    p_crit.add_argument(
+        "--timezone",
+        default=None,
+        metavar="TZ",
+        help="Override the timezone from metadata.json (e.g. 'US/Pacific').",
+    )
+    p_crit.add_argument(
+        "--verbose",
+        action="store_true",
+        default=False,
+        help="Print full tracebacks for any errors.",
+    )
+    p_crit.set_defaults(func=handle_critical)
+
+
 def _add_plot_coordination_parser(subs: argparse._SubParsersAction) -> None:
     """Attach the ``plot-coordination`` subcommand parser."""
     p_coord = subs.add_parser(
@@ -2190,6 +2634,8 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_counts_parser(subs)
     _add_splits_parser(subs)
     _add_aog_parser(subs)
+    _add_flow_parser(subs)
+    _add_critical_parser(subs)
     _add_plot_coordination_parser(subs)
     _add_plot_termination_parser(subs)
     _add_discrepancies_parser(subs)

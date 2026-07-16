@@ -51,6 +51,18 @@ from .aog import (
     bin_arrival_on_green,
 )
 
+from .flow import (
+    flow_rate,
+    rate_profiles,
+)
+
+from .critical import (
+    ring_barrier_structure,
+    movement_phase_map,
+    phase_demand,
+    critical_movement_analysis,
+)
+
 __all__ = [
     # Decoders
     'DatZDecodingError',
@@ -79,4 +91,12 @@ __all__ = [
     # AoG
     'arrival_on_green',
     'bin_arrival_on_green',
+    # Flow
+    'flow_rate',
+    'rate_profiles',
+    # Critical
+    'ring_barrier_structure',
+    'movement_phase_map',
+    'phase_demand',
+    'critical_movement_analysis',
 ]
