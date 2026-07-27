@@ -36,6 +36,11 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
+# The only eager package import: a bare string constant used by a dozen
+# handlers and by the `setup` parser's default. Everything heavier (engines,
+# plotting, pytz) stays lazy inside the handler that needs it.
+from .utils.timezone import DEFAULT_TIMEZONE
+
 # ---------------------------------------------------------------------------
 # The intersections directory is always a sibling of the working-directory
 # root.  We derive it at call-time (inside helpers, not at module load) so
@@ -414,7 +419,7 @@ def _process_single_intersection(target_name: str, args: argparse.Namespace) -> 
 
     # Determine effective timezone: CLI override > metadata > default
     timezone: Optional[str] = (
-        args.timezone or meta.get("timezone") or "US/Mountain"
+        args.timezone or meta.get("timezone") or DEFAULT_TIMEZONE
     )
 
     int_name = meta.get("intersection_name", target_name)
@@ -547,7 +552,7 @@ def _counts_single_intersection(target_name: str, args: argparse.Namespace) -> N
     output_dir.mkdir(parents=True, exist_ok=True)
 
     int_name = meta.get("intersection_name", target_name)
-    timezone = args.timezone or meta.get("timezone") or "US/Mountain"
+    timezone = args.timezone or meta.get("timezone") or DEFAULT_TIMEZONE
 
     if not db_path.exists():
         _die(
@@ -634,7 +639,7 @@ def _splits_single_intersection(target_name: str, args: argparse.Namespace) -> N
     output_dir.mkdir(parents=True, exist_ok=True)
 
     int_name = meta.get("intersection_name", target_name)
-    timezone = args.timezone or meta.get("timezone") or "US/Mountain"
+    timezone = args.timezone or meta.get("timezone") or DEFAULT_TIMEZONE
 
     if not db_path.exists():
         _die(
@@ -721,7 +726,7 @@ def _aog_single_intersection(target_name: str, args: argparse.Namespace) -> None
     output_dir.mkdir(parents=True, exist_ok=True)
 
     int_name = meta.get("intersection_name", target_name)
-    timezone = args.timezone or meta.get("timezone") or "US/Mountain"
+    timezone = args.timezone or meta.get("timezone") or DEFAULT_TIMEZONE
 
     if not db_path.exists():
         _die(
@@ -823,7 +828,7 @@ def _flow_single_intersection(target_name: str, args: argparse.Namespace) -> Non
     output_dir.mkdir(parents=True, exist_ok=True)
 
     int_name = meta.get("intersection_name", target_name)
-    timezone = args.timezone or meta.get("timezone") or "US/Mountain"
+    timezone = args.timezone or meta.get("timezone") or DEFAULT_TIMEZONE
 
     if not db_path.exists():
         _die(
@@ -927,7 +932,7 @@ def _critical_single_intersection(target_name: str, args: argparse.Namespace) ->
     output_dir.mkdir(parents=True, exist_ok=True)
 
     int_name = meta.get("intersection_name", target_name)
-    timezone = args.timezone or meta.get("timezone") or "US/Mountain"
+    timezone = args.timezone or meta.get("timezone") or DEFAULT_TIMEZONE
 
     if not db_path.exists():
         _die(
@@ -1135,7 +1140,7 @@ def _discrepancies_single_intersection(target_name: str, args: argparse.Namespac
         output_dir.mkdir(parents=True, exist_ok=True)
 
     int_name = meta.get("intersection_name", target_name)
-    timezone = args.timezone or meta.get("timezone") or "US/Mountain"
+    timezone = args.timezone or meta.get("timezone") or DEFAULT_TIMEZONE
 
     if not db_path.exists():
         _die(
@@ -1233,7 +1238,7 @@ def _plot_coordination_single_intersection(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     int_name = meta.get("intersection_name", target_name)
-    tz_str = args.timezone or meta.get("timezone") or "US/Mountain"
+    tz_str = args.timezone or meta.get("timezone") or DEFAULT_TIMEZONE
     tz = pytz.timezone(tz_str)
 
     try:
@@ -1312,7 +1317,7 @@ def _plot_termination_single_intersection(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     int_name = meta.get("intersection_name", target_name)
-    tz_str = args.timezone or meta.get("timezone") or "US/Mountain"
+    tz_str = args.timezone or meta.get("timezone") or DEFAULT_TIMEZONE
     tz = pytz.timezone(tz_str)
 
     try:
@@ -1398,7 +1403,7 @@ def _plot_detectors_single_intersection(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     int_name = meta.get("intersection_name", target_name)
-    tz_str = args.timezone or meta.get("timezone") or "US/Mountain"
+    tz_str = args.timezone or meta.get("timezone") or DEFAULT_TIMEZONE
     tz = pytz.timezone(tz_str)
 
     try:
@@ -1563,7 +1568,7 @@ def handle_video_overlay(args: argparse.Namespace) -> None:
     if not video_path.exists():
         _die(f"Video not found: {video_path}")
 
-    tz_str = args.timezone or meta.get("timezone") or "US/Mountain"
+    tz_str = args.timezone or meta.get("timezone") or DEFAULT_TIMEZONE
     tz = pytz.timezone(tz_str)
     try:
         start_dt = tz.localize(datetime.fromisoformat(args.start))
@@ -1644,7 +1649,7 @@ def handle_video_locate_phase_change(args: argparse.Namespace) -> None:
     if not video_path.exists():
         _die(f"Video not found: {video_path}")
 
-    tz_str = args.timezone or meta.get("timezone") or "US/Mountain"
+    tz_str = args.timezone or meta.get("timezone") or DEFAULT_TIMEZONE
     tz = resolve_pytz(tz_str)
     try:
         start_dt = tz.localize(datetime.fromisoformat(args.start))
@@ -1813,9 +1818,9 @@ def _add_setup_parser(subs: argparse._SubParsersAction) -> None:
     )
     p_setup.add_argument(
         "--timezone",
-        default="US/Mountain",
+        default=DEFAULT_TIMEZONE,
         metavar="TZ",
-        help="IANA timezone for the new metadata.json (default: US/Mountain)."
+        help=f"IANA timezone for the new metadata.json (default: {DEFAULT_TIMEZONE})."
     )
     p_setup.set_defaults(func=handle_setup)
 

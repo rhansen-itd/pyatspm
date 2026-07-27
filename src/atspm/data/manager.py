@@ -17,6 +17,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 
+from ..utils.timezone import DEFAULT_TIMEZONE, resolve_pytz
+
 
 # ---------------------------------------------------------------------------
 # Module-level helpers
@@ -139,7 +141,10 @@ class DatabaseManager:
             )
         """)
 
-        cur.execute("""
+        # DEFAULT_TIMEZONE is interpolated rather than written literally so the
+        # column default cannot drift from the Python-side fallback. It is a
+        # module constant, never caller input, so it is not an injection path.
+        cur.execute(f"""
             CREATE TABLE IF NOT EXISTS metadata (
                 lock_id           INTEGER PRIMARY KEY CHECK (lock_id = 1),
                 intersection_id   TEXT,
@@ -153,7 +158,7 @@ class DatabaseManager:
                 minor_road_name   TEXT,
                 latitude          REAL,
                 longitude         REAL,
-                timezone          TEXT NOT NULL DEFAULT 'US/Mountain',
+                timezone          TEXT NOT NULL DEFAULT '{DEFAULT_TIMEZONE}',
                 agency_id         TEXT
             )
         """)
@@ -355,6 +360,21 @@ class DatabaseManager:
     # Config query methods
     # ------------------------------------------------------------------
 
+    def _as_local_naive(self, dt: datetime) -> datetime:
+        """Express *dt* on the intersection's wall clock, without tzinfo.
+
+        Args:
+            dt: Naive (already local) or aware datetime.
+
+        Returns:
+            A naive datetime comparable with the naive ISO strings the
+            ``config`` table stores.
+        """
+        if dt.tzinfo is None:
+            return dt
+        tz = resolve_pytz(self.get_metadata().get("timezone"))
+        return dt.astimezone(tz).replace(tzinfo=None)
+
     def get_config_at_date(self, query_date: datetime) -> Optional[Dict[str, Any]]:
         """Retrieve the configuration active at a specific datetime.
 
@@ -362,8 +382,15 @@ class DatabaseManager:
         method scans for any columns matching ``Det_P<X>_Pairs``, parses
         their JSON values, and compiles them into ``detector_pairs``.
 
+        The ``config`` table stores ``start_date`` / ``end_date`` as naive
+        local ISO strings, so an aware *query_date* is first converted to the
+        intersection's own wall clock.  Comparing a UTC-aware datetime
+        directly would select the previous or next day's config for any query
+        far enough from local midnight.
+
         Args:
-            query_date: Datetime to query (naive or aware; date portion used).
+            query_date: Datetime to query.  Naive values are taken as already
+                being intersection-local; aware values are converted.
 
         Returns:
             Config dict augmented with:
@@ -374,7 +401,7 @@ class DatabaseManager:
         """
         if not self.conn:
             raise RuntimeError("No active connection.")
-        q = query_date.isoformat()
+        q = self._as_local_naive(query_date).isoformat()
         cur = self.conn.cursor()
         cur.execute("""
             SELECT * FROM config
@@ -725,7 +752,7 @@ class DatabaseManager:
         self,
         intersection_id: Optional[str] = None,
         intersection_name: Optional[str] = None,
-        timezone: str = "US/Mountain",
+        timezone: str = DEFAULT_TIMEZONE,
         controller_ip: Optional[str] = None,
         detection_type: Optional[str] = None,
         detection_ip: Optional[str] = None,
@@ -777,8 +804,9 @@ class DatabaseManager:
         """Return intersection metadata as a dict.
 
         Returns:
-            Dict of metadata fields.  Returns ``{'timezone': 'US/Mountain'}``
-            if the table does not yet exist or has no rows.
+            Dict of metadata fields.  Returns
+            ``{'timezone': DEFAULT_TIMEZONE}`` if the table does not yet exist
+            or has no rows.
         """
         if not self.conn:
             raise RuntimeError("No active connection.")
@@ -786,11 +814,26 @@ class DatabaseManager:
             cur = self.conn.cursor()
             cur.execute("SELECT * FROM metadata WHERE lock_id = 1")
         except sqlite3.OperationalError:
-            return {"timezone": "US/Mountain"}
+            return {"timezone": DEFAULT_TIMEZONE}
         row = cur.fetchone()
         if not row:
-            return {"timezone": "US/Mountain"}
+            return {"timezone": DEFAULT_TIMEZONE}
         return dict(zip([d[0] for d in cur.description], row))
+
+    def get_timezone(self) -> str:
+        """Return the intersection's IANA timezone name.
+
+        The single answer to "what zone is this intersection?" — every
+        engine, the reader, and the report generators resolve through here
+        (via :func:`db_timezone`) so a database with no metadata cannot be
+        read as UTC by one caller and as local by another.
+
+        Returns:
+            The ``metadata.timezone`` value, or
+            :data:`~atspm.utils.timezone.DEFAULT_TIMEZONE` when the table is
+            missing, empty, or holds a blank zone.
+        """
+        return self.get_metadata().get("timezone") or DEFAULT_TIMEZONE
 
     # ------------------------------------------------------------------
     # Maintenance
@@ -827,3 +870,31 @@ def import_config(csv_path: Path, db_path: Path) -> None:
     """
     with DatabaseManager(db_path) as m:
         m.import_config(csv_path)
+
+
+def db_timezone(db_path: Path, timezone: Optional[str] = None) -> str:
+    """Resolve the timezone to use for an intersection database.
+
+    Every ``_read_timezone`` / ``_resolve_timezone`` in the package is one
+    line delegating here.  Opening the database is cheap (a single-row read)
+    and happens once per engine construction.
+
+    Args:
+        db_path:  Path to the intersection SQLite database.
+        timezone: Caller override.  Returned as-is when given, so an explicit
+            ``--timezone`` always wins over what the database records.
+
+    Returns:
+        An IANA timezone name, falling back to
+        :data:`~atspm.utils.timezone.DEFAULT_TIMEZONE` when the database is
+        unreadable or records no zone.
+    """
+    if timezone:
+        return timezone
+    try:
+        with DatabaseManager(db_path) as m:
+            return m.get_timezone()
+    # A database that predates the metadata table, or is missing entirely,
+    # must not take an engine down before it has read a single event.
+    except Exception:  # noqa: BLE001
+        return DEFAULT_TIMEZONE

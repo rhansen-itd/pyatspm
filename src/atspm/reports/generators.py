@@ -33,6 +33,7 @@ from typing import List, Optional
 import pytz
 
 from ..data import reader
+from ..utils.timezone import DEFAULT_TIMEZONE
 from ..plotting.termination import plot_termination
 from ..plotting.coordination import plot_coordination
 
@@ -315,7 +316,7 @@ class PlotGenerator:
         """Return the intersection timezone string, reading from metadata once."""
         if self._timezone is None:
             meta = self._get_metadata()
-            self._timezone = meta.get('timezone') or 'UTC'
+            self._timezone = meta.get('timezone') or DEFAULT_TIMEZONE
         return self._timezone
 
 

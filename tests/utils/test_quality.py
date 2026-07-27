@@ -126,3 +126,39 @@ class TestPurity:
 
         pd.testing.assert_frame_equal(events, events_before)
         pd.testing.assert_frame_equal(spans, spans_before)
+
+
+class TestAwareBoundsAccepted:
+    """The engines pass their public start/end straight through, so a caller
+    handing in aware datetimes must not hit pytz's naive-only ``localize``."""
+
+    def test_aware_bounds_produce_the_same_grid_as_naive(self):
+        naive = compute_bin_quality(
+            _events(), _full_span(), START, END, BIN_LEN, TZ,
+        )
+        aware = compute_bin_quality(
+            _events(),
+            _full_span(),
+            pytz.utc.localize(START),
+            pytz.utc.localize(END),
+            BIN_LEN,
+            TZ,
+        )
+        pd.testing.assert_frame_equal(naive, aware)
+
+    def test_aware_bounds_in_another_zone_describe_the_same_instants(self):
+        mountain = pytz.timezone("US/Mountain")
+        naive = compute_bin_quality(
+            _events(), _full_span(), START, END, BIN_LEN, TZ,
+        )
+        # 2026-01-05 00:00 UTC expressed on a Mountain wall clock.
+        shifted = compute_bin_quality(
+            _events(),
+            _full_span(),
+            pytz.utc.localize(START).astimezone(mountain),
+            pytz.utc.localize(END).astimezone(mountain),
+            BIN_LEN,
+            TZ,
+        )
+        assert list(shifted["coverage"]) == list(naive["coverage"])
+        assert list(shifted["data_quality"]) == list(naive["data_quality"])

@@ -17,6 +17,7 @@ from typing import Dict, List, Optional, Tuple
 import pandas as pd
 
 from .manager import DatabaseManager
+from ..utils.timezone import to_epoch
 from ..analysis.detectors import analyze_discrepancies
 
 log = logging.getLogger(__name__)
@@ -33,9 +34,9 @@ class DetectorEngine:
     Args:
         db_path:  Path to the intersection's SQLite database file.
         timezone: IANA timezone string used to interpret naive ``datetime``
-                  arguments (e.g. ``'US/Mountain'``).  When ``None`` the
-                  datetimes are treated as UTC-equivalent (``timestamp()``
-                  is called without localisation).
+                  arguments (e.g. ``'US/Mountain'``).  When ``None`` naive
+                  datetimes are read as UTC.  Aware datetimes always keep
+                  their own offset.
     """
 
     def __init__(self, db_path: Path, timezone: Optional[str] = None) -> None:
@@ -49,22 +50,16 @@ class DetectorEngine:
     # ------------------------------------------------------------------
 
     def _localize_epoch(self, dt: datetime) -> float:
-        """Convert a naive datetime to a UTC epoch float.
+        """Convert a window bound to a UTC epoch float.
 
         Args:
-            dt: Naive local datetime.
+            dt: Window bound.  Naive datetimes are read as ``self.timezone``
+                local; aware ones keep their own offset.
 
         Returns:
             UTC epoch float.
         """
-        if self.timezone:
-            try:
-                import pytz
-                tz = pytz.timezone(self.timezone)
-                return tz.localize(dt).timestamp()
-            except Exception:
-                pass
-        return dt.timestamp()
+        return to_epoch(dt, self.timezone)
 
     def _fetch_events(
         self,

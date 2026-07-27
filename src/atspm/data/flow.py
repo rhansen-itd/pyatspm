@@ -37,7 +37,7 @@ from typing import Dict, List, Optional, Union
 
 import pandas as pd
 
-from .manager import DatabaseManager
+from .manager import DatabaseManager, db_timezone
 from .reader import get_events_with_cycles_df
 from ..analysis.flow import (
     flow_rate as _flow_rate_core,
@@ -258,13 +258,8 @@ class FlowRateEngine:
     # ------------------------------------------------------------------
 
     def _read_timezone(self) -> str:
-        """Read timezone from metadata table, falling back to US/Mountain."""
-        try:
-            with DatabaseManager(self.db_path) as m:
-                meta = m.get_metadata()
-                return meta.get("timezone") or "US/Mountain"
-        except Exception:
-            return "US/Mountain"
+        """Read the intersection timezone from the database."""
+        return db_timezone(self.db_path)
 
     def _get_metadata(self) -> dict:
         """Read the metadata dict used for plot titles (may be empty)."""

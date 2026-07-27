@@ -13,7 +13,7 @@ from datetime import datetime, timedelta
 import numpy as np
 import pandas as pd
 
-from .timezone import resolve_pytz
+from .timezone import localize_naive, resolve_pytz
 
 # Gap marker event code — a hard reset; a bin containing one can never be "ok".
 _GAP_CODE: int = -1
@@ -42,8 +42,9 @@ def compute_bin_quality(
             ``timestamp`` may hold UTC-epoch floats or Timestamps.
         spans_df:  Ingestion spans with ``span_start`` / ``span_end``
             UTC-epoch columns (``DatabaseManager.get_ingestion_spans``).
-        start:     Query start (naive local datetime).
-        end:       Query end (naive local datetime).
+        start:     Query start.  Naive datetimes are read as *timezone*
+            local; aware ones keep their own offset.
+        end:       Query end, same interpretation as *start*.
         bin_len:   Bin width in minutes.
         timezone:  IANA timezone name used to localize the bin grid.
 
@@ -54,8 +55,10 @@ def compute_bin_quality(
     bin_td = timedelta(minutes=bin_len)
     tz = resolve_pytz(timezone)
 
-    grid_start = tz.localize(start)
-    grid_end = tz.localize(end)
+    # The engines hand these straight through from their public arguments, so
+    # a caller passing aware bounds must not hit pytz's naive-only localize().
+    grid_start = localize_naive(start, timezone).astimezone(tz)
+    grid_end = localize_naive(end, timezone).astimezone(tz)
     full_grid = pd.date_range(
         start=grid_start,
         end=grid_end - bin_td,
