@@ -1,6 +1,6 @@
 # pyATSPM
 
-A Python package for Automated Traffic Signal Performance Measures (ATSPM) analysis: ingest raw signal controller event logs (`.datZ`), store them in a normalized per-intersection SQLite database, and compute signal performance measures (Arrival on Green, counts, phase splits, detector discrepancies) with Plotly visualizations.
+A Python package for Automated Traffic Signal Performance Measures (ATSPM) analysis: ingest raw signal controller event logs (`.datZ`), store them in a normalized per-intersection SQLite database, and compute signal performance measures (Arrival on Green, counts, phase splits, detector discrepancies, saturation flow rate, critical movements) with Plotly visualizations.
 
 Built on two principles:
 - **One SQLite database per intersection** — normalized, indexed, WAL-mode.
@@ -102,3 +102,5 @@ df = get_events_with_cycles_df(
 
 config = get_config_df(db_path, datetime(2025, 1, 1))
 ```
+
+The naive `datetime`s above mean **intersection local time**, read from the database's own `metadata.timezone` — not the clock of the machine running the script. Pass `timezone=` to override, or tz-aware datetimes to specify the instant yourself. See the [Timezone contract](docs/api_reference.md#timezone-contract).

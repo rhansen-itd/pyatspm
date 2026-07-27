@@ -1,6 +1,6 @@
 # Database Schema
 
-Each intersection has its own SQLite file (e.g. `2068_data.db`) under `intersections/<folder>/`. `PRAGMA journal_mode=WAL` is always enabled. All timestamps are stored as `REAL` UTC epoch seconds.
+Each intersection has its own SQLite file (e.g. `2068_data.db`) under `intersections/<folder>/`. `PRAGMA journal_mode=WAL` is always enabled. All timestamps are stored as `REAL` UTC epoch seconds — the zone lives in exactly one place, `metadata.timezone`, and is applied when converting to and from local time (see the Timezone contract in [api_reference.md](api_reference.md#timezone-contract)).
 
 ## `events` — raw data
 
@@ -106,6 +106,8 @@ CREATE TABLE metadata (
     agency_id         TEXT
 )
 ```
+
+`timezone` is the intersection's IANA zone and the only zone the package trusts. Its column default is interpolated from `utils.timezone.DEFAULT_TIMEZONE`, so the schema default and the Python-side fallback cannot drift apart. A database whose row is missing or whose `timezone` is blank resolves to that same default everywhere — `data.manager.db_timezone()` is the single entry point.
 
 ## `ingestion_log` — state tracking
 
