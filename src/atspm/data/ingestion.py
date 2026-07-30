@@ -37,12 +37,21 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+import numpy as np
 import pandas as pd
 import pytz
 
 from ..analysis import decoders
 from .manager import DatabaseManager
 from ..utils.timezone import DEFAULT_TIMEZONE
+
+
+# A backward-clock-step marker sits this far below the first post-step event.
+# Binary offsets are whole deciseconds off a per-file base, so half a
+# decisecond never lands on a real event and always sorts immediately ahead of
+# the one it fences — unlike the ``prev + 0.1`` used for comms gaps, which can
+# collide with a real timestamp inside a replayed band.
+_CLOCK_STEP_MARKER_LEAD = 0.05
 
 
 class IngestionEngine:
@@ -52,6 +61,7 @@ class IngestionEngine:
         - File scanning (append-only or gap-aware, depending on ``fill_gaps``).
         - Filename-timestamp parsing (local → UTC).
         - Gap detection and gap-marker insertion into ``events``.
+        - Fencing backward controller-clock steps with hard-reset markers.
         - Span-based state tracking in ``ingestion_log``.
         - Span merging after gap-fill commits.
         - Driving the ``CycleProcessor`` via the post-commit hook.
@@ -85,6 +95,7 @@ class IngestionEngine:
         self._total_events: int = 0
         self._gap_markers: int = 0
         self._header_mismatches: int = 0
+        self._clock_steps: int = 0
 
     # ------------------------------------------------------------------
     # Initialisation helpers
@@ -151,8 +162,13 @@ class IngestionEngine:
 
         Returns:
             Dict with keys ``files_processed``, ``total_events``,
-            ``gap_markers``, ``header_mismatches``, ``span_count``,
-            ``date_range``.
+            ``gap_markers``, ``header_mismatches``, ``clock_steps``,
+            ``span_count``, ``date_range``.
+
+            ``gap_markers`` is the database-wide count of every
+            ``event_code = -1`` row, backward-clock-step markers included.
+            ``clock_steps`` counts only the steps fenced in *this* run, so
+            they stay visible instead of blending into comms-gap noise.
         """
         with DatabaseManager(self.db_path) as m:
             cur = m.conn.cursor()
@@ -168,6 +184,7 @@ class IngestionEngine:
             "total_events": self._total_events,
             "gap_markers": gap_count,
             "header_mismatches": self._header_mismatches,
+            "clock_steps": self._clock_steps,
             "span_count": span_count or 0,
             "date_range": {
                 "start": (
@@ -489,6 +506,12 @@ class IngestionEngine:
         row_count     = len(df)
         last_event_ts = df["timestamp"].max() if not df.empty else utc_start
 
+        df = self._fence_clock_steps(
+            df, file_path.name,
+            active_span[1] if active_span is not None else None,
+            prev_last_event_ts,
+        )
+
         gap_opened = False
         if active_span is not None:
             prev_end  = active_span[1]
@@ -509,6 +532,79 @@ class IngestionEngine:
             utc_start, utc_start, row_count, last_event_ts
         )
         return df, row_count, gap_opened, new_span
+
+    def _fence_clock_steps(
+        self,
+        df: pd.DataFrame,
+        filename: str,
+        prev_boundary: Optional[float],
+        prev_last_event_ts: Optional[float],
+    ) -> pd.DataFrame:
+        """Insert hard-reset markers wherever the controller clock stepped back.
+
+        A backward clock set makes the recorded time *decrease* part-way
+        through a file: the offsets replay a band, so events from two different
+        real moments carry the same labels and, once sorted by timestamp, land
+        in the wrong sequence.  Decoder output preserves file order, so the
+        step is plainly visible here as a negative difference between
+        consecutive rows — and is unrecoverable after any sort.
+
+        Each step gets an ``event_code = -1`` marker just below the first
+        post-step timestamp so every duration and sequential-pairing consumer
+        stops at the break (CLAUDE.md §5) instead of measuring across it.  This
+        fences the replayed band; it does not repair it.  Restoring the true
+        order needs the marker-pulse work tracked in ``docs/ROADMAP.md``.
+
+        Args:
+            df:                 Decoded events in file order, not yet sorted.
+            filename:           ``.datZ`` filename, for the warning message.
+            prev_boundary:      Filename clock boundary of the preceding file,
+                                or ``None``.
+            prev_last_event_ts: UTC epoch of the last event in the preceding
+                                file, or ``None``.
+
+        Returns:
+            ``df`` with one marker per detected step, or unchanged if none.
+        """
+        if df.empty:
+            return df
+
+        timestamps = df["timestamp"].to_numpy()
+        # (first post-step timestamp, size of the backward step in seconds)
+        steps: List[Tuple[float, float]] = []
+
+        # A break that straddles a file edge: the preceding file closed after
+        # this one opens.  Only meaningful when that file genuinely precedes
+        # this one on the clock — in Gap Fill the last file *processed* can sit
+        # later, and comparing against it would read as a step.
+        if (
+            prev_boundary is not None
+            and prev_last_event_ts is not None
+            and prev_boundary < timestamps[0]
+            and timestamps[0] < prev_last_event_ts
+        ):
+            steps.append((timestamps[0], prev_last_event_ts - timestamps[0]))
+
+        drops = np.flatnonzero(np.diff(timestamps) < 0) + 1
+        steps.extend(
+            (timestamps[i], timestamps[i - 1] - timestamps[i]) for i in drops
+        )
+
+        if not steps:
+            return df
+
+        self._clock_steps += len(steps)
+        largest = max(size for _, size in steps)
+        print(
+            f"Warning: {filename} contains {len(steps)} backward clock "
+            f"step(s), largest {largest:.1f} s; timestamps replay a band and "
+            f"are out of order — inserting hard-reset marker(s)"
+        )
+        for post_step_ts, _ in steps:
+            df = decoders.insert_gap_marker(
+                df, post_step_ts - _CLOCK_STEP_MARKER_LEAD
+            )
+        return df
 
     def _check_header_alignment(
         self,
@@ -773,6 +869,8 @@ def run_ingestion(
     print(f"  Gap markers     : {stats['gap_markers']}")
     if stats["header_mismatches"]:
         print(f"  Header mismatch : {stats['header_mismatches']}")
+    if stats["clock_steps"]:
+        print(f"  Clock steps back: {stats['clock_steps']}")
     print(f"  Log spans       : {stats['span_count']}")
     if stats["date_range"]["start"]:
         print(
