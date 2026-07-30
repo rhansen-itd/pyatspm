@@ -84,6 +84,7 @@ class IngestionEngine:
         self._files_processed: int = 0
         self._total_events: int = 0
         self._gap_markers: int = 0
+        self._header_mismatches: int = 0
 
     # ------------------------------------------------------------------
     # Initialisation helpers
@@ -150,7 +151,8 @@ class IngestionEngine:
 
         Returns:
             Dict with keys ``files_processed``, ``total_events``,
-            ``gap_markers``, ``span_count``, ``date_range``.
+            ``gap_markers``, ``header_mismatches``, ``span_count``,
+            ``date_range``.
         """
         with DatabaseManager(self.db_path) as m:
             cur = m.conn.cursor()
@@ -165,6 +167,7 @@ class IngestionEngine:
             "files_processed": self._files_processed,
             "total_events": self._total_events,
             "gap_markers": gap_count,
+            "header_mismatches": self._header_mismatches,
             "span_count": span_count or 0,
             "date_range": {
                 "start": (
@@ -481,6 +484,8 @@ class IngestionEngine:
             print(f"Error decoding {file_path.name}: {exc}")
             return None
 
+        self._check_header_alignment(file_path.name, raw_bytes, utc_start)
+
         row_count     = len(df)
         last_event_ts = df["timestamp"].max() if not df.empty else utc_start
 
@@ -504,6 +509,53 @@ class IngestionEngine:
             utc_start, utc_start, row_count, last_event_ts
         )
         return df, row_count, gap_opened, new_span
+
+    def _check_header_alignment(
+        self,
+        filename: str,
+        raw_bytes: bytes,
+        utc_start: float,
+    ) -> None:
+        """Warn when a file's header instant disagrees with its filename.
+
+        The decoder shifts event timestamps by the header's sub-minute offset
+        but cannot see the filename, so it cannot tell whether the header's
+        date and HH:MM actually match.  A disagreement means the file does not
+        begin on the clock boundary its name claims, and the shifted base is
+        therefore off by whole minutes — worth surfacing rather than silently
+        absorbing.  Also doubles as an off-grid-file detector.
+
+        Args:
+            filename:  ``.datZ`` filename, for the warning message.
+            raw_bytes: Raw compressed file bytes.
+            utc_start: UTC epoch parsed from the filename.
+        """
+        try:
+            header = decoders.parse_datz_header(raw_bytes)
+        except decoders.DatZDecodingError:
+            return
+        if header is None:
+            return
+
+        local_dt = datetime.fromtimestamp(utc_start, self.tz)
+        header_key = (
+            header["year"], header["month"], header["day"],
+            header["hour"], header["minute"],
+        )
+        filename_key = (
+            local_dt.year, local_dt.month, local_dt.day,
+            local_dt.hour, local_dt.minute,
+        )
+        if header_key != filename_key:
+            self._header_mismatches += 1
+            print(
+                f"Warning: {filename} header start "
+                f"{header['year']:04d}-{header['month']:02d}-{header['day']:02d} "
+                f"{header['hour']:02d}:{header['minute']:02d} does not match "
+                f"the filename boundary "
+                f"{local_dt:%Y-%m-%d %H:%M}; event timestamps are based on the "
+                f"filename and may be off by whole minutes"
+            )
 
     # ------------------------------------------------------------------
     # Duration inference
@@ -719,6 +771,8 @@ def run_ingestion(
     print(f"  Files processed : {stats['files_processed']}")
     print(f"  Total events    : {stats['total_events']:,}")
     print(f"  Gap markers     : {stats['gap_markers']}")
+    if stats["header_mismatches"]:
+        print(f"  Header mismatch : {stats['header_mismatches']}")
     print(f"  Log spans       : {stats['span_count']}")
     if stats["date_range"]["start"]:
         print(

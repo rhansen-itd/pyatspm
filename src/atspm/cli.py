@@ -34,7 +34,7 @@ import sys
 import traceback
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 # The only eager package import: a bare string constant used by a dozen
 # handlers and by the `setup` parser's default. Everything heavier (engines,
@@ -402,10 +402,51 @@ def handle_retrieve(args: argparse.Namespace) -> None:
 # process
 # ---------------------------------------------------------------------------
 
+def _confirm_rebuild(targets: List[str], assume_yes: bool) -> None:
+    """Gate a destructive rebuild behind an explicit confirmation.
+
+    Asked once for the whole run rather than per intersection, so ``--all``
+    does not turn into a prompt storm.
+
+    Args:
+        targets:    Intersection folder names about to be rebuilt.
+        assume_yes: Skip the prompt (``--yes``).
+
+    Raises:
+        SystemExit: If the user declines, or if stdin is not interactive and
+            ``--yes`` was not given.
+    """
+    if assume_yes:
+        return
+
+    print(
+        f"\n⚠️   --rebuild deletes all events, cycles and ingestion_log rows "
+        f"for {len(targets)} intersection(s):"
+    )
+    for name in targets:
+        print(f"      • {name}")
+    print(
+        "    They are re-ingested from raw_data/, so nothing is lost that "
+        "raw_data/ can still supply.\n"
+        "    Config and metadata are left untouched."
+    )
+    sys.stdout.flush()  # keep the warning ahead of anything _die writes to stderr
+
+    if not sys.stdin.isatty():
+        _die(
+            "Refusing to rebuild without confirmation on a non-interactive "
+            "stdin. Re-run with --yes to proceed."
+        )
+
+    if input("    Proceed? [y/N] ").strip().lower() not in ("y", "yes"):
+        _die("Rebuild cancelled.")
+
+
 def _process_single_intersection(target_name: str, args: argparse.Namespace) -> None:
     """Core logic to process a single intersection."""
     # Resolve fill_gaps: --fill-gaps activates Path B.
     fill_gaps: bool = args.fill_gaps
+    rebuild:   bool = getattr(args, "rebuild", False)
 
     # Lazy imports keep module load fast and decouple from missing deps.
     from atspm.data import init_db, import_config, run_ingestion
@@ -424,7 +465,12 @@ def _process_single_intersection(target_name: str, args: argparse.Namespace) -> 
 
     int_name = meta.get("intersection_name", target_name)
     int_id   = meta.get("intersection_id",   target_name.split("_")[0])
-    mode_tag = "Gap Fill" if fill_gaps else "Fast Append"
+    if rebuild:
+        mode_tag = "Rebuild"
+    elif fill_gaps:
+        mode_tag = "Gap Fill"
+    else:
+        mode_tag = "Fast Append"
 
     print(
         f"\n🚦  Processing {int_name} "
@@ -439,6 +485,20 @@ def _process_single_intersection(target_name: str, args: argparse.Namespace) -> 
         init_db(db_path)
     except Exception as exc:
         _die(f"init_db failed: {exc}")
+
+    # 1b. Clear ingested + derived rows (Path C) ---------------------------------
+    if rebuild:
+        print("  🧹  Clearing events, cycles and ingestion_log…")
+        try:
+            with DatabaseManager(db_path) as mgr:
+                deleted = mgr.clear_ingested_data()
+        except Exception as exc:
+            _die(f"Rebuild clear failed: {exc}")
+        print(
+            f"      Deleted {deleted['events']:,} events, "
+            f"{deleted['cycles']:,} cycles, "
+            f"{deleted['ingestion_log']} log spans."
+        )
 
     # 2. Sync metadata -----------------------------------------------------------
     print("  📋  Syncing metadata to DB…")
@@ -511,11 +571,16 @@ def handle_process(args: argparse.Namespace) -> None:
     uncovered holes; gap markers made obsolete by new data are scrubbed;
     cycles are surgically repaired between gap-bounded anchors.
 
+    Path C (Rebuild, ``--rebuild``): ``events``, ``cycles`` and
+    ``ingestion_log`` are deleted first, then every ``.datZ`` file is
+    re-ingested from scratch.  Destructive, so it prompts for confirmation
+    unless ``--yes`` is given.
+
     Args:
         args: Parsed CLI arguments.
     """
     intersections_dir = _get_intersections_dir()
-    
+
     if getattr(args, "all", False):
         targets = [p.name for p in intersections_dir.iterdir() if p.is_dir()]
         if not targets:
@@ -523,6 +588,9 @@ def handle_process(args: argparse.Namespace) -> None:
         print(f"\n🌍 Batch processing {len(targets)} intersections...")
     else:
         targets = [_resolve_target_name(args.target, args.targetid)]
+
+    if getattr(args, "rebuild", False):
+        _confirm_rebuild(targets, assume_yes=getattr(args, "yes", False))
 
     for target_name in targets:
         try:
@@ -1863,7 +1931,12 @@ def _add_process_parser(subs: argparse._SubParsersAction) -> None:
             "  Cycles are recalculated forward from the last known anchor.\n\n"
             "PATH B – Gap Fill (--fill-gaps):\n"
             "  All files are scanned; historical gaps are filled.\n"
-            "  Obsolete gap markers are scrubbed; cycles are surgically repaired."
+            "  Obsolete gap markers are scrubbed; cycles are surgically repaired.\n\n"
+            "PATH C – Rebuild (--rebuild):\n"
+            "  events, cycles and ingestion_log are deleted, then every .datZ\n"
+            "  file is re-ingested from scratch. Config and metadata survive.\n"
+            "  Use when stored timestamps need to be re-derived on the current\n"
+            "  decoder basis. Destructive — prompts unless --yes is given."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -1871,7 +1944,8 @@ def _add_process_parser(subs: argparse._SubParsersAction) -> None:
     group_proc.add_argument("--target", metavar="FOLDER", help="Exact intersection folder name.")
     group_proc.add_argument("--targetid", metavar="ID", help="Intersection ID (prefix of folder name).")
     group_proc.add_argument("--all", action="store_true", help="Process all intersections in the directory.")
-    p_proc.add_argument(
+    mode_proc = p_proc.add_mutually_exclusive_group()
+    mode_proc.add_argument(
         "--fill-gaps",
         action="store_true",
         default=False,
@@ -1879,6 +1953,22 @@ def _add_process_parser(subs: argparse._SubParsersAction) -> None:
             "Enable Gap Fill mode (Path B): scan for and ingest historical gaps; "
             "scrub obsolete gap markers; surgically repair affected cycles."
         ),
+    )
+    mode_proc.add_argument(
+        "--rebuild",
+        action="store_true",
+        default=False,
+        help=(
+            "Enable Rebuild mode (Path C): DELETE events, cycles and "
+            "ingestion_log, then re-ingest every .datZ file from raw_data/. "
+            "Config and metadata are preserved."
+        ),
+    )
+    p_proc.add_argument(
+        "--yes",
+        action="store_true",
+        default=False,
+        help="Skip the --rebuild confirmation prompt (for scripted runs).",
     )
     p_proc.add_argument(
         "--batch-size",

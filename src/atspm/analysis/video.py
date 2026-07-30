@@ -11,9 +11,13 @@ Given a stream of arbitrary frame timestamps (from a recorded video), answer
 frame.  This is the data layer behind ``atspm.video``'s OpenCV overlay
 rendering — it does not touch frames, shapes, or files.
 
-Phase status reuses ``_build_phase_intervals`` from ``atspm.analysis.phases``
-as-is; it already emits gap-isolated ``[green_ts, yellow_ts, clear_end_ts]``
-intervals per cycle, which is exactly what a G/Y/R lookup needs.
+Phase status reuses ``_build_phase_intervals`` from ``atspm.analysis.phases``;
+it emits gap-isolated ``[green_ts, yellow_ts, yellow_end_ts, clear_end_ts]``
+intervals per cycle.  The lookup below reads ``yellow_end_ts`` (Code 9 End
+Yellow, or Code 10 Begin Red Clearance when no Code 9 was logged), *not*
+``clear_end_ts`` — the latter runs to Code 11 (End Red Clearance) because
+``phase_splits`` reports yellow and red clearance combined, and using it here
+would render the whole red-clearance period yellow.
 
 Overlap status has no existing handler anywhere in this codebase — overlaps
 are logged under dedicated event codes (61-66), not the phase codes with an
@@ -248,9 +252,15 @@ def _status_at_timestamps(intervals_df: pd.DataFrame, query_ts: np.ndarray) -> n
 
     Args:
         intervals_df: DataFrame with columns ``[green_ts, yellow_ts,
-            clear_end_ts, seg]`` and optionally ``dark_ts``.  Either
+            clear_end_ts, seg]`` and optionally ``yellow_end_ts`` /
+            ``dark_ts``.  Either
             ``atspm.analysis.phases._build_phase_intervals``'s output
             (phase) or ``_build_overlap_intervals``'s output (overlap).
+            ``yellow_end_ts`` ends the ``'Y'`` label when present; the
+            overlap builder omits it because its ``clear_end_ts`` (Code 64
+            Begin Red Clearance) already marks end-of-yellow, whereas the
+            phase builder's ``clear_end_ts`` runs through red clearance to
+            Code 11.
         query_ts: 1-D float64 array of epoch-second frame timestamps, any
             order.
 
@@ -271,7 +281,9 @@ def _status_at_timestamps(intervals_df: pd.DataFrame, query_ts: np.ndarray) -> n
 
     green_f  = _ts_to_float(df["green_ts"])
     yellow_f = _ts_to_float(df["yellow_ts"])
-    clear_f  = _ts_to_float(df["clear_end_ts"])
+    # End of the yellow indication, not of the combined YR clearance.
+    yend_col = "yellow_end_ts" if "yellow_end_ts" in df.columns else "clear_end_ts"
+    yend_f   = _ts_to_float(df[yend_col])
     dark_f   = _nullable_ts_to_float(df["dark_ts"]) if "dark_ts" in df.columns \
         else np.full(len(df), np.nan, dtype=np.float64)
     seg_arr  = df["seg"].to_numpy()
@@ -289,7 +301,7 @@ def _status_at_timestamps(intervals_df: pd.DataFrame, query_ts: np.ndarray) -> n
     same_seg = has_next & (seg_arr[vi] == seg_arr[next_idx])
 
     is_green  = vq < yellow_f[vi]
-    is_yellow = (~is_green) & (vq < clear_f[vi])
+    is_yellow = (~is_green) & (vq < yend_f[vi])
     is_dark   = (~is_green) & (~is_yellow) & (vq >= dark_f[vi])  # False when dark_f is NaN
     is_red    = (~is_green) & (~is_yellow) & (~is_dark) & same_seg & (vq < green_f[next_idx])
 

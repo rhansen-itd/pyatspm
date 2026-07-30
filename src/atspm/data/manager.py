@@ -839,6 +839,44 @@ class DatabaseManager:
     # Maintenance
     # ------------------------------------------------------------------
 
+    def clear_ingested_data(self) -> Dict[str, int]:
+        """Delete every derived and ingested row, leaving configuration intact.
+
+        Clears ``events``, ``cycles`` and ``ingestion_log`` so the next
+        ingestion run rebuilds them from ``raw_data/`` on the current decoder
+        basis.  ``config`` and ``metadata`` are deliberately untouched — they
+        come from ``int_cfg.csv`` and ``metadata.json``, not from ``.datZ``
+        files, and re-importing them is the caller's separate concern.
+
+        Tables that do not exist yet are skipped (``cycles`` is created lazily
+        by ``CycleProcessor``), so this is safe on a freshly initialised DB.
+
+        Returns:
+            Dict mapping table name to the number of rows deleted.
+
+        Raises:
+            RuntimeError: If no active connection.
+        """
+        if not self.conn:
+            raise RuntimeError("No active connection.")
+
+        cur = self.conn.cursor()
+        deleted: Dict[str, int] = {}
+        for table in ("events", "cycles", "ingestion_log"):
+            cur.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+                (table,),
+            )
+            if cur.fetchone() is None:
+                deleted[table] = 0
+                continue
+            cur.execute(f"SELECT COUNT(*) FROM {table}")
+            deleted[table] = cur.fetchone()[0]
+            cur.execute(f"DELETE FROM {table}")
+
+        self.conn.commit()
+        return deleted
+
     def vacuum(self) -> None:
         """Run ``VACUUM`` to reclaim space after large deletions."""
         if not self.conn:

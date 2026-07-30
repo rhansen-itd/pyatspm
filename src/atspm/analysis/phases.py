@@ -177,6 +177,22 @@ def _build_phase_intervals(
     """
     Convert sequential phase state-change events into tidy intervals.
 
+    Two distinct end-of-clearance boundaries are emitted, because the two
+    consumers need different ones:
+
+    ``clear_end_ts``
+        End of the *combined* yellow + red-clearance period — Code 11 (End
+        Red Clearance) when red clearance is served, otherwise Code 9 (End
+        Yellow).  This is what ``phase_splits`` reports as ``YR``.
+    ``yellow_end_ts``
+        End of the *yellow indication alone* — Code 9, or Code 10 (Begin
+        Red Clearance) when no Code 9 was logged.  A visual G/Y/R lookup
+        needs this one; using ``clear_end_ts`` would paint the whole red
+        clearance yellow.
+
+    They are equal whenever red clearance is not served, which is the
+    common case.
+
     Args:
         ph_df: Phase-code events (Codes 1, 8, 9, 10, 11, 12) with columns
             ``[timestamp, event_code, parameter, cycle_start, _seg]``.
@@ -206,8 +222,9 @@ def _build_phase_intervals(
 
         state       = _IDLE
         green_ts    = None
-        yellow_ts   = None   
-        clear_end   = None   
+        yellow_ts   = None
+        clear_end   = None
+        yellow_end  = None
         cycle_start = None
 
         def _emit(clr_end_ts):
@@ -216,6 +233,7 @@ def _build_phase_intervals(
                 seg=int(seg),
                 green_ts=green_ts,
                 yellow_ts=yellow_ts,
+                yellow_end_ts=yellow_end,
                 clear_end_ts=clr_end_ts,
                 cycle_start=cycle_start,
             ))
@@ -229,22 +247,29 @@ def _build_phase_intervals(
                 green_ts    = ts
                 yellow_ts   = None
                 clear_end   = None
+                yellow_end  = None
                 cycle_start = cs
                 state       = _GREEN
 
             elif code == _CODE_YELLOW:
                 if state == _GREEN:
-                    yellow_ts = ts
-                    clear_end = ts   
-                    state     = _YELLOW
+                    yellow_ts  = ts
+                    clear_end  = ts
+                    yellow_end = ts
+                    state      = _YELLOW
 
             elif code == _CODE_END_YELLOW:
                 if state == _YELLOW:
-                    clear_end = ts   
-                    state     = _POST_YEL
+                    clear_end  = ts
+                    yellow_end = ts
+                    state      = _POST_YEL
 
             elif code == _CODE_BEGIN_RC:
                 if state in (_YELLOW, _POST_YEL):
+                    # Without a preceding Code 9 this is where yellow ends;
+                    # with one, Code 9 already set the boundary.
+                    if state == _YELLOW:
+                        yellow_end = ts
                     clear_end = ts
                     state = _RED_CLR
 
@@ -258,8 +283,9 @@ def _build_phase_intervals(
                 if state in (_YELLOW, _POST_YEL, _RED_CLR):
                     _emit(clear_end)
                 elif state == _GREEN and include_no_clearance:
-                    yellow_ts = ts   
-                    _emit(ts)        
+                    yellow_ts  = ts
+                    yellow_end = ts
+                    _emit(ts)
                 state    = _IDLE
                 green_ts = None
 
