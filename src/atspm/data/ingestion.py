@@ -42,6 +42,7 @@ import pytz
 
 from ..analysis import decoders
 from .manager import DatabaseManager
+from ..utils.timezone import DEFAULT_TIMEZONE
 
 
 class IngestionEngine:
@@ -102,8 +103,10 @@ class IngestionEngine:
                     return meta["timezone"]
         except Exception:
             pass
-        print("IngestionEngine: no timezone found, defaulting to US/Mountain")
-        return "US/Mountain"
+        print(
+            f"IngestionEngine: no timezone found, defaulting to {DEFAULT_TIMEZONE}"
+        )
+        return DEFAULT_TIMEZONE
 
     # ------------------------------------------------------------------
     # Public interface

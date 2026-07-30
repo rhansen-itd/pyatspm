@@ -78,7 +78,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import pandas as pd
 import pytz
 
-from .manager import DatabaseManager
+from .manager import DatabaseManager, db_timezone
 from ..analysis.cycles import (
     CycleDetectionError,
     assign_ring_phases,
@@ -146,16 +146,7 @@ class CycleProcessor:
         Returns:
             IANA timezone string.
         """
-        if timezone is not None:
-            return timezone
-        try:
-            with DatabaseManager(self.db_path) as m:
-                meta = m.get_metadata()
-                if meta and meta.get("timezone"):
-                    return meta["timezone"]
-        except Exception:
-            pass
-        return "US/Mountain"
+        return db_timezone(self.db_path, timezone)
 
     def _init_cycles_table(self) -> None:
         """Create the ``cycles`` table and its index; migrate older schemas."""

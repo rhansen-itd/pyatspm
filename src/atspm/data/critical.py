@@ -38,8 +38,9 @@ from typing import Dict, Optional, Union
 import pandas as pd
 
 from .counts import CountEngine
-from .manager import DatabaseManager
+from .manager import DatabaseManager, db_timezone
 from .reader import _query_cycles
+from ..utils.timezone import to_epoch
 from ..analysis.critical import (
     critical_movement_analysis as _critical_core,
     movement_phase_map as _movement_map_core,
@@ -147,7 +148,9 @@ class CriticalMovementEngine:
             return {} if output_dir is None else None
 
         cycles_df = _query_cycles(
-            self.db_path, start_dt.timestamp(), end_dt.timestamp()
+            self.db_path,
+            to_epoch(start_dt, self.timezone),
+            to_epoch(end_dt, self.timezone),
         )
         if cycles_df.empty:
             print("  ⚠️  Critical: no cycles found in the window — "
@@ -185,13 +188,8 @@ class CriticalMovementEngine:
     # ------------------------------------------------------------------
 
     def _read_timezone(self) -> str:
-        """Read timezone from metadata table, falling back to US/Mountain."""
-        try:
-            with DatabaseManager(self.db_path) as m:
-                meta = m.get_metadata()
-                return meta.get("timezone") or "US/Mountain"
-        except Exception:
-            return "US/Mountain"
+        """Read the intersection timezone from the database."""
+        return db_timezone(self.db_path)
 
     def _get_config(self, date: datetime) -> dict:
         """Retrieve the active configuration dict for a given date.

@@ -17,6 +17,7 @@ import pandas as pd
 import plotly.graph_objects as go
 
 from ..analysis.detectors import _reconstruct_intervals
+from ..utils.timezone import DEFAULT_TIMEZONE
 
 # ---------------------------------------------------------------------------
 # Layout constants
@@ -247,7 +248,7 @@ def plot_detector_comparison(
     if metadata is None:
         metadata = {}
 
-    tz: str = metadata.get("timezone") or "UTC"
+    tz: str = metadata.get("timezone") or DEFAULT_TIMEZONE
 
     fig = go.Figure()
 

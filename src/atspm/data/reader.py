@@ -23,6 +23,15 @@ Timezone note:
    return human-readable date lists (get_available_dates) convert to local
    dates in Python using pytz, matching the CycleProcessor approach and
    avoiding SQLite's UTC-biased DATE() built-in.
+
+   Window bounds are interpreted in the *intersection's* timezone, never the
+   host machine's.  A naive ``start``/``end`` is localized with the explicit
+   *timezone* argument when one is given, otherwise with the zone recorded in
+   the database's own ``metadata`` table (final fallback UTC).  Aware bounds
+   are used as-is.  Conversion goes through ``utils.timezone.to_epoch`` so the
+   SQL window and the quality bin grid in ``utils.quality`` agree; calling
+   ``datetime.timestamp()`` on a naive bound would resolve it through the host
+   clock and shift every row returned.
 """
 
 import sqlite3
@@ -33,7 +42,8 @@ from typing import Optional, List, Dict, Any, Tuple, Union
 import pandas as pd
 import pytz
 
-from .manager import DatabaseManager
+from .manager import DatabaseManager, db_timezone
+from ..utils.timezone import to_epoch
 
 # ---------------------------------------------------------------------------
 # Signal codes used for coordination plots
@@ -45,6 +55,34 @@ _TERMINATION_CODES: List[int] = [4, 5, 6, 21, 45, 105]
 # Cycle look-back buffer: fetch cycles up to this many seconds before the
 # requested window start so that the cycle active at window-open is included.
 _CYCLE_BUFFER_SECONDS: int = 3600
+
+
+def _bounds_to_epoch(
+    db_path: Path,
+    start: datetime,
+    end: datetime,
+    timezone: Optional[str] = None,
+) -> Tuple[float, float]:
+    """Convert a window's bounds to UTC epochs in the intersection's zone.
+
+    Args:
+        db_path: Path to the intersection database, consulted for its
+            ``metadata`` timezone only when a naive bound needs localizing
+            and no explicit *timezone* was supplied.
+        start: Window start (inclusive).
+        end: Window end (exclusive).
+        timezone: Optional pytz timezone string used to interpret naive
+            bounds.  Aware bounds keep their own offset either way.
+
+    Returns:
+        ``(start_epoch, end_epoch)`` as UTC epoch floats.
+    """
+    if start.tzinfo is not None and end.tzinfo is not None:
+        # Both carry their own offset; no metadata read needed.
+        return start.timestamp(), end.timestamp()
+
+    tz_str = timezone or _resolve_timezone(db_path)
+    return to_epoch(start, tz_str), to_epoch(end, tz_str)
 
 
 # ---------------------------------------------------------------------------
@@ -67,22 +105,23 @@ def get_events_with_cycles_df(
 
     Args:
         db_path: Path to SQLite database.
-        start: Window start (inclusive).  Naive datetimes are treated as
-            UTC; use tz-aware datetimes for non-UTC intersections.
-        end: Window end (exclusive).
+        start: Window start (inclusive).  Naive datetimes are read as
+            intersection-local wall clock — see the module Timezone note.
+        end: Window end (exclusive), same interpretation as *start*.
         event_codes: Optional list of ATSPM event codes to filter.
             If ``None``, all codes are returned.
         timezone: Optional pytz timezone string (e.g. ``'US/Mountain'``).
-            When provided, timestamp and cycle_start are converted from UTC
-            epoch floats to tz-aware Timestamps before returning.
+            Interprets naive *start*/*end*, and converts the returned
+            timestamp and cycle_start from UTC epoch floats to tz-aware
+            Timestamps.  Naive bounds fall back to the database's own
+            ``metadata`` timezone when this is ``None``.
 
     Returns:
         DataFrame with columns [timestamp, event_code, parameter, cycle_start, coord_plan].
         Timestamps are UTC epoch floats unless *timezone* is supplied.
         Returns an empty DataFrame with the correct schema if no events found.
     """
-    start_epoch = start.timestamp()
-    end_epoch = end.timestamp()
+    start_epoch, end_epoch = _bounds_to_epoch(db_path, start, end, timezone)
 
     events_df = _query_events(db_path, start_epoch, end_epoch, event_codes)
 
@@ -174,11 +213,14 @@ def get_coordination_data(
 
     Args:
         db_path: Path to SQLite database.
-        start: Window start (inclusive).
-        end: Window end (exclusive).
-        timezone: Optional pytz timezone string.  When provided, all
-            ``cycle_start`` and ``timestamp`` columns are converted from UTC
-            epoch floats to tz-aware Timestamps.
+        start: Window start (inclusive).  Naive datetimes are read as
+            intersection-local wall clock — see the module Timezone note.
+        end: Window end (exclusive), same interpretation as *start*.
+        timezone: Optional pytz timezone string.  Interprets naive
+            *start*/*end*, and converts all ``cycle_start`` and ``timestamp``
+            columns from UTC epoch floats to tz-aware Timestamps.  Naive
+            bounds fall back to the database's own ``metadata`` timezone
+            when this is ``None``.
 
     Returns:
         Tuple of three DataFrames:
@@ -209,8 +251,7 @@ def get_coordination_data(
             t_cs         : float  (seconds from cycle_start to timestamp)
             Duration     : float  (actuation duration; NaN for last per det)
     """
-    start_epoch = start.timestamp()
-    end_epoch = end.timestamp()
+    start_epoch, end_epoch = _bounds_to_epoch(db_path, start, end, timezone)
 
     # --- df_cycles ---
     df_cycles = _query_cycles(
@@ -301,10 +342,24 @@ def get_det_config(db_path: Path, date: datetime) -> Dict[str, str]:
     return result
 
 
-def get_date_range(db_path: Path) -> Optional[Dict[str, datetime]]:
+def get_date_range(
+    db_path: Path,
+    timezone: Optional[str] = None,
+) -> Optional[Dict[str, datetime]]:
     """
-    Get the min/max timestamp range of ingested events.
+    Get the min/max timestamp range of ingested events, in local time.
+
+    Args:
+        db_path: Path to SQLite database.
+        timezone: Optional pytz timezone string.  Defaults to the database's
+            own ``metadata`` timezone.
+
+    Returns:
+        ``{'start': ..., 'end': ...}`` as tz-aware local datetimes, or
+        ``None`` when nothing has been ingested.
     """
+    tz = pytz.timezone(timezone or _resolve_timezone(db_path))
+
     with DatabaseManager(db_path) as manager:
         result = manager.get_event_date_range()
 
@@ -313,8 +368,8 @@ def get_date_range(db_path: Path) -> Optional[Dict[str, datetime]]:
 
     min_ts, max_ts = result
     return {
-        'start': datetime.fromtimestamp(min_ts),
-        'end':   datetime.fromtimestamp(max_ts),
+        'start': datetime.fromtimestamp(min_ts, tz),
+        'end':   datetime.fromtimestamp(max_ts, tz),
     }
 
 
@@ -354,12 +409,23 @@ def check_data_quality(
     db_path: Path,
     start: datetime,
     end: datetime,
+    timezone: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Check data quality metrics for a date range.
+
+    Args:
+        db_path: Path to SQLite database.
+        start: Window start (inclusive).  Naive datetimes are read as
+            intersection-local wall clock — see the module Timezone note.
+        end: Window end (exclusive), same interpretation as *start*.
+        timezone: Optional pytz timezone string used to interpret naive
+            bounds.  Falls back to the database's own ``metadata`` timezone.
+
+    Returns:
+        Dict of event/gap/cycle counts and a completeness percentage.
     """
-    start_epoch = start.timestamp()
-    end_epoch = end.timestamp()
+    start_epoch, end_epoch = _bounds_to_epoch(db_path, start, end, timezone)
 
     with DatabaseManager(db_path) as manager:
         cursor = manager.conn.cursor()
@@ -637,14 +703,7 @@ def _convert_coordination_tz(
 
 def _resolve_timezone(db_path: Path) -> str:
     """Read the intersection timezone from the metadata table."""
-    try:
-        with DatabaseManager(db_path) as manager:
-            meta = manager.get_metadata()
-            if meta and meta.get('timezone'):
-                return meta['timezone']
-    except Exception:
-        pass
-    return 'UTC'
+    return db_timezone(db_path)
 
 
 def _local_day_to_epoch_range(

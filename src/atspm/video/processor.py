@@ -34,7 +34,8 @@ from ..analysis.video import (
     overlap_status_at_timestamps,
     phase_status_at_timestamps,
 )
-from ..data.reader import get_events_with_cycles_df
+from ..data.reader import _resolve_timezone, get_events_with_cycles_df
+from ..utils.timezone import localize_naive
 from ..data.video import ShapeConfig, resolve_stopbar_target
 from .overlay import draw_shape_overlay
 
@@ -74,7 +75,9 @@ def render_overlay(
     passed to ``get_events_with_cycles_df``) -- ``analysis.detectors
     ._reconstruct_intervals``, reused here for detector status, only
     accepts epoch floats, not tz-aware ``Timestamp``s. ``start_dt`` may
-    still be tz-aware; only its UTC instant matters.
+    still be tz-aware; only its UTC instant matters. A naive ``start_dt``
+    is localized to the intersection's own zone up front, so the fetch
+    window and the per-frame epochs derived from it cannot drift apart.
 
     Args:
         db_path: Path to the intersection's SQLite database.
@@ -103,6 +106,8 @@ def render_overlay(
     db_path = Path(db_path)
     video_path = Path(video_path)
     output_path = Path(output_path)
+
+    start_dt = localize_naive(start_dt, _resolve_timezone(db_path))
 
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
@@ -144,6 +149,8 @@ def render_overlay(
         raise ValueError(f"Cannot create output video: {output_path}")
 
     start_epoch = start_dt.timestamp()
+    # Burn the label in the zone the caller framed start_dt in, not the host's.
+    label_tz = start_dt.tzinfo
     frame_idx = 0
 
     try:
@@ -164,7 +171,9 @@ def render_overlay(
 
             for offset, frame in enumerate(frames):
                 _apply_shapes(frame, shape_config, status_lookup, offset)
-                ts_label = datetime.fromtimestamp(chunk_ts[offset]).strftime("%Y-%m-%d %H:%M:%S.%f")[:-5]
+                ts_label = datetime.fromtimestamp(
+                    chunk_ts[offset], label_tz
+                ).strftime("%Y-%m-%d %H:%M:%S.%f")[:-5]
                 cv2.putText(frame, ts_label, (10, height - 10),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
                 out.write(frame)

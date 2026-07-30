@@ -65,6 +65,7 @@ Loaded with `pd.read_csv(csv_path, index_col=[0, 1])`. Each date column becomes 
 
 - **`Det_P<N>_Arrival`** — comma-separated advance-detector IDs for phase `N` (e.g. `"33,34"`). Read by `AogEngine`/`arrival_on_green` to find which detectors count as "arrivals" for that phase.
 - **`Det_P<N>_Pairs`** — JSON list of `[det_a, det_b]` pairs for phase `N` (e.g. `"[[33,40]]"`), matched by the regex `^Det_P(\d+)_Pairs$` and parsed into `[{"phase": N, "det_a": ..., "det_b": ...}, ...]`. Read by `DetectorEngine`/`analyze_discrepancies` to find co-located detector pairs to compare.
+- **`Det_P<N>_Stopbar`** — comma-separated stop-bar detector IDs for phase `N` (e.g. `"1,2"`). Read by `FlowRateEngine`/`flow_rate` to measure departures within the split window, and by `CriticalMovementEngine` to map `TM_*` movements onto phases by detector overlap. A movement whose detectors overlap no phase's stop-bar set, or more than one, is reported as unmapped and excluded from the demand total rather than guessed at.
 
 ### `TM_Exclusions`
 
