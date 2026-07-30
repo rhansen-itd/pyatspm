@@ -7,7 +7,13 @@ no DB, no video.
 
 import pytest
 
-from atspm.data.video import OVERLAP_LETTER_MAP, ShapeConfig, resolve_stopbar_target
+from atspm.data.video import (
+    MAX_PHASE_NUMBER,
+    MIN_PHASE_NUMBER,
+    OVERLAP_LETTER_MAP,
+    ShapeConfig,
+    resolve_stopbar_target,
+)
 
 _HEADER = "video_width,video_height\n1920,1080\ntype,points,color,input,phase,name\n"
 
@@ -45,10 +51,18 @@ class TestResolveStopbarTarget:
         with pytest.raises(ValueError, match="Unrecognised stopbar phase field"):
             resolve_stopbar_target(field)
 
-    def test_phase_number_is_not_range_checked(self):
-        # Documented looseness: any integer is accepted as a phase number;
-        # nothing validates it against the controller's real phase range.
-        assert resolve_stopbar_target("99") == ("phase", 99)
+    def test_phase_range_matches_overlap_range(self):
+        # Both are 1-16 per the Hi-Res Enumerations spec; keep them in step.
+        assert (MIN_PHASE_NUMBER, MAX_PHASE_NUMBER) == (1, len(OVERLAP_LETTER_MAP))
+
+    @pytest.mark.parametrize("field", [MIN_PHASE_NUMBER, MAX_PHASE_NUMBER, "16", " 1 "])
+    def test_boundary_phase_numbers_accepted(self, field):
+        assert resolve_stopbar_target(field) == ("phase", int(str(field).strip()))
+
+    @pytest.mark.parametrize("field", ["99", 17, 0, "0", -3, "-1"])
+    def test_out_of_range_phase_numbers_raise(self, field):
+        with pytest.raises(ValueError, match="out of range"):
+            resolve_stopbar_target(field)
 
 
 class TestShapeConfigRoundTrip:

@@ -64,7 +64,13 @@ from .critical import (
     get_critical_movements,
 )
 
-from .video import ShapeConfig, resolve_stopbar_target, OVERLAP_LETTER_MAP
+from .video import (
+    ShapeConfig,
+    resolve_stopbar_target,
+    OVERLAP_LETTER_MAP,
+    MIN_PHASE_NUMBER,
+    MAX_PHASE_NUMBER,
+)
 
 __all__ = [
     # Manager
@@ -115,4 +121,6 @@ __all__ = [
     'ShapeConfig',
     'resolve_stopbar_target',
     'OVERLAP_LETTER_MAP',
+    'MIN_PHASE_NUMBER',
+    'MAX_PHASE_NUMBER',
 ]
