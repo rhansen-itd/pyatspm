@@ -25,6 +25,7 @@ from atspm.analysis.decoders import (
     insert_gap_marker,
     parse_datz_batch,
     parse_datz_bytes,
+    parse_datz_header,
     validate_datz_file,
 )
 
@@ -40,6 +41,24 @@ def _pack_row(event_code: int, parameter: int, offset_deciseconds: int) -> bytes
 def _make_datz(payload: bytes, header: bytes = b"Some preamble\nPhases in use: 2,4,6,8\n") -> bytes:
     """Build a compressed DatZ buffer around a binary payload."""
     return zlib.compress(header + payload)
+
+
+def _make_datz_with_header(payload: bytes, clock: str = "1/1/2021,00:00:00.5") -> bytes:
+    """Build a compressed DatZ buffer carrying a real controller preamble.
+
+    Args:
+        payload: Binary event rows.
+        clock:   ``<M/D/YYYY>,<HH:MM:SS.s>`` written into the
+                 ``Controller Data Log Beginning`` line.
+    """
+    preamble = (
+        b"1-1-2021 00:00:00.5,Version #:,3\n"
+        b"1-1-2021 00:00:00.5,Controller Data Log Beginning:,"
+        + clock.encode()
+        + b"\n"
+        b"1-1-2021 00:00:00.5,Phases in use:,1,2,3,4,5,6,7,8\n"
+    )
+    return zlib.compress(preamble + payload)
 
 
 # ---------------------------------------------------------------------------
@@ -253,3 +272,90 @@ class TestParseDatzBatch:
         bad = (b"corrupt", BASE_TS + 900.0)
         with pytest.raises(DatZDecodingError):
             parse_datz_batch([good, bad])
+
+    def test_header_offset_applies_per_file_within_a_batch(self):
+        first = (_make_datz_with_header(_pack_row(1, 2, 0), "1/1/2021,00:00:00.9"), BASE_TS)
+        second = (_make_datz_with_header(_pack_row(1, 4, 0), "1/1/2021,00:15:00.2"),
+                  BASE_TS + 900.0)
+        df = parse_datz_batch([first, second])
+        assert list(df['timestamp']) == [BASE_TS + 0.9, BASE_TS + 900.2]
+
+
+# ---------------------------------------------------------------------------
+# Header sub-minute offset (Controller Data Log Beginning)
+# ---------------------------------------------------------------------------
+
+class TestHeaderOffset:
+    """Binary offsets are measured from the header instant, not the filename
+    boundary, so the header's sub-minute delta shifts the event base."""
+
+    def test_header_offset_shifts_every_event(self):
+        payload = _pack_row(1, 2, 0) + _pack_row(8, 2, 150)
+        df = parse_datz_bytes(_make_datz_with_header(payload, "1/1/2021,00:00:00.5"), BASE_TS)
+        assert list(df['timestamp']) == [BASE_TS + 0.5, BASE_TS + 15.5]
+
+    def test_full_second_offset_is_applied(self):
+        df = parse_datz_bytes(
+            _make_datz_with_header(_pack_row(1, 2, 0), "1/1/2021,00:00:01.0"), BASE_TS
+        )
+        assert df.loc[0, 'timestamp'] == BASE_TS + 1.0
+
+    def test_zero_offset_leaves_base_unchanged(self):
+        df = parse_datz_bytes(
+            _make_datz_with_header(_pack_row(1, 2, 0), "1/1/2021,00:00:00.0"), BASE_TS
+        )
+        assert df.loc[0, 'timestamp'] == BASE_TS
+
+    def test_within_file_durations_are_unaffected_by_the_shift(self):
+        payload = _pack_row(1, 2, 100) + _pack_row(8, 2, 400)
+        shifted = parse_datz_bytes(
+            _make_datz_with_header(payload, "1/1/2021,00:00:00.7"), BASE_TS
+        )
+        unshifted = parse_datz_bytes(_make_datz(payload), BASE_TS)
+        assert shifted['timestamp'].diff().iloc[1] == unshifted['timestamp'].diff().iloc[1]
+
+    def test_missing_header_falls_back_to_supplied_base(self):
+        df = parse_datz_bytes(_make_datz(_pack_row(1, 2, 0)), BASE_TS)
+        assert df.loc[0, 'timestamp'] == BASE_TS
+
+    def test_only_the_seconds_delta_is_used_not_the_absolute_header_time(self):
+        # The header's HH:MM is deliberately ignored — the caller's boundary
+        # is authoritative, so a mismatched hour must not move the base.
+        df = parse_datz_bytes(
+            _make_datz_with_header(_pack_row(1, 2, 0), "6/30/2026,17:45:00.3"), BASE_TS
+        )
+        assert df.loc[0, 'timestamp'] == BASE_TS + 0.3
+
+    def test_out_of_range_seconds_falls_back_to_supplied_base(self):
+        df = parse_datz_bytes(
+            _make_datz_with_header(_pack_row(1, 2, 0), "1/1/2021,00:00:99.9"), BASE_TS
+        )
+        assert df.loc[0, 'timestamp'] == BASE_TS
+
+
+class TestParseDatzHeader:
+
+    def test_returns_all_fields_from_a_real_preamble(self):
+        header = parse_datz_header(
+            _make_datz_with_header(_pack_row(1, 2, 0), "7/29/2026,11:30:00.1")
+        )
+        assert header == {
+            'year': 2026, 'month': 7, 'day': 29,
+            'hour': 11, 'minute': 30, 'second_offset': 0.1,
+        }
+
+    def test_returns_none_when_header_line_absent(self):
+        assert parse_datz_header(_make_datz(_pack_row(1, 2, 0))) is None
+
+    def test_returns_none_for_impossible_hour(self):
+        assert parse_datz_header(
+            _make_datz_with_header(b"", "1/1/2021,42:00:00.1")
+        ) is None
+
+    def test_decompression_failure_raises_decoding_error(self):
+        with pytest.raises(DatZDecodingError, match="decompress"):
+            parse_datz_header(b"\xde\xad\xbe\xef" * 16)
+
+    def test_does_not_require_a_binary_payload(self):
+        header = parse_datz_header(_make_datz_with_header(b"", "1/1/2021,00:00:00.4"))
+        assert header['second_offset'] == 0.4

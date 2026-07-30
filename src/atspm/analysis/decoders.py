@@ -7,10 +7,21 @@ It follows the "Functional Core" pattern - pure transformations with no I/O.
 Package Location: src/atspm/analysis/decoders.py
 """
 
+import re
 import zlib
 import struct
 import pandas as pd
-from typing import List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
+
+
+# ``Controller Data Log Beginning:,<M/D/YYYY>,<HH:MM:SS.s>``
+# The seconds field is the sub-minute delta between the filename's clock
+# boundary and the instant the controller actually started logging.
+_HEADER_PATTERN = re.compile(
+    rb"Controller Data Log Beginning:,"
+    rb"(\d{1,2})/(\d{1,2})/(\d{4}),"
+    rb"(\d{1,2}):(\d{2}):(\d{1,2}(?:\.\d+)?)"
+)
 
 
 class DatZDecodingError(Exception):
@@ -25,17 +36,98 @@ class DatZDecodingError(Exception):
     pass
 
 
+def _extract_header_fields(content: bytes) -> Optional[Dict[str, Any]]:
+    """
+    Extract the ``Controller Data Log Beginning`` fields from decompressed bytes.
+
+    Args:
+        content: Decompressed .datZ content
+
+    Returns:
+        Dict with keys ``year``, ``month``, ``day``, ``hour``, ``minute``
+        (ints) and ``second_offset`` (float, seconds past the HH:MM boundary),
+        or None when the header line is absent or out of range.
+    """
+    match = _HEADER_PATTERN.search(content)
+    if match is None:
+        return None
+
+    month, day, year, hour, minute, second = match.groups()
+    second_offset = float(second)
+
+    fields = {
+        'year': int(year),
+        'month': int(month),
+        'day': int(day),
+        'hour': int(hour),
+        'minute': int(minute),
+        'second_offset': second_offset,
+    }
+
+    # Reject impossible values rather than shifting the base by garbage.
+    if not (0 <= fields['hour'] <= 23):
+        return None
+    if not (0 <= fields['minute'] <= 59):
+        return None
+    if not (0.0 <= second_offset < 60.0):
+        return None
+
+    return fields
+
+
+def parse_datz_header(raw_bytes: bytes) -> Optional[Dict[str, Any]]:
+    """
+    Read the ``Controller Data Log Beginning`` instant from a .datZ file.
+
+    Pure function - decompresses and scans the text preamble only, no binary
+    payload parsing. The shell uses this to cross-check the header's date and
+    HH:MM against the filename; a disagreement means the file is not on the
+    clock boundary its name claims.
+
+    Args:
+        raw_bytes: Raw bytes from .datZ file (compressed)
+
+    Returns:
+        Dict with keys ``year``, ``month``, ``day``, ``hour``, ``minute``
+        (ints) and ``second_offset`` (float, seconds past the HH:MM boundary),
+        or None when no valid header line is present.
+
+    Raises:
+        DatZDecodingError: If decompression fails
+
+    Example:
+        >>> header = parse_datz_header(raw_bytes)
+        >>> header['second_offset']
+        0.1
+    """
+    try:
+        content = zlib.decompress(raw_bytes)
+    except zlib.error as e:
+        raise DatZDecodingError(f"Failed to decompress datZ file: {e}")
+
+    return _extract_header_fields(content)
+
+
 def parse_datz_bytes(raw_bytes: bytes, file_timestamp: float) -> pd.DataFrame:
     """
     Parse compressed DatZ binary data into a DataFrame of traffic events.
-    
+
     This is a pure function that transforms raw bytes into structured data.
     No I/O operations - accepts bytes, returns DataFrame.
-    
+
+    Binary time offsets are measured from the header's
+    ``Controller Data Log Beginning`` instant, which sits 0.0-1.0 s past the
+    clock boundary that ``file_timestamp`` carries.  The header's sub-minute
+    delta is therefore added to ``file_timestamp`` to form the event base.
+    Only the delta is used - never the header's absolute time - so no timezone
+    resolution is needed and this stays a pure function.  Files with no header
+    line fall back to ``file_timestamp`` unchanged.
+
     Args:
         raw_bytes: Raw bytes from .datZ file (compressed)
-        file_timestamp: Start timestamp for this file (UTC epoch float)
-        
+        file_timestamp: Clock-boundary start timestamp for this file
+            (UTC epoch float), normally parsed from the filename
+
     Returns:
         DataFrame with columns: ['timestamp', 'event_code', 'parameter']
         Timestamps are UTC epoch floats
@@ -75,11 +167,17 @@ def parse_datz_bytes(raw_bytes: bytes, file_timestamp: float) -> pd.DataFrame:
         )
     
     binary_bytes = content[newline_pos + 1:]
-    
-    # Step 4: Parse binary rows
-    records = _parse_binary_payload(binary_bytes, file_timestamp)
-    
-    # Step 5: Convert to DataFrame
+
+    # Step 4: Shift the event base by the header's sub-minute offset
+    header = _extract_header_fields(content)
+    base_timestamp = file_timestamp
+    if header is not None:
+        base_timestamp += header['second_offset']
+
+    # Step 5: Parse binary rows
+    records = _parse_binary_payload(binary_bytes, base_timestamp)
+
+    # Step 6: Convert to DataFrame
     if not records:
         # Return empty DataFrame with correct schema
         return pd.DataFrame(columns=['timestamp', 'event_code', 'parameter'])
