@@ -242,6 +242,14 @@ class CycleProcessor:
         ``cycle_start`` values, fetches Code-1 events and the matching config,
         then writes the computed ring strings back in-place.
 
+        The event fetch window runs to the first ``cycle_start`` *after* the
+        last pending row — or to the end of the events table when none
+        exists — so the final pending cycle sees its own greens.  Every
+        committed ``cycle_start`` inside the span is handed to
+        ``assign_ring_phases`` as a join boundary, even when already
+        populated, so greens are never attributed backwards past a populated
+        row; only the pending rows are written back.
+
         Returns:
             Number of cycle rows updated.
         """
@@ -254,19 +262,47 @@ class CycleProcessor:
             """)
             rows = cur.fetchall()
 
-        if not rows:
-            print("backfill_ring_phases: nothing to do – all rows already populated")
-            return 0
+            if not rows:
+                print(
+                    "backfill_ring_phases: nothing to do – "
+                    "all rows already populated"
+                )
+                return 0
 
-        epochs = [r[0] for r in rows]
-        start_epoch, end_epoch = min(epochs), max(epochs)
+            epochs = [r[0] for r in rows]
+            start_epoch, end_epoch = min(epochs), max(epochs)
 
-        with DatabaseManager(self.db_path) as m:
+            # All committed boundaries in the span act as join anchors, not
+            # just the pending ones.
+            cur.execute(
+                "SELECT DISTINCT cycle_start FROM cycles "
+                "WHERE cycle_start BETWEEN ? AND ? ORDER BY cycle_start",
+                (start_epoch, end_epoch),
+            )
+            anchor_epochs = [r[0] for r in cur.fetchall()]
+
+            # The last pending cycle runs until the next boundary; with no
+            # next boundary it runs to the end of the events table.
+            cur.execute(
+                "SELECT MIN(cycle_start) FROM cycles WHERE cycle_start > ?",
+                (end_epoch,),
+            )
+            next_cycle_start = cur.fetchone()[0]
+            if next_cycle_start is None:
+                event_range = m.get_event_date_range()
+                # query_events' upper bound is exclusive; nudge past the last
+                # event so it is included.
+                fetch_end = (
+                    event_range[1] + 1 if event_range else end_epoch + 1
+                )
+            else:
+                fetch_end = next_cycle_start
+
             # Gap markers (-1) are always included so assign_ring_phases
             # can stop the green->cycle join at a hard reset.
             events_df = m.query_events(
                 start_time=start_epoch,
-                end_time=end_epoch + 1,
+                end_time=fetch_end,
                 event_codes=[1, -1],
             )
             config = m.get_config_at_date(
@@ -277,11 +313,12 @@ class CycleProcessor:
             print("backfill_ring_phases: no events or config found – aborting")
             return 0
 
-        cycles_df = pd.DataFrame({"cycle_start": epochs})
+        cycles_df = pd.DataFrame({"cycle_start": anchor_epochs})
         updated = assign_ring_phases(cycles_df, events_df, config)
 
+        pending = updated[updated["cycle_start"].isin(epochs)]
         records = list(
-            updated[["r1_phases", "r2_phases", "cycle_start"]]
+            pending[["r1_phases", "r2_phases", "cycle_start"]]
             .itertuples(index=False, name=None)
         )
         with DatabaseManager(self.db_path) as m:

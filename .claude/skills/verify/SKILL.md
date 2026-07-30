@@ -34,9 +34,9 @@ project root anywhere and `cd` into it.
   is empty; a UTC-midnight epoch lands on the *previous* local date, so
   per-date validation may report "no cycles" for the UTC date — harmless for
   backfill verification.
-- `backfill_ring_phases` fetches events only up to `max(cycle_start) + 1s`,
-  so the last pending cycle's greens are out of window and that row stays
-  `None`/`None` (pre-existing behavior as of 2026-07; don't mistake it for
-  your change).
+- `backfill_ring_phases` leaves a cycle at `None`/`None` when it genuinely
+  has no greens (e.g. it sits after a gap marker, which blocks pairing per
+  CLAUDE.md §5). Such rows are re-selected on every run — that is expected,
+  not a failed backfill.
 - `atspm process` needs real `.datZ` files — for Functional Core changes,
   seed events directly and drive `report`/analysis commands instead.

@@ -17,13 +17,14 @@ Gap-rule audit result (CLAUDE.md §5), Fable #5:
     interval (widening 'na'), never leak a stale colour.  The tests in
     TestPhaseStatusGapRule pin that guarantee.
 
-Genuine defect found instead (pinned below in TestPhaseRedClearance):
-    a phase that serves red clearance (Codes 10/11) has its red-clearance
-    period labeled 'Y', because _build_phase_intervals emits
+Genuine defect found instead, since fixed (TestPhaseRedClearance):
+    a phase that serves red clearance (Codes 10/11) had its red-clearance
+    period labeled 'Y', because _build_phase_intervals only emitted
     clear_end_ts = Code 11 (End Red Clearance) — correct for phase_splits'
-    combined-YR reporting, wrong for a visual G/Y/R lookup.  The overlap
-    builder handles the identical situation correctly (Code 64 Begin Red
-    Clearance ends the 'Y' label).
+    combined-YR reporting, wrong for a visual G/Y/R lookup.  It now also
+    emits yellow_end_ts (Code 9, or Code 10 when no Code 9 was logged) and
+    the lookup ends 'Y' there, matching what the overlap builder already
+    did via Code 64.
 """
 
 import numpy as np
@@ -201,7 +202,7 @@ class TestPhaseStatusGapRule:
 
 
 class TestPhaseRedClearance:
-    """The genuine defect this audit found (see module docstring)."""
+    """Red clearance reads 'R', via yellow_end_ts (see module docstring)."""
 
     # A serves red clearance: end-yellow 114, begin RC 114, end RC 116.
     _RC_SERVED = [
@@ -210,31 +211,28 @@ class TestPhaseRedClearance:
         (200.0, 1, PHASE), (210.0, 8, PHASE), (214.0, 9, PHASE), (216.0, 12, PHASE),
     ]
 
-    @pytest.mark.xfail(
-        reason=(
-            "A phase serving red clearance shows a RED indication from Code "
-            "9/10 until Code 11, but _build_phase_intervals emits "
-            "clear_end_ts = Code 11 (End Red Clearance) — the right boundary "
-            "for phase_splits' combined yellow+RC 'YR' reporting, the wrong "
-            "one for a visual G/Y/R lookup — so _status_at_timestamps labels "
-            "red-clearance frames 'Y'.  The overlap builder already does "
-            "this correctly (Code 64 Begin Red Clearance ends its 'Y'). "
-            "Fix candidate (behaviour change, future session): expose the "
-            "end-of-yellow boundary separately (e.g. a yellow_end_ts column "
-            "on phase intervals) and have the video lookup use it, leaving "
-            "phase_splits' semantics untouched."
-        ),
-        strict=True,
-    )
+    # Same phase, no Code 9 logged: Code 10 is the only end-of-yellow signal.
+    _RC_SERVED_NO_END_YELLOW = [
+        (100.0, 1, PHASE), (110.0, 8, PHASE),
+        (114.0, 10, PHASE), (116.0, 11, PHASE),
+        (200.0, 1, PHASE), (210.0, 8, PHASE), (214.0, 9, PHASE), (216.0, 12, PHASE),
+    ]
+
     def test_red_clearance_period_reads_red(self):
         assert _phase_at(self._RC_SERVED, 114.5, 115.9) == ["R", "R"]
 
-    def test_characterization_red_clearance_currently_reads_yellow(self):
-        # Pins today's behaviour so the fix is a deliberate, visible change.
-        assert _phase_at(self._RC_SERVED, 114.5, 115.9) == ["Y", "Y"]
+    def test_yellow_ends_exactly_at_end_yellow(self):
+        # Code 9 is the boundary: the instant before is still 'Y'.
+        assert _phase_at(self._RC_SERVED, 113.9, 114.0) == ["Y", "R"]
 
-    def test_characterization_yellow_and_post_rc_red_are_correct(self):
-        # Everything outside the RC window is already right.
+    def test_begin_red_clearance_ends_yellow_without_a_code_9(self):
+        # No Code 9 at all — Code 10 has to carry the boundary on its own.
+        assert _phase_at(
+            self._RC_SERVED_NO_END_YELLOW, 112.0, 113.9, 114.0, 115.9
+        ) == ["Y", "Y", "R", "R"]
+
+    def test_yellow_and_post_rc_red_are_correct(self):
+        # Everything outside the RC window was already right.
         assert _phase_at(self._RC_SERVED, 105.0, 112.0, 116.0, 150.0) == ["G", "Y", "R", "R"]
 
     def test_no_red_clearance_phase_is_unaffected(self):
