@@ -8,3 +8,7 @@ __init__.py exports, or the Functional Core/Imperative Shell boundary.
 See CLAUDE.md "Documentation Workflow" for the rules.
 -->
 
+- [src/atspm/analysis/__init__.py] new export `parse_datz_header`
+- [src/atspm/analysis/decoders.py] `parse_datz_bytes` now shifts the event base by the header's sub-minute offset
+- [src/atspm/cli.py] `process` gains `--rebuild` (Path C, mutually exclusive with `--fill-gaps`) and `--yes`
+
