@@ -49,6 +49,11 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 OVERLAP_LETTER_MAP: Dict[str, int] = {f"OL{chr(ord('A') + i)}": i + 1 for i in range(16)}
 
+# Valid signal phase numbers, matching the overlap range above: the
+# Indiana/Purdue Hi-Res Logger Enumerations spec numbers both 1-16.
+MIN_PHASE_NUMBER: int = 1
+MAX_PHASE_NUMBER: int = 16
+
 _META_FIELDS = ["video_width", "video_height"]
 _CSV_FIELDS = ["type", "points", "color", "input", "phase", "name"]
 
@@ -57,8 +62,8 @@ def resolve_stopbar_target(phase_field: Union[int, str]) -> Tuple[str, int]:
     """Resolve a stopbar shape's ``phase`` field to a lookup target.
 
     Args:
-        phase_field: Either an integer/numeric-string phase number, or an
-            overlap letter code (``"OLA"``-``"OLP"``).
+        phase_field: Either an integer/numeric-string phase number
+            (``1``-``16``), or an overlap letter code (``"OLA"``-``"OLP"``).
 
     Returns:
         A ``(kind, number)`` tuple where ``kind`` is ``"phase"`` or
@@ -66,18 +71,25 @@ def resolve_stopbar_target(phase_field: Union[int, str]) -> Tuple[str, int]:
 
     Raises:
         ValueError: If ``phase_field`` is neither a valid phase number nor
-            a recognised overlap letter.
+            a recognised overlap letter, or if it is an integer outside the
+            ``MIN_PHASE_NUMBER``-``MAX_PHASE_NUMBER`` range.
     """
     s = str(phase_field).strip().upper()
     if s in OVERLAP_LETTER_MAP:
         return ("overlap", OVERLAP_LETTER_MAP[s])
     try:
-        return ("phase", int(s))
+        number = int(s)
     except ValueError as exc:
         raise ValueError(
             f"Unrecognised stopbar phase field {phase_field!r}: not an "
             f"integer phase number or an OLA-OLP overlap code."
         ) from exc
+    if not MIN_PHASE_NUMBER <= number <= MAX_PHASE_NUMBER:
+        raise ValueError(
+            f"Stopbar phase number {number} out of range: phases are "
+            f"{MIN_PHASE_NUMBER}-{MAX_PHASE_NUMBER}."
+        )
+    return ("phase", number)
 
 
 class ShapeConfig:

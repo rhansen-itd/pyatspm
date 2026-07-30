@@ -24,7 +24,16 @@ import numpy as np
 import tkinter as tk
 from tkinter import simpledialog, messagebox
 
-from ..data.video import ShapeConfig
+from ..data.video import (
+    MAX_PHASE_NUMBER,
+    MIN_PHASE_NUMBER,
+    OVERLAP_LETTER_MAP,
+    ShapeConfig,
+)
+
+_PHASE_RANGE_TEXT = f"{MIN_PHASE_NUMBER}-{MAX_PHASE_NUMBER}"
+_OVERLAP_LETTERS = sorted(code[2:] for code in OVERLAP_LETTER_MAP)
+_OVERLAP_RANGE_TEXT = f"{_OVERLAP_LETTERS[0]}-{_OVERLAP_LETTERS[-1]}"
 
 _DOT_RADIUS = 5
 _SNAP_RADIUS = 12
@@ -378,19 +387,23 @@ def calibrate_shapes(
                 input_val = inp
 
         elif key == ord("p") and not edit_mode:
-            phase_input = simpledialog.askstring("Phase Value", "Enter phase value (1-16 or A-P):")
+            phase_input = simpledialog.askstring(
+                "Phase Value", f"Enter phase value ({_PHASE_RANGE_TEXT} or {_OVERLAP_RANGE_TEXT}):"
+            )
             if phase_input:
                 phase_input = phase_input.strip().upper()
                 if phase_input.isdigit():
                     p_val = int(phase_input)
-                    if 1 <= p_val <= 16:
+                    if MIN_PHASE_NUMBER <= p_val <= MAX_PHASE_NUMBER:
                         phase = p_val
                     else:
-                        messagebox.showerror("Phase", "Phase must be between 1-16")
-                elif len(phase_input) == 1 and "A" <= phase_input <= "P":
+                        messagebox.showerror("Phase", f"Phase must be between {_PHASE_RANGE_TEXT}")
+                elif f"OL{phase_input}" in OVERLAP_LETTER_MAP:
                     phase = f"OL{phase_input}"
                 else:
-                    messagebox.showerror("Phase", "Phase must be between 1-16 or A-P")
+                    messagebox.showerror(
+                        "Phase", f"Phase must be between {_PHASE_RANGE_TEXT} or {_OVERLAP_RANGE_TEXT}"
+                    )
 
         elif key == ord("e"):
             if not edit_mode:
@@ -422,21 +435,27 @@ def calibrate_shapes(
                 shape = shapes[current_edit_index]
                 if shape["type"] == "stopbar":
                     phase_input = simpledialog.askstring(
-                        "Phase Value", "Edit phase value (1-16 or A-P):",
+                        "Phase Value",
+                        f"Edit phase value ({_PHASE_RANGE_TEXT} or {_OVERLAP_RANGE_TEXT}):",
                         initialvalue=str(shape.get("phase", "")),
                     )
                     if phase_input:
                         phase_input = phase_input.strip().upper()
                         if phase_input.isdigit():
                             p_val = int(phase_input)
-                            if 1 <= p_val <= 16:
+                            if MIN_PHASE_NUMBER <= p_val <= MAX_PHASE_NUMBER:
                                 shape["phase"] = p_val
                             else:
-                                messagebox.showerror("Phase", "Phase must be between 1-16")
-                        elif len(phase_input) == 1 and "A" <= phase_input <= "P":
+                                messagebox.showerror(
+                                    "Phase", f"Phase must be between {_PHASE_RANGE_TEXT}"
+                                )
+                        elif f"OL{phase_input}" in OVERLAP_LETTER_MAP:
                             shape["phase"] = f"OL{phase_input}"
                         else:
-                            messagebox.showerror("Phase", "Phase must be between 1-16 or A-P")
+                            messagebox.showerror(
+                                "Phase",
+                                f"Phase must be between {_PHASE_RANGE_TEXT} or {_OVERLAP_RANGE_TEXT}",
+                            )
             elif key == ord("r") and current_edit_index != -1:
                 shape = shapes[current_edit_index]
                 name = simpledialog.askstring(
