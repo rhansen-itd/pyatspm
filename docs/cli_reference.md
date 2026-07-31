@@ -38,12 +38,18 @@ Pull new `.datZ` files from an intersection's configured devices via SCP (see `d
 
 ## `atspm process`
 
-Ingest `.datZ` files into `events` and compute `cycles`.
+Ingest `.datZ` files into `events` and compute `cycles`. Three mutually exclusive modes:
+
+- **Fast Append** (default) — only files newer than the last ingested span are read; cycles are recalculated forward from the last known anchor.
+- **Gap Fill** (`--fill-gaps`) — all files are scanned and historical gaps filled; obsolete gap markers are scrubbed and affected cycles surgically repaired.
+- **Rebuild** (`--rebuild`) — `events`, `cycles` and `ingestion_log` are deleted, then every `.datZ` file is re-ingested from scratch. `config` and `metadata` survive (they come from `int_cfg.csv` and `metadata.json`). Use when stored timestamps need re-deriving on the current decoder basis. Destructive, so it confirms once per run and refuses outright on non-interactive stdin without `--yes`.
 
 | Flag | Required | Default | Description |
 |---|---|---|---|
 | `--target` / `--targetid` / `--all` | yes | — | Target selection (see above) |
-| `--fill-gaps` | no | off | Gap-fill mode: scan **all** files and repair gaps, instead of only appending files newer than the last ingested span |
+| `--fill-gaps` | no | off | Gap-fill mode (mutually exclusive with `--rebuild`) |
+| `--rebuild` | no | off | Rebuild mode (mutually exclusive with `--fill-gaps`): delete `events`/`cycles`/`ingestion_log`, then re-ingest everything from `raw_data/` |
+| `--yes` | no | off | Skip the `--rebuild` confirmation prompt (for scripted runs) |
 | `--batch-size N` | no | `50` | `.datZ` files committed per transaction |
 | `--no-cycles` | no | off | Ingest raw events only; skip cycle detection |
 | `--timezone TZ` | no | metadata.json value | Override timezone |
