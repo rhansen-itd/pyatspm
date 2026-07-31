@@ -19,6 +19,8 @@ Indexes: `idx_events_timestamp`, `idx_events_code_param`, `idx_events_ts_code` (
 
 `event_code = -1` is inserted by the ingestion pipeline whenever a discontinuity is detected (missing/corrupt file, controller reset). Any logic that computes a duration or pairs sequential events (phase splits, AOG, counts, detector intervals) must stop at a gap marker and never interpolate or bridge across it.
 
+A **backward controller clock set** also produces one, placed 0.05 s below the first post-step event. The set makes recorded time decrease part-way through a file — the offsets replay a band, so events from two different real moments carry the same labels — and the marker fences that break so nothing is measured across it. It does not repair the band. Ingestion reports these separately as `clock_steps`, while `gap_markers` stays the database-wide `event_code = -1` total (clock-step markers included).
+
 ### Common event codes
 
 | Code | Meaning |

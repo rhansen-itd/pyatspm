@@ -121,7 +121,7 @@ stopbar,50,300;250,300,"0,0,255",,2,Southbound Stop Bar
 | `points` | `;`-separated `x,y` pixel coordinates |
 | `color` | `R,G,B` outline color |
 | `input` | Detector channel number (loop shapes only) |
-| `phase` | Phase number, or an overlap letter `"OLA"`-`"OLP"` (stopbar shapes only) — resolved by `resolve_stopbar_target` |
+| `phase` | Phase number `1`-`16`, or an overlap letter `"OLA"`-`"OLP"` (stopbar shapes only) — resolved by `resolve_stopbar_target`, which rejects out-of-range numbers |
 | `name` | Free-text label |
 
 Overlap letters map to numbers `1`-`16` (`A=1, B=2, ...`) via `OVERLAP_LETTER_MAP`, matching the Indiana/Purdue Hi-Res Logger Enumerations spec's overlap-number convention for event codes 61-66. `render_overlay` rejects a shape config whose recorded `video_width`/`video_height` doesn't match the actual video's resolution — shapes are calibrated pixel-exact and are not rescaled.

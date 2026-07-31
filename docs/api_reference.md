@@ -6,13 +6,13 @@ Public exports per package, as declared in each `__init__.py`. Most users should
 
 | Function / Class | Description |
 |---|---|
-| `DatabaseManager(db_path)` | Context manager for direct DB access (raw `sqlite3`); `get_metadata()`, `get_timezone()`, `set_metadata()`, `import_config()`, span/anchor queries |
+| `DatabaseManager(db_path)` | Context manager for direct DB access (raw `sqlite3`); `get_metadata()`, `get_timezone()`, `set_metadata()`, `import_config()`, span/anchor queries, `clear_ingested_data()` (drops all `events`/`cycles`/`ingestion_log` rows, leaving `config`/`metadata` intact — backs `atspm process --rebuild`) |
 | `init_db(db_path)` | Create a new intersection DB with the full schema (WAL mode, all tables/indexes) |
 | `import_config(csv_path, db_path)` | Import `int_cfg.csv` into the `config` table |
 | `db_timezone(db_path, timezone=None)` | The zone to use for an intersection: *timezone* if given, else the DB's `metadata.timezone`, else `DEFAULT_TIMEZONE`. Every engine's timezone resolution goes through here |
 | `RetrievalEngine(target_dir, meta, devices)` | Pulls new `.datZ` files for every device in a parsed `devices.json`, secondary devices before controller; `run()` returns per-device result dicts |
 | `run_retrieval(target_dir, meta, devices_path)` | Module-level convenience wrapper around `RetrievalEngine` — loads/saves `devices.json` for the caller |
-| `IngestionEngine` | Orchestrates `.datZ` file scanning, parsing, gap detection, and triggers cycle processing |
+| `IngestionEngine` | Orchestrates `.datZ` file scanning, parsing, gap detection, backward-clock-step fencing, and triggers cycle processing; `get_ingestion_stats()` reports `files_processed`, `total_events`, `gap_markers`, `header_mismatches`, `clock_steps`, `span_count`, `date_range` |
 | `run_ingestion(db_path, data_dir, timezone, incremental, batch_size)` | Ingest `.datZ` files into `events` |
 | `CycleProcessor` | Orchestrates cycle detection re-entry (fast-append vs. gap-fill paths) |
 | `run_cycle_processing(db_path, reprocess)` | Detect and store `cycles` |
@@ -39,8 +39,9 @@ Public exports per package, as declared in each `__init__.py`. Most users should
 | `DetectorEngine` | Detector-discrepancy orchestration; `get_discrepancies()`, `get_plot_data()` |
 | `get_detector_discrepancies(...)` | Module-level convenience wrapper around `DetectorEngine` |
 | `ShapeConfig` | Per-camera loop/stopbar shape config; `load(path)`/`save(path)` round-trip a `<camera>_shapes.csv`, `validate_resolution(w, h)`, `relevant_phases()`/`relevant_overlaps()`/`relevant_detectors()` |
-| `resolve_stopbar_target(phase_field)` | Resolves a stopbar shape's `phase` field to a `(kind, number)` lookup target — `kind` is `"phase"` or `"overlap"` |
+| `resolve_stopbar_target(phase_field)` | Resolves a stopbar shape's `phase` field to a `(kind, number)` lookup target — `kind` is `"phase"` or `"overlap"`. Raises `ValueError` on a non-numeric, non-overlap field, and separately on a phase number outside `MIN_PHASE_NUMBER`-`MAX_PHASE_NUMBER` |
 | `OVERLAP_LETTER_MAP` | `dict` mapping overlap letters `"OLA"`-`"OLP"` to numbers `1`-`16` |
+| `MIN_PHASE_NUMBER` / `MAX_PHASE_NUMBER` | `1` / `16` — the valid signal phase range, matching `OVERLAP_LETTER_MAP`'s span from the same Hi-Res Enumerations spec |
 
 ## `atspm.analysis` — Functional Core
 
@@ -48,8 +49,9 @@ Pure functions: DataFrames/dicts in, DataFrames/dicts/figures out. No I/O.
 
 | Function / Class | Module | Description |
 |---|---|---|
-| `parse_datz_bytes(raw_bytes, file_timestamp)` | `decoders` | Decode one `.datZ` payload → `DataFrame[timestamp, event_code, parameter]` |
+| `parse_datz_bytes(raw_bytes, file_timestamp)` | `decoders` | Decode one `.datZ` payload → `DataFrame[timestamp, event_code, parameter]`. Binary offsets are measured from the header instant, so the header's sub-minute delta is added to `file_timestamp` to form the event base; files with no header line fall back to `file_timestamp` unchanged |
 | `parse_datz_batch(file_data)` | `decoders` | Decode and merge multiple files |
+| `parse_datz_header(raw_bytes)` | `decoders` | Read the `Controller Data Log Beginning` instant → dict of `year`/`month`/`day`/`hour`/`minute` plus `second_offset` (seconds past the HH:MM boundary), or `None` when no valid header line is present. Scans the text preamble only |
 | `validate_datz_file(raw_bytes)` | `decoders` | Quick validity check |
 | `estimate_event_count(raw_bytes)` | `decoders` | Pre-parse row-count estimate |
 | `insert_gap_marker(df, gap_timestamp)` | `decoders` | Insert an `event_code = -1` discontinuity row |
