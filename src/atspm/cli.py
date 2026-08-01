@@ -1676,6 +1676,12 @@ def handle_video_overlay(args: argparse.Namespace) -> None:
         _die(f"Video overlay rendering failed: {exc}")
 
     print(f"\n✅  Wrote {result.frame_count} frames @ {result.fps:.2f} fps to {result.output_path}")
+    if result.timing_source == "fps":
+        print(
+            "    ⚠️  This container reports no frame timestamps, so frames were timed at a "
+            "constant\n        rate. Any dropped frames or stream stalls will skew overlays "
+            "after the fact."
+        )
 
 
 _PHASE_LOCATE_SEARCH_HORIZON_SEC = 240.0  # generous upper bound on cycle length
@@ -2631,7 +2637,7 @@ def _add_video_calibrate_shapes_parser(subs: argparse._SubParsersAction) -> None
     group_vidcal.add_argument("--target", metavar="FOLDER", help="Exact intersection folder name.")
     group_vidcal.add_argument("--targetid", metavar="ID", help="Intersection ID prefix (e.g. '2068').")
     p_vidcal.add_argument("--camera", required=True, metavar="NAME", help="Camera name (used as the shape-config filename stem).")
-    p_vidcal.add_argument("--video", required=True, metavar="PATH", help="Video file to calibrate against (first frame is used). A relative path is resolved against <target>/video/; an absolute path is used as-is.")
+    p_vidcal.add_argument("--video", required=True, metavar="PATH", help="Video file to calibrate against (first frame is used); .mp4 or .ts. A relative path is resolved against <target>/video/; an absolute path is used as-is.")
     p_vidcal.add_argument("--verbose", action="store_true", default=False, help="Print full tracebacks for any errors.")
     p_vidcal.set_defaults(func=handle_video_calibrate_shapes)
 
@@ -2655,9 +2661,9 @@ def _add_video_overlay_parser(subs: argparse._SubParsersAction) -> None:
     group_vidov.add_argument("--target", metavar="FOLDER", help="Exact intersection folder name.")
     group_vidov.add_argument("--targetid", metavar="ID", help="Intersection ID prefix (e.g. '2068').")
     p_vidov.add_argument("--camera", required=True, metavar="NAME", help="Camera name (matches the shape-config filename stem).")
-    p_vidov.add_argument("--video", required=True, metavar="PATH", help="Input video file to overlay. A relative path is resolved against <target>/video/; an absolute path is used as-is.")
+    p_vidov.add_argument("--video", required=True, metavar="PATH", help="Input video file to overlay; .mp4 (frame-decode recorder) or .ts (remux recorder). A relative path is resolved against <target>/video/; an absolute path is used as-is.")
     p_vidov.add_argument("--start", required=True, metavar="ISO8601", help="Real-world timestamp of the video's first frame (local time, ISO-8601).")
-    p_vidov.add_argument("--output", default=None, metavar="PATH", help="Output video path. Defaults to <target>/outputs/<start-date>/<camera>_overlay_<start-time>.mp4.")
+    p_vidov.add_argument("--output", default=None, metavar="PATH", help="Output video path; .mp4/.m4v/.mov/.avi (the overlay is re-encoded, so .ts is input-only). Defaults to <target>/outputs/<start-date>/<camera>_overlay_<start-time>.mp4.")
     p_vidov.add_argument("--lookback", type=float, default=10.0, metavar="MIN", help="Minutes of event data to fetch before/after the video window, for correct status at the clip's edges (default: 10.0).")
     p_vidov.add_argument("--timezone", default=None, metavar="TZ", help="Override the timezone from metadata.json.")
     p_vidov.add_argument("--verbose", action="store_true", default=False, help="Print full tracebacks for any errors.")
@@ -2691,7 +2697,7 @@ def _add_video_locate_phase_change_parser(subs: argparse._SubParsersAction) -> N
     group_vidloc.add_argument("--target", metavar="FOLDER", help="Exact intersection folder name.")
     group_vidloc.add_argument("--targetid", metavar="ID", help="Intersection ID prefix (e.g. '2068').")
     p_vidloc.add_argument("--camera", required=True, metavar="NAME", help="Camera name (used to name the output clip).")
-    p_vidloc.add_argument("--video", required=True, metavar="PATH", help="Input video file. A relative path is resolved against <target>/video/; an absolute path is used as-is.")
+    p_vidloc.add_argument("--video", required=True, metavar="PATH", help="Input video file; .mp4 or .ts. A relative path is resolved against <target>/video/; an absolute path is used as-is.")
     p_vidloc.add_argument("--phase", required=True, type=int, metavar="N", help="Signal phase number visible in the camera view.")
     p_vidloc.add_argument("--transition", default=None, choices=["green_to_yellow", "yellow_to_red"], help="Pin the search to one edge. Default: auto-pick whichever of green->yellow/yellow->red occurs first.")
     p_vidloc.add_argument("--start", required=True, metavar="ISO8601", help="Rough guess for the real-world timestamp of the video's first frame (local time, ISO-8601).")
