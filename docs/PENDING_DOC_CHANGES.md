@@ -8,4 +8,7 @@ __init__.py exports, or the Functional Core/Imperative Shell boundary.
 See CLAUDE.md "Documentation Workflow" for the rules.
 -->
 
+- [src/atspm/video/processor.py] accepts .ts input alongside .mp4; VideoOverlayResult gains timing_source
+- [src/atspm/cli.py] video-overlay/-calibrate-shapes/-locate-phase-change --video document .ts input; --output restricted to writable containers
+
 
