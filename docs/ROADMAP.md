@@ -69,6 +69,17 @@ Small and actionable; each carries enough file/line detail to be picked up cold.
 
   Verification is cheap and non-speculative: clips already synced by hand have a known-good `--start`, so the detector can be scored against them directly.
 - **Turning-movement counting via computer vision** (`EnhancedIOUTracker`, background-subtraction or YOLOv8 vehicle detection, approach-line crossing logic — carried over from the earlier `video_processing.py`). Deliberately split out of the Video Overlay work: model selection/tuning and tracking-accuracy validation is a substantially larger, different kind of problem. Revisit if there's appetite for it.
+- **Intersection lane configuration (manual `int_cfg` schema & automated inference for Critical Movement Analysis).** Critical Movement Analysis (`src/atspm/analysis/critical.py`) currently computes `demand_per_lane = demand_vph / n_detectors`, using distinct stop-bar detector IDs (`Det_P{N}_Stopbar`) as a proxy for lane count. This proxy degrades when multiple detectors cover one lane (e.g. advance + stop-bar loops), when a single detector zone spans multiple lanes, or when shared lanes exist (e.g., shared Thru/Right or Thru/Left). Accurate Critical Movement Analysis and vphpl demand ratios require true lane counts and movement-to-lane mapping. Two complementary approaches to scope:
+
+  - **Option 1: Explicit Manual Coding in `int_cfg.csv` (Deterministic / Configuration-based).**
+    - Extend `int_cfg.csv` and the `config` table schema with explicit per-phase or per-movement lane configuration fields (e.g., `Lanes_P<N>` or `Lanes_TM_<Label>`).
+    - Support shared-lane notation (e.g., `Shared_Lanes_P<N>_<M>`).
+    - Update `phase_demand()` in `atspm.analysis.critical` to prefer configured lane counts over the `n_detectors` fallback when present.
+
+  - **Option 2: Data-Driven Lane & Movement Inference (Detector & Flow Analysis).**
+    - *Discharge Flow Rate / Saturation Capacity*: Compare observed maximum discharge rate during saturated green splits (`FlowRateEngine` / `atspm.analysis.flow`) against standard single-lane saturation flow (~1800–1900 vphpl) to infer effective number of discharge lanes per phase (e.g., ~3600 vph peak discharge → 2 lanes).
+    - *Arrival / Departure Patterns & Shared Lanes*: Analyze vehicle-by-vehicle arrival patterns, co-actuations across movement detectors, and time-gap distributions during queue clearance to detect shared-lane behavior (e.g. left-turn blockages causing distinct headway distributions in shared thru/left lanes).
+    - Surface inferred lane counts as an automated sanity check against `int_cfg.csv` configurations or as a fallback when configuration entries are omitted.
 
 ## Rejected / no action
 
