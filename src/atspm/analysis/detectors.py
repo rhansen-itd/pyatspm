@@ -9,7 +9,7 @@ Package Location: src/atspm/analysis/detectors.py
 
 from __future__ import annotations
 
-from typing import Dict, List
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -24,7 +24,13 @@ def _reconstruct_intervals(events_df: pd.DataFrame, det_id: int) -> pd.DataFrame
 
     Each row represents a continuous ON period derived from Code-82 (ON) /
     Code-81 (OFF) events.  Gap markers (event_code == -1) act as hard resets
-    and force any open interval to close immediately.
+    and force any open interval to close immediately.  Repeated ONs extend
+    the open interval; an OFF with no open interval is ignored; an interval
+    still open at the end of the data is dropped.
+
+    Vectorised: after each row the detector is ON exactly when that row is a
+    Code-82 (an OFF or a gap marker always leaves it OFF), so intervals open
+    at every OFF->ON flip of that state and close at the next ON->OFF flip.
 
     Args:
         events_df: Raw events with columns ['timestamp', 'event_code',
@@ -35,39 +41,26 @@ def _reconstruct_intervals(events_df: pd.DataFrame, det_id: int) -> pd.DataFrame
         DataFrame with columns ['on_ts', 'off_ts', 'duration_sec'],
         sorted by on_ts. Returns an empty DataFrame if no ON events exist.
     """
-    mask = (events_df["parameter"] == det_id) | (events_df["event_code"] == -1)
-    det = events_df.loc[mask].copy().sort_values("timestamp").reset_index(drop=True)
+    code = events_df["event_code"].to_numpy()
+    mask = ((events_df["parameter"].to_numpy() == det_id) & np.isin(code, (81, 82))) | (code == -1)
+    det = events_df.loc[mask].sort_values("timestamp", kind="stable")
 
-    intervals: list[dict] = []
-    open_ts: float | None = None
+    ts = det["timestamp"].to_numpy(dtype=float)
+    is_on = det["event_code"].to_numpy() == 82
+    was_on = np.concatenate(([False], is_on[:-1]))
 
-    for row in det.itertuples():
-        code = int(row.event_code)
+    on_ts = ts[is_on & ~was_on]
+    off_ts = ts[~is_on & was_on]
+    on_ts = on_ts[: len(off_ts)]           # drop an interval still open at the end
 
-        if code == -1:                          # Hard reset — close any open interval
-            if open_ts is not None:
-                intervals.append({"on_ts": open_ts, "off_ts": row.timestamp})
-                open_ts = None
-            continue
-
-        if int(row.parameter) != det_id:
-            continue
-
-        if code == 82:                          # ON
-            if open_ts is None:
-                open_ts = float(row.timestamp)
-
-        elif code == 81:                        # OFF
-            if open_ts is not None:
-                intervals.append({"on_ts": open_ts, "off_ts": float(row.timestamp)})
-                open_ts = None
-
-    if not intervals:
+    if not len(on_ts):
         return pd.DataFrame(columns=["on_ts", "off_ts", "duration_sec"])
 
-    df = pd.DataFrame(intervals)
-    df["duration_sec"] = df["off_ts"] - df["on_ts"]
-    return df.sort_values("on_ts").reset_index(drop=True)
+    return pd.DataFrame({
+        "on_ts": on_ts,
+        "off_ts": off_ts,
+        "duration_sec": off_ts - on_ts,
+    })
 
 
 def _build_state_array(intervals_df: pd.DataFrame, query_ts: np.ndarray) -> np.ndarray:
@@ -98,6 +91,26 @@ def _build_state_array(intervals_df: pd.DataFrame, query_ts: np.ndarray) -> np.n
     return state
 
 
+def _unique_pairs(detector_pairs: List[Dict[str, int]]) -> List[Dict[str, int]]:
+    """Drop exact duplicate pairs while keeping first-seen order.
+
+    A pair's identity is ``(phase, det_a, det_b)``.  The same detector may
+    legitimately appear in several pairs; only repeats of a whole pair are
+    removed, since they would double every anomaly and plot lane.
+
+    Args:
+        detector_pairs: List of ``{"phase", "det_a", "det_b"}`` dicts.
+
+    Returns:
+        De-duplicated list of ``{"phase", "det_a", "det_b"}`` dicts with
+        integer values.
+    """
+    keys = dict.fromkeys(
+        (int(p["phase"]), int(p["det_a"]), int(p["det_b"])) for p in detector_pairs
+    )
+    return [{"phase": ph, "det_a": a, "det_b": b} for ph, a, b in keys]
+
+
 def _analyze_pair(
     events_df: pd.DataFrame,
     phase: int,
@@ -110,8 +123,8 @@ def _analyze_pair(
     Applies three classification rules:
 
     * **Rule 1 – Extended Disagreement**: One detector is ON while the other
-      is OFF, and that mismatch persists continuously for more than
-      ``lag_threshold_sec`` seconds.
+      is OFF, and that same-direction mismatch persists continuously for
+      more than ``lag_threshold_sec`` seconds.
     * **Rule 2 – Isolated Pulse**: One detector fires ON→OFF (duration
       ``< lag_threshold_sec``) while the other was completely OFF throughout
       the expanded window ``[pulse_on − threshold, pulse_off + threshold]``.
@@ -120,7 +133,8 @@ def _analyze_pair(
       expanded window (indicating real vehicle presence, not a false pulse).
 
     Gap markers (``event_code == -1``) act as hard resets: no anomaly is ever
-    reported across a gap boundary.
+    reported across a gap boundary.  A pair with no actuations at all on one
+    side yields no anomalies (the silent detector is an outage).
 
     Args:
         events_df: Raw ATSPM events, pre-filtered to the query window and
@@ -139,7 +153,9 @@ def _analyze_pair(
     intervals_a = _reconstruct_intervals(events_df, det_a_id)
     intervals_b = _reconstruct_intervals(events_df, det_b_id)
 
-    if intervals_a.empty and intervals_b.empty:
+    # A detector silent for the whole window is an outage, not a series of
+    # disagreements; flagging every partner actuation would bury the pair.
+    if intervals_a.empty or intervals_b.empty:
         return []
 
     gap_ts = events_df.loc[events_df["event_code"] == -1, "timestamp"].values
@@ -167,8 +183,11 @@ def _analyze_pair(
     state_a = _build_state_array(intervals_a, mid_ts)
     state_b = _build_state_array(intervals_b, mid_ts)
 
-    mismatch = state_a != state_b
-    transitions = np.diff(mismatch.astype(np.int8), prepend=mismatch[0].astype(np.int8)) != 0
+    # +1 = only A ON, -1 = only B ON, 0 = agreement.  Segmenting on this
+    # signed value (not on a plain mismatch flag) splits a disagreement that
+    # flips direction without an intervening agreement into two segments.
+    direction = state_a.astype(np.int8) - state_b.astype(np.int8)
+    transitions = np.diff(direction, prepend=direction[0]) != 0
     segment_id = np.cumsum(transitions)
 
     anomalies: list[dict] = []
@@ -176,8 +195,8 @@ def _analyze_pair(
     # ------------------------------------------------------------------
     # Rule 1 – Extended Disagreement
     # ------------------------------------------------------------------
-    for seg in np.unique(segment_id[mismatch]):
-        indices = np.where((segment_id == seg) & mismatch)[0]
+    for seg in np.unique(segment_id[direction != 0]):
+        indices = np.where(segment_id == seg)[0]
 
         seg_start = change_points[indices[0]]
         end_idx = indices[-1] + 1
@@ -195,7 +214,7 @@ def _analyze_pair(
         # on_det_id: the detector that was ON during the disagreement window.
         # This is captured in the anomaly record so the plotting layer can
         # render directional colour coding without re-parsing description text.
-        on_det_id  = det_a_id if state_a[indices[0]] else det_b_id
+        on_det_id  = det_a_id if direction[indices[0]] > 0 else det_b_id
         off_det_id = det_b_id if on_det_id == det_a_id else det_a_id
 
         anomalies.append({
@@ -206,7 +225,7 @@ def _analyze_pair(
             "duration_sec":    float(duration),
             "det_a_id":        det_a_id,
             "det_b_id":        det_b_id,
-            "on_det_id":       on_det_id,   # NEW: which detector was ON
+            "on_det_id":       on_det_id,   # which detector was ON
             "description": (
                 f"Ph{phase}: Det {on_det_id} ON / Det {off_det_id} OFF for "
                 f"{duration:.2f}s (threshold={lag_threshold_sec}s)"
@@ -273,6 +292,7 @@ def analyze_discrepancies(
     events_df: pd.DataFrame,
     detector_pairs: List[Dict[str, int]],
     lag_threshold_sec: float = 2.0,
+    window: Optional[Tuple[float, float]] = None,
 ) -> pd.DataFrame:
     """Identify disagreements across one or more co-located detector pairs.
 
@@ -291,7 +311,8 @@ def analyze_discrepancies(
 
     Gap markers (``event_code == -1``) are treated as hard resets: any open
     interval is closed at the reset, and no anomaly is ever reported across a
-    gap boundary.
+    gap boundary.  Exact duplicate pairs are analysed once, and a pair whose
+    detector is silent for the whole window yields no anomalies.
 
     Args:
         events_df: Raw ATSPM events with columns
@@ -305,6 +326,10 @@ def analyze_discrepancies(
         lag_threshold_sec: Minimum disagreement duration (seconds) required
             to raise a Rule-1 anomaly. Also used as the half-window size for
             the Rule-2 pulse check. Defaults to 2.0.
+        window: Optional ``(start_epoch, end_epoch)`` reporting window.  When
+            given, only anomalies overlapping it are returned; timestamps are
+            not clipped.  Pass events that extend past the window so an
+            actuation crossing either edge is reconstructed whole.
 
     Returns:
         DataFrame of identified anomalies with columns:
@@ -337,7 +362,7 @@ def analyze_discrepancies(
     events_df = events_df.sort_values("timestamp").reset_index(drop=True)
 
     all_anomalies: list[dict] = []
-    for pair in detector_pairs:
+    for pair in _unique_pairs(detector_pairs):
         all_anomalies.extend(
             _analyze_pair(
                 events_df=events_df,
@@ -351,8 +376,17 @@ def analyze_discrepancies(
     if not all_anomalies:
         return _EMPTY
 
+    result = pd.DataFrame(all_anomalies, columns=_SCHEMA)
+    if window is not None:
+        w_start, w_end = window
+        result = result[
+            (result["start_timestamp"] < w_end) & (result["end_timestamp"] > w_start)
+        ]
+        if result.empty:
+            return _EMPTY
+
     return (
-        pd.DataFrame(all_anomalies, columns=_SCHEMA)
+        result
         .sort_values(["phase", "start_timestamp"])
         .reset_index(drop=True)
     )

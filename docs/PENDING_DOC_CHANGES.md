@@ -15,3 +15,6 @@ See CLAUDE.md "Documentation Workflow" for the rules.
 - [src/atspm/video/__init__.py] export draw_lamp_overlay, LampMeasurement, measure_lamps, sync_video
 
 
+- [src/atspm/analysis/detectors.py] analyze_discrepancies gains window=; flipping disagreements split; one-side-silent pairs yield none
+- [src/atspm/plotting/detectors.py] plot_detector_comparison gains window=; hard-reset lines, per-pair summary, no layout shapes
+- [src/atspm/data/detectors.py] DetectorEngine uses every config overlapping the window; fetches ±900 s edge margin

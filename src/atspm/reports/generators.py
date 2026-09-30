@@ -283,6 +283,7 @@ class PlotGenerator:
             anomalies_df=anomalies_df,
             detector_pairs=filtered_pairs,
             metadata=metadata,
+            window=(start_dt.timestamp(), end_dt.timestamp()),
         )
 
         if phases:

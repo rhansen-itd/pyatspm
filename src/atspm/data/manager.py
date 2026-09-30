@@ -34,8 +34,10 @@ def _parse_detector_pairs(cfg: Dict[str, Any]) -> List[Dict[str, int]]:
     """Scan a config dict for ``Det_P<X>_Pairs`` columns and parse them.
 
     Each matching column value is expected to be a JSON string containing a
-    list of ``[det_a, det_b]`` two-element lists (e.g. ``"[[33,2],[34,3]]"``).
-    Results from *all* phases are flattened into a single list keyed by phase.
+    list of ``[det_a, det_b]`` two-element lists (e.g. ``"[[33,2],[34,3]]"``);
+    a single flat pair (``"[33,2]"``) is also accepted.  A detector may appear
+    in several pairs; exact repeats of a pair are dropped.  Results from *all*
+    phases are flattened into a single list keyed by phase.
 
     Args:
         cfg: Config dict as returned by ``get_config_at_date`` or one element
@@ -56,9 +58,16 @@ def _parse_detector_pairs(cfg: Dict[str, Any]) -> List[Dict[str, int]]:
             parsed = json.loads(raw)
         except (json.JSONDecodeError, TypeError):
             continue
+        if not isinstance(parsed, list):
+            continue
+        # A single pair may be written flat: "[42,3]" == "[[42,3]]".
+        if len(parsed) == 2 and all(isinstance(v, int) for v in parsed):
+            parsed = [parsed]
         for entry in parsed:
-            if len(entry) == 2:
-                pairs.append({"phase": phase, "det_a": int(entry[0]), "det_b": int(entry[1])})
+            if isinstance(entry, list) and len(entry) == 2:
+                pair = {"phase": phase, "det_a": int(entry[0]), "det_b": int(entry[1])}
+                if pair not in pairs:
+                    pairs.append(pair)
     return pairs
 
 
