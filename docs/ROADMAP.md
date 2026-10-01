@@ -30,6 +30,8 @@ Small and actionable; each carries enough file/line detail to be picked up cold.
 
 ## Future features
 
+- **Candidates from the archived SPMs notebooks** (split failures, timing-plan history from codes 131–149, preemption suite, code-13 unused green, sensor-fault detection, and others): see [spms_notebook_ideas.md](spms_notebook_ideas.md). It has the triage against pyatspm and the non-obvious details of each.
+
 - **Correcting for controller clock adjustments, informed by a marker pulse.** The near-term fix above only *fences off* a backward clock set. This is the ambition of actually repairing the affected window, using a known-length detector pulse that `eos_set_time.py` fires across every adjustment it makes (see `econ_itd_tools/ROADMAP.md` — the pulse is the upstream half of this work and has to land first).
 
   What the experiment established about the mechanism (2026-07-29, hardware-verified): recorded offsets track the *controller clock*, not elapsed real time. A file's clock window is always exactly nominal, but its real duration flexes — the −5 s set made a 1-minute file cover 65 real seconds, the +5 s set made one cover 55. So a backward set duplicates a band of labels and a forward set skips one. No events are ever lost or invented; only the labels are wrong.
