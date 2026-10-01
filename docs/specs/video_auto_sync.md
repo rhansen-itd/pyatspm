@@ -40,10 +40,13 @@ the reason in the report:
 Touch nothing else. That includes `README.md`, every other file in `docs/`,
 `ROADMAP.md` and `CLAUDE.md`.
 
-**Acceptance check:**
+**Acceptance check** (run from the worktree root):
 ```
-.venv/bin/python -m pytest tests/ -q
+PYTHONPATH=src /home/hansrkid/pyatspm/.venv/bin/python -m pytest tests/ -q
 ```
+Use this exact command every time you run tests. The worktree has no `.venv`
+of its own. The shared venv's editable install points at the main checkout's
+`src/`, so without `PYTHONPATH=src` you would be testing the wrong code.
 The whole suite must pass. Before this work it was 408 tests once the new modules
 existed.
 
