@@ -363,14 +363,16 @@ def align_clip(
 
     # Runner-up: highest local maximum lying strictly > 2.0s from coarse peak
     window_radius = int(math.floor(2.0 / step + 1e-9))
-    local_maxima = []
-    for i in range(num_candidates):
-        if abs(candidates[i] - candidates[peak_idx]) > 2.0:
-            left_bound = max(0, i - window_radius)
-            right_bound = min(num_candidates, i + window_radius + 1)
-            if combined_score[i] >= np.max(combined_score[left_bound:right_bound]):
-                local_maxima.append(combined_score[i])
-    runner_up_score = float(max(local_maxima)) if local_maxima else 0.0
+    padded = np.pad(combined_score, window_radius, constant_values=-np.inf)
+    window_max = np.lib.stride_tricks.sliding_window_view(
+        padded, 2 * window_radius + 1
+    ).max(axis=1)
+    is_local_max = (combined_score >= window_max) & (
+        np.abs(candidates - candidates[peak_idx]) > 2.0
+    )
+    runner_up_score = (
+        float(combined_score[is_local_max].max()) if is_local_max.any() else 0.0
+    )
 
     # Agreement and valid frames compared at peak candidate
     total_valid = 0
@@ -422,12 +424,12 @@ def align_clip(
         matches = both_val & changed & same_polarity
 
         midpoints = (g_grid[:-1] + g_grid[1:]) / 2.0
-        for i in range(len(t_edges)):
-            m_indices = np.flatnonzero(matches[i])
-            if len(m_indices) > 0:
-                best_m = m_indices[np.argmin(np.abs(midpoints[m_indices]))]
-                residuals_pool.append(float(midpoints[best_m]))
-                t_edges_pool.append(float(t_edges[i]))
+        # Nearest same-polarity DB change to g = 0, per edge.
+        dist = np.where(matches, np.abs(midpoints)[None, :], np.inf)
+        best = np.argmin(dist, axis=1)
+        found = np.isfinite(dist[np.arange(len(t_edges)), best])
+        residuals_pool.extend(midpoints[best[found]].tolist())
+        t_edges_pool.extend(t_edges[found].tolist())
 
     residuals_arr = np.array(residuals_pool, dtype=float)
     t_edges_arr = np.array(t_edges_pool, dtype=float)
