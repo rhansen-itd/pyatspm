@@ -10,5 +10,8 @@ See CLAUDE.md "Documentation Workflow" for the rules.
 
 - [src/atspm/video/processor.py] accepts .ts input alongside .mp4; VideoOverlayResult gains timing_source
 - [src/atspm/cli.py] video-overlay/-calibrate-shapes/-locate-phase-change --video document .ts input; --output restricted to writable containers
+- [src/atspm/cli.py] new video-sync subcommand
+- [src/atspm/data/video.py] lamp shape type and indication CSV column
+- [src/atspm/video/__init__.py] export draw_lamp_overlay, LampMeasurement, measure_lamps, sync_video
 
 

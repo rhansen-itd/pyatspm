@@ -17,6 +17,7 @@ Exposes subcommands from intersection configuration setup through reporting and 
     atspm video-calibrate-shapes --targetid <id> [...]   Interactively draw/edit camera shape config
     atspm video-overlay      --targetid <id> [...]       Render a video with live status overlays
     atspm video-locate-phase-change --targetid <id> [...] Find a phase's exact transition time for --start alignment
+    atspm video-sync         --targetid <id> [...]       Find corrected --start from signal lamps
 
 The package must be installed (``pip install -e .``) for the ``atspm`` entry
 point to be available.  All logic uses clean absolute imports from the
@@ -1783,6 +1784,110 @@ def handle_video_locate_phase_change(args: argparse.Namespace) -> None:
     )
 
 
+def handle_video_sync(args: argparse.Namespace) -> None:
+    """Find corrected --start timestamp from signal lamp measurements.
+
+    Args:
+        args: Parsed CLI arguments from the ``video-sync`` subcommand.
+    """
+    from atspm.data.video import ShapeConfig, resolve_stopbar_target
+    from atspm.utils.timezone import resolve_pytz
+    from atspm.video.sync import sync_video
+
+    target_name = _resolve_target_name(args.target, args.targetid)
+    target_dir = _get_target_dir(target_name)
+    meta = _load_metadata(target_dir)
+    db_path = _resolve_db_path(target_dir, meta)
+
+    if not db_path.exists():
+        _die(f"Database not found: {db_path}\nRun 'atspm process --target {target_name}' first.")
+
+    shape_path = _video_shape_path(target_dir, args.camera)
+    if not shape_path.exists():
+        _die(
+            f"Shape config not found: {shape_path}\n"
+            f"Run 'atspm video-calibrate-shapes --target {target_name} "
+            f"--camera {args.camera} --video <video>' first."
+        )
+    shape_config = ShapeConfig.load(shape_path)
+
+    video_path = _resolve_video_path(target_dir, args.video)
+    if not video_path.exists():
+        _die(f"Video not found: {video_path}")
+
+    lamp_shapes = shape_config.lamp_shapes()
+    if not lamp_shapes:
+        _die(
+            f"No lamp shapes found in {shape_path}.\n"
+            f"Add at least one lamp shape (type=lamp, indication=green, a point on the lit lamp; "
+            f"see 'atspm video-calibrate-shapes')."
+        )
+
+    tz_str = args.timezone or meta.get("timezone") or DEFAULT_TIMEZONE
+    tz = resolve_pytz(tz_str)
+    try:
+        dt_parsed = datetime.fromisoformat(args.start_guess)
+        if dt_parsed.tzinfo is None:
+            start_guess_dt = tz.localize(dt_parsed)
+        else:
+            start_guess_dt = dt_parsed.astimezone(tz)
+    except ValueError as exc:
+        _die(f"Invalid datetime format for --start-guess: {exc}. Use ISO-8601 (e.g. 2026-10-01T12:25:00).")
+
+    try:
+        result = sync_video(
+            db_path,
+            shape_config,
+            video_path,
+            start_guess_dt,
+            search_s=args.search,
+        )
+    except Exception as exc:
+        if args.verbose:
+            traceback.print_exc()
+        _die(f"Video sync failed: {exc}")
+
+    if result.accepted:
+        corrected_dt = datetime.fromtimestamp(result.start_epoch, tz=tz)
+        corrected_iso = corrected_dt.isoformat(timespec="milliseconds")
+        mid_dt = datetime.fromtimestamp(result.mid_start_epoch, tz=tz)
+        mid_iso = mid_dt.isoformat(timespec="milliseconds")
+        delta_s = result.start_epoch - start_guess_dt.timestamp()
+
+        print(f"\n✅  Synchronized video start for {args.camera} ({target_name})")
+        print(f"    Corrected start:  {corrected_iso}")
+        print(f"    Delta from guess: {delta_s:+.3f}s")
+        print(f"    Mid-clip start:   {mid_iso}")
+        print(f"    Slip:             {result.slip_s_per_10min:+.3f} s / 10 min")
+        print(f"    Score:            {result.score:.3f} (runner-up: {result.runner_up_score:.3f})")
+        print(f"    Agreement:        {result.agreement:.1%}")
+        print(f"    Edges used:       {result.n_edges_used}")
+        print(f"    Gap clamped:      {result.gap_clamped}")
+        print(f"\nReady to render overlay:")
+        print(f"    atspm video-overlay --target {target_name} --camera {args.camera} --video {args.video} --start {corrected_iso}\n")
+    else:
+        best_dt = datetime.fromtimestamp(result.start_epoch, tz=tz)
+        best_iso = best_dt.isoformat(timespec="milliseconds")
+
+        phase_arg = ""
+        for lamp in lamp_shapes:
+            kind, num = resolve_stopbar_target(lamp["phase"])
+            if kind == "phase":
+                phase_arg = f"--phase {num} "
+                break
+
+        print(f"\n❌  Video synchronization refused: {result.reason}")
+        print(f"    Diagnostics:")
+        print(f"      Score:            {result.score:.3f} (runner-up: {result.runner_up_score:.3f})")
+        print(f"      Agreement:        {result.agreement:.1%}")
+        print(f"      Edges used:       {result.n_edges_used}")
+        print(f"      Frames compared:  {result.n_frames_compared}")
+        print(f"      Gap clamped:      {result.gap_clamped}")
+        print(f"\nManual fallback alignment:")
+        print(f"    atspm video-locate-phase-change --target {target_name} --camera {args.camera} --video {args.video} {phase_arg}--start {best_iso}\n")
+        sys.exit(2)
+
+
 # ---------------------------------------------------------------------------
 # Report helper shims (bridge between new anchor-based processor and the
 # date-level stats / reprocess API that test_reporting.py relied on)
@@ -2709,6 +2814,34 @@ def _add_video_locate_phase_change_parser(subs: argparse._SubParsersAction) -> N
     p_vidloc.set_defaults(func=handle_video_locate_phase_change)
 
 
+def _add_video_sync_parser(subs: argparse._SubParsersAction) -> None:
+    """Attach the ``video-sync`` subcommand parser.
+
+    Single-target only, no ``--all`` -- one video = one camera, same
+    exception as the other video commands.
+    """
+    p_vidsync = subs.add_parser(
+        "video-sync",
+        help="Find corrected --start timestamp by synchronizing video signal lamps to controller events.",
+        description=(
+            "Measures signal lamps in the recorded clip and aligns them against the\n"
+            "database's controller phase and overlap states to determine an accurate\n"
+            "video --start timestamp and camera clock slip."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    group_vidsync = p_vidsync.add_mutually_exclusive_group(required=True)
+    group_vidsync.add_argument("--target", metavar="FOLDER", help="Exact intersection folder name.")
+    group_vidsync.add_argument("--targetid", metavar="ID", help="Intersection ID prefix (e.g. '2068').")
+    p_vidsync.add_argument("--camera", required=True, metavar="NAME", help="Camera name matching <camera>_shapes.csv.")
+    p_vidsync.add_argument("--video", required=True, metavar="PATH", help="Input video file; .mp4 or .ts. A relative path is resolved against <target>/video/; an absolute path is used as-is.")
+    p_vidsync.add_argument("--start-guess", required=True, metavar="ISO8601", help="Estimated timestamp of the video's first frame (local time, ISO-8601).")
+    p_vidsync.add_argument("--search", type=float, default=30.0, metavar="SECONDS", help="Half-window search duration in seconds (default: 30.0).")
+    p_vidsync.add_argument("--timezone", default=None, metavar="TZ", help="Override the timezone from metadata.json.")
+    p_vidsync.add_argument("--verbose", action="store_true", default=False, help="Print full tracebacks for any errors.")
+    p_vidsync.set_defaults(func=handle_video_sync)
+
+
 def _build_parser() -> argparse.ArgumentParser:
     """Construct and return the top-level argument parser.
 
@@ -2744,6 +2877,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_video_calibrate_shapes_parser(subs)
     _add_video_overlay_parser(subs)
     _add_video_locate_phase_change_parser(subs)
+    _add_video_sync_parser(subs)
 
     return parser
 

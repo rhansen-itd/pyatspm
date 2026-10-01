@@ -19,11 +19,13 @@ The turning-movement counter from the legacy ``spmfunctions`` tool
 out of scope -- see ``docs/ROADMAP.md``'s "Future / deferred" section.
 """
 
-from .overlay import draw_loop_overlay, draw_shape_overlay, draw_stopbar_overlay
+from .overlay import draw_lamp_overlay, draw_loop_overlay, draw_shape_overlay, draw_stopbar_overlay
 from .calibrate import calibrate_shapes
 from .processor import VideoOverlayResult, extract_labeled_clip, render_overlay
+from .sync import LAMP_DISC_RADIUS, LampMeasurement, measure_lamps, sync_video
 
 __all__ = [
+    "draw_lamp_overlay",
     "draw_loop_overlay",
     "draw_shape_overlay",
     "draw_stopbar_overlay",
@@ -31,4 +33,8 @@ __all__ = [
     "VideoOverlayResult",
     "render_overlay",
     "extract_labeled_clip",
+    "LAMP_DISC_RADIUS",
+    "LampMeasurement",
+    "measure_lamps",
+    "sync_video",
 ]

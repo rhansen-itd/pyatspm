@@ -54,8 +54,10 @@ OVERLAP_LETTER_MAP: Dict[str, int] = {f"OL{chr(ord('A') + i)}": i + 1 for i in r
 MIN_PHASE_NUMBER: int = 1
 MAX_PHASE_NUMBER: int = 16
 
+LAMP_INDICATIONS = ("green", "yellow", "red")
+
 _META_FIELDS = ["video_width", "video_height"]
-_CSV_FIELDS = ["type", "points", "color", "input", "phase", "name"]
+_CSV_FIELDS = ["type", "points", "color", "input", "phase", "name", "indication"]
 
 
 def resolve_stopbar_target(phase_field: Union[int, str]) -> Tuple[str, int]:
@@ -145,15 +147,31 @@ class ShapeConfig:
                     points.append((x, y))
 
                 color = tuple(map(int, row["color"].split(","))) if row["color"] else (0, 255, 0)
+                shape_type = row["type"]
 
-                shapes.append({
-                    "type": row["type"],
+                shape_dict = {
+                    "type": shape_type,
                     "points": points,
                     "color": color,
-                    "input": int(row["input"]) if row["input"] else None,
-                    "phase": row["phase"] or None,
+                    "input": int(row["input"]) if row.get("input") else None,
+                    "phase": row.get("phase") or None,
                     "name": row.get("name") or None,
-                })
+                }
+
+                if shape_type == "lamp":
+                    raw_ind = row.get("indication")
+                    if not raw_ind or not raw_ind.strip():
+                        raise ValueError("Lamp shape requires an indication")
+                    ind = raw_ind.strip().lower()
+                    if ind not in LAMP_INDICATIONS:
+                        raise ValueError(f"Invalid lamp indication {ind!r}: expected one of {LAMP_INDICATIONS}")
+                    shape_dict["indication"] = ind
+
+                    if not shape_dict["phase"]:
+                        raise ValueError("Lamp shape requires a phase")
+                    resolve_stopbar_target(shape_dict["phase"])
+
+                shapes.append(shape_dict)
 
         return cls(shapes=shapes, video_width=video_width, video_height=video_height)
 
@@ -177,9 +195,10 @@ class ShapeConfig:
                     shape["type"],
                     points_str,
                     color_str,
-                    shape.get("input", ""),
-                    shape.get("phase", ""),
-                    shape.get("name", ""),
+                    shape.get("input") if shape.get("input") is not None else "",
+                    shape.get("phase") if shape.get("phase") is not None else "",
+                    shape.get("name") if shape.get("name") is not None else "",
+                    shape.get("indication") if shape.get("type") == "lamp" and shape.get("indication") is not None else "",
                 ])
 
     def validate_resolution(self, actual_width: int, actual_height: int) -> None:
@@ -204,10 +223,10 @@ class ShapeConfig:
             )
 
     def relevant_phases(self) -> List[int]:
-        """Phase numbers referenced by stopbar shapes (excluding overlaps)."""
+        """Phase numbers referenced by stopbar and lamp shapes (excluding overlaps)."""
         phases = set()
         for s in self.shapes:
-            if s["type"] != "stopbar" or s["phase"] is None:
+            if s.get("type") not in ("stopbar", "lamp") or s.get("phase") is None:
                 continue
             kind, num = resolve_stopbar_target(s["phase"])
             if kind == "phase":
@@ -215,10 +234,10 @@ class ShapeConfig:
         return sorted(phases)
 
     def relevant_overlaps(self) -> List[int]:
-        """Overlap numbers (1-16) referenced by stopbar shapes."""
+        """Overlap numbers (1-16) referenced by stopbar and lamp shapes."""
         overlaps = set()
         for s in self.shapes:
-            if s["type"] != "stopbar" or s["phase"] is None:
+            if s.get("type") not in ("stopbar", "lamp") or s.get("phase") is None:
                 continue
             kind, num = resolve_stopbar_target(s["phase"])
             if kind == "overlap":
@@ -231,3 +250,7 @@ class ShapeConfig:
             s["input"] for s in self.shapes
             if s["type"] == "loop" and s["input"] is not None
         })
+
+    def lamp_shapes(self) -> List[Dict[str, Any]]:
+        """Lamp shapes in file order."""
+        return [s for s in self.shapes if s.get("type") == "lamp"]

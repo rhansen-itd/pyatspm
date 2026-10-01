@@ -84,6 +84,32 @@ def draw_stopbar_overlay(frame: np.ndarray, shape: Dict[str, Any], status: str) 
     cv2.line(frame, pt1, pt2, color, thickness=3)
 
 
+def draw_lamp_overlay(frame: np.ndarray, shape: Dict[str, Any], status: str) -> None:
+    """Draw a status dot above a signal lamp shape showing its database state.
+
+    Mutates ``frame`` in place (see module docstring).
+
+    Args:
+        frame: BGR image array to draw onto.
+        shape: A ``"lamp"``-type shape dict with ``points``.
+        status: One of ``'G'``, ``'Y'``, ``'R'``, ``'na'``.
+    """
+    pts = shape["points"]
+    if len(pts) == 1:
+        cx, cy = pts[0]
+    else:
+        cx = int(round(float(np.mean([p[0] for p in pts]))))
+        cy = int(round(float(np.mean([p[1] for p in pts]))))
+
+    center = (cx, cy - 10)
+    color = _STOPBAR_COLOR_MAP.get(status, _STOPBAR_COLOR_MAP["na"])
+
+    # Filled dot with radius 4
+    cv2.circle(frame, center, 4, color, thickness=-1)
+    # 1 px black outline
+    cv2.circle(frame, center, 4, (0, 0, 0), thickness=1)
+
+
 def draw_shape_overlay(frame: np.ndarray, shape: Dict[str, Any], status: Any) -> None:
     """Dispatch a single shape to the correct drawing function for its type.
 
@@ -91,9 +117,11 @@ def draw_shape_overlay(frame: np.ndarray, shape: Dict[str, Any], status: Any) ->
         frame: BGR image array to draw onto. Mutated in place.
         shape: A shape dict as produced by ``atspm.data.video.ShapeConfig``.
         status: ``bool`` for ``"loop"`` shapes (detector On/Off), or a
-            G/Y/R/na string for ``"stopbar"`` shapes.
+            G/Y/R/na string for ``"stopbar"`` and ``"lamp"`` shapes.
     """
     if shape["type"] == "loop":
         draw_loop_overlay(frame, shape, bool(status))
     elif shape["type"] == "stopbar":
         draw_stopbar_overlay(frame, shape, status)
+    elif shape["type"] == "lamp":
+        draw_lamp_overlay(frame, shape, str(status))

@@ -48,6 +48,9 @@ def _draw_shape_preview(img: np.ndarray, shape: Dict[str, Any]) -> None:
     elif shape["type"] == "stopbar":
         pt1, pt2 = shape["points"]
         cv2.line(img, pt1, pt2, color=(0, 0, 255), thickness=2)
+    elif shape["type"] == "lamp":
+        for pt in shape["points"]:
+            cv2.circle(img, pt, 3, shape.get("color", (0, 255, 0)), thickness=1)
 
 
 def _dist(p1: Tuple[int, int], p2: Tuple[int, int]) -> float:
@@ -74,6 +77,8 @@ def _shape_body_hit(pt: Tuple[int, int], shape: Dict[str, Any]) -> bool:
     if shape["type"] == "loop":
         contour = np.array(shape["points"], dtype=np.float32)
         return cv2.pointPolygonTest(contour, (float(pt[0]), float(pt[1])), False) >= 0
+    if shape["type"] == "lamp":
+        return any(_dist(pt, p) <= _BODY_HIT_TOLERANCE for p in shape["points"])
     return False
 
 
@@ -183,9 +188,10 @@ def calibrate_shapes(
         "Instructions:\n"
         "    - Press 'l' to switch to loop mode (4 points)\n"
         "    - Press 's' to switch to stop bar mode (2 points)\n"
+        "    - Press 'd' to switch to lamp mode (single click)\n"
         "    - Press 'c' to change color (for loops)\n"
         "    - Press 'i' to set input value (for loops)\n"
-        "    - Press 'p' to set phase value (for stop bars)\n"
+        "    - Press 'p' to set phase value (for stop bars and lamps)\n"
         "    - Press 'g' to toggle point-snapping on/off\n"
         "    - Press 'u' to undo last action\n"
         "    - Press 'e' to enter/exit edit mode\n"
@@ -219,19 +225,40 @@ def calibrate_shapes(
                 target = _find_snap_target(pt, shapes)
                 if target is not None:
                     pt = target
-            current_shape.append(pt)
-            if len(current_shape) == 4 and mode == "loop":
-                shapes.append({
-                    "type": "loop", "points": list(current_shape),
-                    "color": color, "input": input_val, "name": None,
-                })
+            if mode == "lamp":
+                ind_str = simpledialog.askstring(
+                    "Lamp Indication", "Enter lamp indication (green, yellow, or red):", parent=root,
+                )
+                if ind_str:
+                    ind = ind_str.strip().lower()
+                    if ind in ("green", "yellow", "red"):
+                        ind_color = {"green": (0, 255, 0), "yellow": (0, 255, 255), "red": (0, 0, 255)}[ind]
+                        shapes.append({
+                            "type": "lamp",
+                            "points": [pt],
+                            "color": ind_color,
+                            "input": None,
+                            "phase": phase,
+                            "name": None,
+                            "indication": ind,
+                        })
+                    else:
+                        messagebox.showerror("Indication", "Indication must be green, yellow, or red.", parent=root)
                 current_shape = []
-            elif len(current_shape) == 2 and mode == "stopbar":
-                shapes.append({
-                    "type": "stopbar", "points": list(current_shape), "phase": phase,
-                    "name": None,
-                })
-                current_shape = []
+            else:
+                current_shape.append(pt)
+                if len(current_shape) == 4 and mode == "loop":
+                    shapes.append({
+                        "type": "loop", "points": list(current_shape),
+                        "color": color, "input": input_val, "name": None,
+                    })
+                    current_shape = []
+                elif len(current_shape) == 2 and mode == "stopbar":
+                    shapes.append({
+                        "type": "stopbar", "points": list(current_shape), "phase": phase,
+                        "name": None,
+                    })
+                    current_shape = []
 
     def mouse_callback_edit(event, x, y, flags, param):
         nonlocal dragging_point, whole_drag, current_edit_index
@@ -317,6 +344,9 @@ def calibrate_shapes(
                     cv2.line(img_copy, pt1, pt2, color=(255, 255, 255), thickness=4)
                     cv2.circle(img_copy, pt1, _DOT_RADIUS + 2, (255, 255, 255), -1)
                     cv2.circle(img_copy, pt2, _DOT_RADIUS + 2, (255, 255, 255), -1)
+                elif shape["type"] == "lamp":
+                    for pt in shape["points"]:
+                        cv2.circle(img_copy, pt, _DOT_RADIUS + 2, (255, 255, 255), -1)
             else:
                 _draw_shape_preview(img_copy, shape)
 
@@ -368,13 +398,14 @@ def calibrate_shapes(
             snap_enabled = not snap_enabled
             print(f"Snapping {'enabled' if snap_enabled else 'disabled'}.")
 
-        elif key in (ord("l"), ord("s")):
-            mode = {"l": "loop", "s": "stopbar"}[chr(key)]
+        elif key in (ord("l"), ord("s"), ord("d")):
+            mode = {"l": "loop", "s": "stopbar", "d": "lamp"}[chr(key)]
             edit_shape_type = None
             edit_mode = False
             current_edit_index = -1
             dragging_point = None
             whole_drag = None
+            current_shape = []
 
         elif key == ord("c") and mode == "loop" and not edit_mode:
             color_names = list(colors.keys())
@@ -433,7 +464,7 @@ def calibrate_shapes(
                         shape["input"] = inp
             elif key == ord("p") and current_edit_index != -1:
                 shape = shapes[current_edit_index]
-                if shape["type"] == "stopbar":
+                if shape["type"] in ("stopbar", "lamp"):
                     phase_input = simpledialog.askstring(
                         "Phase Value",
                         f"Edit phase value ({_PHASE_RANGE_TEXT} or {_OVERLAP_RANGE_TEXT}):",

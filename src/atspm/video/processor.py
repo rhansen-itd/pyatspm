@@ -550,7 +550,7 @@ def _apply_shapes(
             status = status_lookup.get(("det", shape["input"]))
             if status is not None:
                 draw_shape_overlay(frame, shape, status[offset])
-        elif shape["type"] == "stopbar" and shape["phase"] is not None:
+        elif shape["type"] in ("stopbar", "lamp") and shape["phase"] is not None:
             kind, num = resolve_stopbar_target(shape["phase"])
             status = status_lookup.get((kind, num))
             if status is not None:
