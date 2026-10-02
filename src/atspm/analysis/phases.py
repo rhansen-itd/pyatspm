@@ -25,14 +25,19 @@ Clearance logic:
         Code 8 → Code 9     clear_end = Code 9 timestamp
     Phases with red clearance:
         Code 8 → Code 10 → Code 11     clear_end = Code 11 timestamp
-    Code 12 (Phase Inactive) is treated as a hard terminator if it arrives
-    before the expected clearance endpoint — covers dummy/overlap-driven phases
-    that have no yellow or a very short yellow not separately logged.
+    Code 12 (Phase Inactive) during yellow or red clearance terminates the
+    interval at the clearance boundary reached so far.  During green it does
+    **not** end the green: a phase that parents a start-delayed FYA overlap
+    logs Code 12 at the instant the overlap's permissive interval begins
+    (e.g. Ph2 at the start of 2+A, about 2 s into green) while its own green
+    continues to Code 8.  A Code 12 in green only counts as a termination
+    when no Code 8 follows before the next Code 1 (dummy phases, below).
 
 Dummy-phase handling:
     Some intersections use phases that drive overlaps and carry no independent
     yellow timing (the yellow is logged on the overlap or a following phase).
-    Such phases produce Code 1 → Code 12 with nothing in between.  By default
+    Such phases produce Code 1 → Code 12 with no Code 8 before the next
+    Code 1.  By default
     these are silently dropped (no meaningful split to report).  Pass
     ``include_no_clearance=True`` to ``phase_splits()`` to instead emit a
     green-only interval with ``YR = 0`` and ``Split = Green``.
@@ -226,6 +231,7 @@ def _build_phase_intervals(
         clear_end   = None
         yellow_end  = None
         cycle_start = None
+        inactive_ts = None   # Code 12 seen during green, not yet resolved
 
         def _emit(clr_end_ts):
             records.append(dict(
@@ -238,12 +244,23 @@ def _build_phase_intervals(
                 cycle_start=cycle_start,
             ))
 
+        def _emit_no_clearance(end_ts):
+            # Dummy phase: green-only interval ending at its Code 12.
+            nonlocal yellow_ts, yellow_end
+            if include_no_clearance:
+                yellow_ts  = end_ts
+                yellow_end = end_ts
+                _emit(end_ts)
+
         for row in grp.itertuples(index=False):
             code = row.event_code
             ts   = row.timestamp
             cs   = row.cycle_start
 
             if code == _CODE_GREEN:
+                if state == _GREEN and inactive_ts is not None:
+                    _emit_no_clearance(inactive_ts)
+                inactive_ts = None
                 green_ts    = ts
                 yellow_ts   = None
                 clear_end   = None
@@ -253,6 +270,7 @@ def _build_phase_intervals(
 
             elif code == _CODE_YELLOW:
                 if state == _GREEN:
+                    inactive_ts = None
                     yellow_ts  = ts
                     clear_end  = ts
                     yellow_end = ts
@@ -280,14 +298,20 @@ def _build_phase_intervals(
                     green_ts = None
 
             elif code == _CODE_INACTIVE:
+                if state == _GREEN:
+                    # Resolved by what follows: Code 8 means the green
+                    # continued (FYA overlap start); the next Code 1 or the
+                    # end of the segment means a dummy phase ended here.
+                    if inactive_ts is None:
+                        inactive_ts = ts
+                    continue
                 if state in (_YELLOW, _POST_YEL, _RED_CLR):
                     _emit(clear_end)
-                elif state == _GREEN and include_no_clearance:
-                    yellow_ts  = ts
-                    yellow_end = ts
-                    _emit(ts)
                 state    = _IDLE
                 green_ts = None
+
+        if state == _GREEN and inactive_ts is not None:
+            _emit_no_clearance(inactive_ts)
 
     if not records:
         return pd.DataFrame()
