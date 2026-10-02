@@ -67,6 +67,7 @@ from .critical import (
 )
 
 from .optimizer import optimize
+from .optimizer_validation import validate_plans
 
 __all__ = [
     # Decoders
@@ -109,4 +110,5 @@ __all__ = [
     'critical_movement_analysis',
     # Optimizer
     'optimize',
+    'validate_plans',
 ]

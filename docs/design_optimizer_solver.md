@@ -614,6 +614,45 @@ flag producing `Optimize_Validation_{...}.csv`:
    The CSV carries one row per plan: `coord_plan, n_cycles, c_median,
    observed_vph, predicted_vph, pct_error`, plus a printed PASS/FAIL.
 
+**Amended 2026-10-02 (step 6 design; supersedes points 1, 3 and 4 above
+where they differ; as built in `analysis/optimizer_validation.py`):**
+
+- *Saturation* is the engineer's `--saturated` declaration, as in D7's
+  amendment. The per-(phase, plan) advisory pass rate is reported
+  (`pass_rate_p{N}`) but excludes nothing.
+- *Observed* is over complete cycles only: the length is known (the next
+  start is in the same plan, with no gap marker in between), and every
+  phase under test has exactly one window. Then
+  `observed_vph = 3600·Σq / Σ cycle length`.
+- *Prediction is pairwise, not leave-one-plan-out.* LOPO can never
+  predict the plan with the longest split for a phase: its operating
+  point lies past every other plan's curve domain, and the frozen-tail
+  value under-predicts it, which biases the check toward "long cycles
+  lose". For each plan pair, the *anchor* is the plan whose median splits
+  cover the target's (within `split_cover_tol = 1 s`). Curves built from
+  the anchor's cycles alone predict both points. The anchor is in-sample
+  and the target out-of-sample. A pair neither plan covers is reported as
+  `not_covered`, not tested.
+- *Metric:* the relative change from anchor to target, predicted against
+  observed, so a level bias common to both points cancels (from
+  busiest-cycle selection, say). In-sample level bias is reported per
+  plan (`insample_pct_error`). **Ranking:** the signs agree for every
+  tested pair whose observed change is at least `rank_deadband_pct =
+  2 %`. **Magnitude:** mean |predicted − observed change| ≤
+  `change_tol_pp = 3` percentage points (replaces MAPE ≤ 10 %; the gains
+  the optimizer claims are of order 5–15 %, so a 10 % tolerance couldn't
+  discriminate). The verdict is PASS / FAIL / INCONCLUSIVE. Both
+  tolerances stay provisional.
+- *Open, flagged by this work:* D0's "≤ ~1 vehicle, same for every
+  candidate" understates the short-split bias. For `s` below the measured
+  split, `N_p(s)` counts full-rate discharge through what would be the
+  clearance. That is about saturation rate × clearance lost time (~2
+  veh/lane), and zero at the measured split, so it favours shorter splits
+  and cycles. The validation measures the model uncorrected, so this
+  shows up as a positive `change_error_pp` on long→short pairs
+  (`test_clearance_shortfall_is_caught`). Any fix to D0 is a separate
+  decision.
+
 ### Solver unit tests (`tests/analysis/test_optimizer.py`, unittest style per `tests/analysis/test_critical.py`)
 
 Synthetic curves with analytically known optima; every test asserts
