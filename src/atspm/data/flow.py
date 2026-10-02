@@ -57,7 +57,10 @@ _DET_OFF_CODE: int = 81
 # Gap marker — always included so the core sees discontinuities
 _GAP_CODE: int = -1
 
-_ALL_FLOW_CODES: List[int] = sorted(set(_PHASE_CODES) | {_DET_OFF_CODE, _GAP_CODE})
+# Codes 4/5/6 (gap-out / max-out / force-off) fill cycle_df's termination.
+_ALL_FLOW_CODES: List[int] = sorted(
+    set(_PHASE_CODES) | {4, 5, 6, _DET_OFF_CODE, _GAP_CODE}
+)
 
 
 # ---------------------------------------------------------------------------

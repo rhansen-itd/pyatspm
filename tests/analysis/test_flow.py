@@ -9,9 +9,11 @@ flow_rate(max_lost=None): the end-slack filter is off; every (window,
 _select_cycles: default mode = modal split ± tolerance, then the busiest
     pct percent of cycles by summed q.  Stratified mode = busiest pct
     percent within each (coord_plan, round(split)) stratum, pooled.
-saturation_state: per phase, pass_rate = share of (window, detector) rows
-    with lost <= max_lost; saturated = pass_rate >= threshold.  Diagnostics:
-    window_pass_rate (all lanes in a window pass) and min_lane_pass_rate.
+flow_rate termination: codes 4/5/6 in a window → gap_out/max_out/force_off.
+    Unfiltered output adds q=0 rows for lanes with no departure.
+saturation_state / saturated_cycles: a window qualifies only when it maxed
+    out or was forced off and (default) every lane has lost <= max_lost;
+    all_lanes=False judges each (window, lane) row alone.
 discharge_profiles: approach cumulative curve N(t) = SUM of per-detector
     mean cumulative counts on a uniform grid from 0 to t_dom, where t_dom
     is the earliest per-detector last supported row.  Leading rows are 0,
@@ -28,6 +30,7 @@ from atspm.analysis.flow import (
     discharge_profiles,
     flow_rate,
     rate_profiles,
+    saturated_cycles,
     saturation_state,
 )
 
@@ -41,13 +44,17 @@ def _events(cycles) -> pd.DataFrame:
     """Build a flat events frame for phase 2.
 
     Args:
-        cycles: list of ``(green_s, plan, {det: [t, ...]})``; each cycle is
-            green, then 4 s yellow and 2 s red clearance, so the split is
-            ``green_s + 6``.  Departure times are seconds after green onset.
+        cycles: list of ``(green_s, plan, {det: [t, ...]}[, term_code])``;
+            each cycle is green, then 4 s yellow and 2 s red clearance, so
+            the split is ``green_s + 6``.  Departure times are seconds after
+            green onset.  An optional termination code (4/5/6) is logged
+            with the yellow onset.
     """
     rows = []
     start = _T0
-    for green_s, plan, departures in cycles:
+    for green_s, plan, departures, *term in cycles:
+        if term:
+            rows.append((start + green_s, term[0], _PHASE, start, plan))
         phase_rows = [
             (start, 1),
             (start + green_s, 8),
@@ -75,7 +82,7 @@ def _cycle_rows(specs) -> pd.DataFrame:
         [
             dict(det=_DET_A, phase=_PHASE, green_ts=g, cycle_start=g,
                  coord_plan=float(p), split=s, green_dur=s - 6.0,
-                 clear_dur=6.0, lost=1.0, q=q)
+                 clear_dur=6.0, lost=1.0, q=q, termination="max_out")
             for g, p, s, q in specs
         ]
     )
@@ -231,55 +238,130 @@ class TestDischargeProfiles:
         assert list(prof.columns) == ["n", "inst"]
 
 
+
 def _obs(rows) -> pd.DataFrame:
-    """cycle_df rows from ``(phase, det, green_ts, lost)``."""
+    """cycle_df rows from ``(phase, det, green_ts, lost, termination)``."""
     return pd.DataFrame(
         [dict(det=d, phase=p, green_ts=g, cycle_start=g, coord_plan=1.0,
-              split=46.0, green_dur=40.0, clear_dur=6.0, lost=l, q=10)
-         for p, d, g, l in rows]
+              split=46.0, green_dur=40.0, clear_dur=6.0, lost=l, q=10,
+              termination=t)
+         for p, d, g, l, t in rows]
     )
+
+
+class TestFlowRateTermination:
+
+    def test_termination_named_per_window(self):
+        events = _events([
+            (40.0, 1, {_DET_A: [5.0, 40.0]}, 5),
+            (40.0, 1, {_DET_A: [5.0, 40.0]}, 6),
+            (40.0, 1, {_DET_A: [5.0, 40.0]}, 4),
+            (40.0, 1, {_DET_A: [5.0, 40.0]}),
+        ])
+        cycle_df, _ = flow_rate(events, _PHASE, [_DET_A])
+        assert cycle_df["termination"].tolist()[:3] == [
+            "max_out", "force_off", "gap_out"]
+        assert pd.isna(cycle_df["termination"].iloc[3])
+
+    def test_other_phase_termination_ignored(self):
+        events = _events([(40.0, 1, {_DET_A: [5.0, 40.0]})])
+        events.loc[len(events)] = (_T0 + 40.0, 5, 6, _T0, 1)
+        cycle_df, _ = flow_rate(events, _PHASE, [_DET_A])
+        assert pd.isna(cycle_df["termination"].iloc[0])
+
+    def test_unfiltered_adds_empty_lane_rows(self):
+        events = _events([(40.0, 1, {_DET_A: [5.0, 40.0]}, 5)])
+        cycle_df, vehicle_df = flow_rate(events, _PHASE, [_DET_A, _DET_B],
+                                         max_lost=None)
+        b = cycle_df.loc[cycle_df["det"] == _DET_B].iloc[0]
+        assert b["q"] == 0
+        assert b["lost"] == pytest.approx(46.0)   # the whole window
+        assert b["termination"] == "max_out"
+        assert set(vehicle_df["det"]) == {_DET_A}
+
+    def test_filtered_has_no_empty_lane_rows(self):
+        events = _events([(40.0, 1, {_DET_A: [5.0, 40.0]}, 5)])
+        cycle_df, _ = flow_rate(events, _PHASE, [_DET_A, _DET_B])
+        assert set(cycle_df["det"]) == {_DET_A}
 
 
 class TestSaturationState:
 
-    def test_pooled_rate_and_diagnostics(self):
-        # Phase 2: lane A passes 4/4; lane B passes 2/4.
-        # Windows 1-2 all pass, 3-4 fail on B.
-        rows = [(2, _DET_A, g, 3.0) for g in (1.0, 2.0, 3.0, 4.0)]
-        rows += [(2, _DET_B, 1.0, 3.0), (2, _DET_B, 2.0, 10.0),
-                 (2, _DET_B, 3.0, 25.0), (2, _DET_B, 4.0, 10.01)]
-        out = saturation_state(_obs(rows)).iloc[0]
+    # Phase 2, lanes A and B, four windows:
+    #   w1 max-out, both lanes pass        → qualifies
+    #   w2 force-off, B fails (lost 25)    → fails all-lanes, A row passes
+    #   w3 gap-out, both pass              → never qualifies
+    #   w4 max-out, both pass              → qualifies
+    _ROWS = [
+        (2, _DET_A, 1.0, 3.0, "max_out"), (2, _DET_B, 1.0, 10.0, "max_out"),
+        (2, _DET_A, 2.0, 3.0, "force_off"), (2, _DET_B, 2.0, 25.0, "force_off"),
+        (2, _DET_A, 3.0, 3.0, "gap_out"), (2, _DET_B, 3.0, 3.0, "gap_out"),
+        (2, _DET_A, 4.0, 3.0, "max_out"), (2, _DET_B, 4.0, 3.0, "max_out"),
+    ]
+
+    def test_all_lanes_default(self):
+        out = saturation_state(_obs(self._ROWS)).iloc[0]
         assert out["phase"] == 2
         assert out["n_cycles"] == 4
         assert out["n_obs"] == 8
-        assert out["pass_rate"] == pytest.approx(0.75)   # 10.0 is a pass
-        assert out["window_pass_rate"] == pytest.approx(0.5)
-        assert out["min_lane_pass_rate"] == pytest.approx(0.5)
-        assert not out["saturated"]                       # 0.75 < 0.8
+        assert out["capped_rate"] == pytest.approx(0.75)
+        assert out["pass_rate"] == pytest.approx(0.5)      # w1, w4
+        assert out["min_lane_pass_rate"] == pytest.approx(0.5)   # B: w1, w4
+        assert not out["saturated"]
+
+    def test_per_lane_option(self):
+        out = saturation_state(_obs(self._ROWS), all_lanes=False).iloc[0]
+        assert out["pass_rate"] == pytest.approx(5 / 8)    # w1×2, w2 A, w4×2
+
+    def test_gap_out_never_saturates(self):
+        rows = [(2, _DET_A, g, 1.0, "gap_out") for g in (1.0, 2.0, 3.0)]
+        out = saturation_state(_obs(rows)).iloc[0]
+        assert out["pass_rate"] == 0.0 and not out["saturated"]
+
+    def test_missing_termination_does_not_qualify(self):
+        rows = [(2, _DET_A, 1.0, 1.0, np.nan)]
+        assert not saturation_state(_obs(rows))["saturated"].iloc[0]
 
     def test_threshold_and_max_lost_are_parameters(self):
-        rows = [(2, _DET_A, g, l) for g, l in
+        rows = [(2, _DET_A, g, l, "max_out") for g, l in
                 ((1.0, 2.0), (2.0, 4.0), (3.0, 6.0), (4.0, 8.0), (5.0, 30.0))]
         assert saturation_state(_obs(rows))["saturated"].iloc[0]          # 0.8
         assert not saturation_state(_obs(rows), max_lost=5.0)["saturated"].iloc[0]
         assert not saturation_state(_obs(rows), threshold=0.9)["saturated"].iloc[0]
 
     def test_one_row_per_phase_sorted(self):
-        rows = [(6, _DET_A, 1.0, 30.0), (2, _DET_B, 1.0, 1.0)]
+        rows = [(6, _DET_A, 1.0, 30.0, "max_out"), (2, _DET_B, 1.0, 1.0, "force_off")]
         out = saturation_state(_obs(rows))
         assert out["phase"].tolist() == [2, 6]
         assert out["saturated"].tolist() == [True, False]
 
-    def test_from_unfiltered_flow_rate(self):
-        events = _events([(40.0, 1, {_DET_A: [5.0, 20.0, 40.0]}),
-                          (40.0, 1, {_DET_A: [5.0, 10.0]})])
-        cycle_df, _ = flow_rate(events, _PHASE, [_DET_A], max_lost=None)
+    def test_empty_lane_fails_window_end_to_end(self):
+        # B never departs in the max-out window: its zero row fails it.
+        events = _events([(40.0, 1, {_DET_A: [5.0, 20.0, 40.0]}, 5),
+                          (40.0, 1, _STEADY, 5)])
+        cycle_df, _ = flow_rate(events, _PHASE, [_DET_A, _DET_B],
+                                max_lost=None)
         out = saturation_state(cycle_df).iloc[0]
         assert out["n_cycles"] == 2
         assert out["pass_rate"] == pytest.approx(0.5)
 
     def test_empty(self):
-        out = saturation_state(pd.DataFrame(columns=_obs(
-            [(2, _DET_A, 1.0, 1.0)]).columns))
+        out = saturation_state(_obs([(2, _DET_A, 1.0, 1.0, "max_out")]).iloc[0:0])
         assert out.empty
         assert "saturated" in out.columns
+
+
+class TestSaturatedCycles:
+
+    def test_matches_classifier_rule(self):
+        df = _obs(TestSaturationState._ROWS)
+        all_l = saturated_cycles(df)
+        assert sorted(set(all_l["green_ts"])) == [1.0, 4.0]
+        assert len(all_l) == 4                    # whole windows kept
+        per = saturated_cycles(df, all_lanes=False)
+        assert len(per) == 5
+        assert per.loc[per["green_ts"] == 2.0, "det"].tolist() == [_DET_A]
+
+    def test_empty(self):
+        assert saturated_cycles(_obs([]).reindex(columns=_obs(
+            [(2, _DET_A, 1.0, 1.0, "max_out")]).columns)).empty

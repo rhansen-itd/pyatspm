@@ -21,3 +21,4 @@ See CLAUDE.md "Documentation Workflow" for the rules.
 - [src/atspm/analysis/__init__.py] export discharge_profiles
 - [src/atspm/cli.py] flow --stratify; flow now reads Det_P{N}_Stop_Bar as well as _Stopbar
 - [src/atspm/analysis/__init__.py] export saturation_state
+- [src/atspm/analysis/__init__.py] export saturated_cycles; flow_rate cycle_df gains termination column (Flow_Cycle CSV too)

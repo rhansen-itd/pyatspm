@@ -40,7 +40,8 @@ The ``normalize`` parameter selects how the overhead is estimated; see
 ``discharge_profiles`` uses the same cycle selection but returns the raw
 approach cumulative curve ``N(t)``, unnormalised, for the throughput
 optimizer.  ``saturation_state`` classifies phases as saturated from the
-end-slack pass rate of an unfiltered ``flow_rate`` result.
+share of max-out / force-off cycles in an unfiltered ``flow_rate``
+result, and ``saturated_cycles`` returns those cycles for the curves.
 
 Gap Marker Rule
 ---------------
@@ -56,6 +57,9 @@ Event code reference
     8   – Phase Begin Yellow Clearance
     9   – Phase End Yellow Clearance
     10  – Phase Begin Red Clearance
+    4   – Phase Gap Out    ┐ termination, logged with
+    5   – Phase Max Out    │ the yellow onset (Code 8)
+    6   – Phase Force Off  ┘
     11  – Phase End Red Clearance   (exclusive end of split window)
     12  – Phase Inactive
     81  – Detector Off  (vehicle departing the stop-bar detector)
@@ -82,6 +86,12 @@ _GAP_CODE: int = -1
 _CODE_GREEN = 1
 _CODE_DET_OFF = 81
 
+# Phase termination codes, logged at the same timestamp as yellow onset.
+# When a window holds more than one, the highest code wins (force-off over
+# max-out over gap-out).
+_TERMINATION_NAMES = {4: "gap_out", 5: "max_out", 6: "force_off"}
+_SATURATED_TERMINATIONS = frozenset({"max_out", "force_off"})
+
 # Phase codes needed to drive _build_phase_intervals
 _PHASE_CODES = frozenset({1, 8, 9, 10, 11, 12})
 
@@ -97,6 +107,7 @@ _CYCLE_SCHEMA = [
     "clear_dur",
     "lost",
     "q",
+    "termination",
 ]
 
 # Schema for the per-vehicle detail (one row per detector departure)
@@ -209,6 +220,54 @@ def _build_split_windows(
         .sort_values("green_ts")
         .reset_index(drop=True)
     )
+
+
+def _window_terminations(
+    events_df: pd.DataFrame,
+    phase: int,
+    green_f: np.ndarray,
+    clear_f: np.ndarray,
+) -> np.ndarray:
+    """Name how each split window's green ended.
+
+    Codes 4/5/6 for *phase* are assigned to windows with the same
+    ``searchsorted`` containment as departures.  They share the yellow
+    onset's timestamp, so they fall inside ``[green_ts, clear_end_ts)``.
+
+    Args:
+        events_df: Flat events DataFrame (``timestamp``, ``event_code``,
+            ``parameter``).
+        phase: Signal phase number.
+        green_f: Window starts as epoch floats, sorted ascending.
+        clear_f: Window exclusive ends as epoch floats.
+
+    Returns:
+        Object array, one entry per window: ``'gap_out'``, ``'max_out'``,
+        ``'force_off'``, or NaN when no termination code was logged (e.g.
+        codes 4–6 not loaded).  The highest code wins when several land in
+        one window.
+    """
+    out = np.full(len(green_f), np.nan, dtype=object)
+    term = events_df.loc[
+        events_df["event_code"].isin(list(_TERMINATION_NAMES))
+        & (events_df["parameter"] == phase),
+        ["timestamp", "event_code"],
+    ]
+    if term.empty or len(green_f) == 0:
+        return out
+
+    ts = _ts_to_float(term["timestamp"])
+    win = np.searchsorted(green_f, ts, side="right") - 1
+    ok = (win >= 0) & (ts < clear_f[np.clip(win, 0, None)])
+    if not ok.any():
+        return out
+
+    best = (
+        pd.Series(term["event_code"].to_numpy()[ok], index=win[ok])
+        .groupby(level=0).max()
+    )
+    out[best.index.to_numpy()] = best.map(_TERMINATION_NAMES).to_numpy()
+    return out
 
 
 def _empty_results() -> Tuple[pd.DataFrame, pd.DataFrame]:
@@ -437,6 +496,12 @@ def flow_rate(
               lost         float   – end slack in seconds (≤ max_lost
                                      unless max_lost is None)
               q            int     – vehicles discharged in the window
+              termination  str     – 'gap_out' / 'max_out' / 'force_off',
+                                     NaN when codes 4–6 are absent
+
+          With ``max_lost=None`` every (window, detector) pair has a row:
+          a lane with no departure in a window gets ``q = 0`` and ``lost``
+          equal to the whole window.
 
         * ``vehicle_df`` — one row per departure::
 
@@ -447,7 +512,8 @@ def flow_rate(
               headway      float   – seconds to next departure (NaN for last)
 
         Both empty (correct schemas) when no qualifying windows or
-        departures exist, or when *detector_ids* is empty.
+        departures exist, or when *detector_ids* is empty.  Codes 4/5/6 in
+        *events_df* fill ``termination``; without them it is all NaN.
     """
     if events_df.empty or not detector_ids:
         return _empty_results()
@@ -511,6 +577,24 @@ def flow_rate(
         veh.groupby(["win", "det"], as_index=False)
         .agg(q=("n", "max"), lost=("_lost", "first"))
     )
+    if max_lost is None:
+        # Unfiltered output covers every (window, detector), so a lane with
+        # no departure in a window is visible to a classifier; its slack is
+        # the whole window.
+        full = pd.MultiIndex.from_product(
+            [np.arange(len(windows)), sorted(set(int(d) for d in detector_ids))],
+            names=["win", "det"],
+        ).to_frame(index=False)
+        summary = full.merge(summary, on=["win", "det"], how="left")
+        empty_lane = summary["q"].isna()
+        win_len = clear_f - green_f
+        summary.loc[empty_lane, "lost"] = win_len[summary.loc[empty_lane, "win"].to_numpy()]
+        summary["q"] = summary["q"].fillna(0).astype(int)
+
+    summary["termination"] = _window_terminations(
+        events_df, phase, green_f, clear_f
+    )[summary["win"].to_numpy()]
+
     win_cols = (
         windows[["green_ts", "cycle_start", "coord_plan",
                  "split_dur", "green_dur", "clear_dur"]]
@@ -803,42 +887,88 @@ def discharge_profiles(
     return selected, profile_df
 
 
+
 _SATURATION_SCHEMA = [
     "phase",
     "n_cycles",
     "n_obs",
+    "capped_rate",
     "pass_rate",
-    "window_pass_rate",
     "min_lane_pass_rate",
     "saturated",
 ]
+
+
+def _saturation_pass(
+    cycle_df: pd.DataFrame,
+    max_lost: float,
+    all_lanes: bool,
+) -> pd.Series:
+    """Boolean pass flag per *cycle_df* row (see :func:`saturated_cycles`)."""
+    capped = cycle_df["termination"].isin(_SATURATED_TERMINATIONS)
+    lane_ok = cycle_df["lost"].astype(float) <= max_lost
+    if not all_lanes:
+        return capped & lane_ok
+    every_lane = lane_ok.groupby(
+        [cycle_df["phase"], cycle_df["green_ts"]]
+    ).transform("all")
+    return capped & every_lane
+
+
+def saturated_cycles(
+    cycle_df: pd.DataFrame,
+    max_lost: float = 10.0,
+    all_lanes: bool = True,
+) -> pd.DataFrame:
+    """Keep the rows of an unfiltered ``cycle_df`` that count as saturated.
+
+    A window qualifies only when its green ended by **max-out or
+    force-off**.  End slack alone can't tell a gap-out from a saturated
+    phase: ``lost`` runs to the end of red clearance, so a phase that gaps
+    out a second or two after its last vehicle still scores under
+    ``max_lost``.  On top of that:
+
+    * ``all_lanes=True`` (default) — every lane in the window must have
+      ``lost <= max_lost``; all its rows are kept or dropped together.
+    * ``all_lanes=False`` — each (window, lane) row is judged alone.
+
+    Feed the result to :func:`discharge_profiles` so the curves use the
+    same cycles that :func:`saturation_state` counts.
+
+    Args:
+        cycle_df: Unfiltered per-cycle summary from
+            ``flow_rate(..., max_lost=None)``, whose ``termination``
+            column needs codes 4–6 in the events.
+        max_lost: Per-lane end-slack limit in seconds.  Default ``10.0``.
+        all_lanes: Require every lane of a window to pass.  Default
+            ``True``.
+
+    Returns:
+        The qualifying rows of *cycle_df*, index reset.
+    """
+    if cycle_df.empty:
+        return cycle_df.iloc[0:0]
+    keep = _saturation_pass(cycle_df, max_lost, all_lanes)
+    return cycle_df.loc[keep].reset_index(drop=True)
 
 
 def saturation_state(
     cycle_df: pd.DataFrame,
     max_lost: float = 10.0,
     threshold: float = 0.8,
+    all_lanes: bool = True,
 ) -> pd.DataFrame:
-    """Classify each phase as saturated from its end-slack pass rate.
+    """Classify each phase as saturated from its share of capped cycles.
 
-    A (window, detector) observation passes when its end slack ``lost`` is
-    at most *max_lost*: the lane was still discharging near the end of the
-    split.  A phase is saturated when the share of passing observations
-    reaches *threshold*.
+    Uses the per-row rule of :func:`saturated_cycles`: the window maxed
+    out or was forced off, and (``all_lanes=True``, the default) every lane
+    had ``lost <= max_lost``.  ``pass_rate`` is the share of windows that
+    qualify; with ``all_lanes=False`` it is the share of (window, lane)
+    rows.  A phase is saturated when ``pass_rate`` reaches *threshold*.
 
-    The input must be **unfiltered** — ``flow_rate(..., max_lost=None)``.
-    A ``cycle_df`` already filtered by ``flow_rate``'s default
-    ``max_lost`` holds only passing rows, so every phase would read 1.0.
-    For a per-period verdict (e.g. per coordination plan), filter
-    *cycle_df* to that period first.
-
-    Two diagnostics sit beside the verdict, because how lanes combine
-    into a phase is still open (``docs/ROADMAP.md``, optimizer entry):
-    ``window_pass_rate`` counts a window as passing only when every lane
-    observed in it passes, and ``min_lane_pass_rate`` is the weakest
-    lane's own rate.  A lane with no departures in a window has no row in
-    ``cycle_df`` and so does not count against that window.
-
+    The input must be **unfiltered** — ``flow_rate(..., max_lost=None)`` —
+    so that failing lanes and empty lanes have rows.  For a per-period
+    verdict (e.g. per coordination plan), filter *cycle_df* first.
     ``threshold=0.8`` is provisional until real distributions are seen.
 
     Gap Marker Rule: the input comes from :func:`flow_rate`, whose split
@@ -846,20 +976,24 @@ def saturation_state(
 
     Args:
         cycle_df: Unfiltered per-cycle summary from :func:`flow_rate`.
-        max_lost: End-slack limit in seconds for an observation to pass.
-            Default ``10.0``.
+        max_lost: Per-lane end-slack limit in seconds.  Default ``10.0``.
         threshold: Minimum ``pass_rate`` for a saturated verdict.
             Default ``0.8``.
+        all_lanes: Require every lane of a window to pass.  Default
+            ``True``.
 
     Returns:
         One row per phase, sorted by phase::
 
             phase               int
             n_cycles            int    – split windows observed
-            n_obs               int    – (window, detector) observations
-            pass_rate           float  – share of observations passing
-            window_pass_rate    float  – share of windows where all pass
-            min_lane_pass_rate  float  – lowest per-detector pass rate
+            n_obs               int    – (window, detector) rows
+            capped_rate         float  – share of windows ended by
+                                         max-out or force-off
+            pass_rate           float  – share of windows (or rows, when
+                                         all_lanes=False) that qualify
+            min_lane_pass_rate  float  – lowest per-lane share of rows
+                                         qualifying on their own
             saturated           bool   – pass_rate >= threshold
 
         Empty (same columns) when *cycle_df* is empty.
@@ -868,20 +1002,29 @@ def saturation_state(
         return pd.DataFrame(columns=_SATURATION_SCHEMA)
 
     obs = cycle_df[["phase", "det", "green_ts"]].copy()
-    obs["_pass"] = cycle_df["lost"].astype(float) <= max_lost
+    obs["_capped"] = cycle_df["termination"].isin(_SATURATED_TERMINATIONS)
+    obs["_lane"] = _saturation_pass(cycle_df, max_lost, all_lanes=False)
+    obs["_pass"] = _saturation_pass(cycle_df, max_lost, all_lanes)
 
-    by_phase = obs.groupby("phase")["_pass"].agg(n_obs="size", pass_rate="mean")
-    windows = obs.groupby(["phase", "green_ts"])["_pass"].all()
+    windows = obs.groupby(["phase", "green_ts"]).agg(
+        _capped=("_capped", "first"), _pass=("_pass", "all")
+    )
     by_window = windows.groupby(level="phase").agg(
-        n_cycles="size", window_pass_rate="mean"
+        n_cycles=("_pass", "size"),
+        capped_rate=("_capped", "mean"),
+        _window_rate=("_pass", "mean"),
+    )
+    by_phase = obs.groupby("phase").agg(
+        n_obs=("_pass", "size"), _row_rate=("_pass", "mean")
     )
     by_lane = (
-        obs.groupby(["phase", "det"])["_pass"].mean()
+        obs.groupby(["phase", "det"])["_lane"].mean()
         .groupby(level="phase").min()
         .rename("min_lane_pass_rate")
     )
 
-    out = by_phase.join(by_window).join(by_lane).reset_index()
+    out = by_window.join(by_phase).join(by_lane).reset_index()
+    out["pass_rate"] = out["_window_rate"] if all_lanes else out["_row_rate"]
     out["phase"] = out["phase"].astype(int)
     out["saturated"] = out["pass_rate"] >= threshold
     return out[_SATURATION_SCHEMA].sort_values("phase").reset_index(drop=True)
