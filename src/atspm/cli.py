@@ -1103,7 +1103,10 @@ def _optimize_single_intersection(target_name: str, args: argparse.Namespace) ->
             f"Run 'atspm process --target {target_name}' first."
         )
 
-    print(f"\n🚦  Throughput optimization for {int_name}")
+    if getattr(args, "validate", False):
+        print(f"\n🚦  Throughput validation for {int_name}")
+    else:
+        print(f"\n🚦  Throughput optimization for {int_name}")
     print(f"    DB:        {db_path.name}")
     print(f"    Window:    {args.start} → {args.end}")
     print(f"    Saturated: {args.saturated}")
@@ -1111,28 +1114,45 @@ def _optimize_single_intersection(target_name: str, args: argparse.Namespace) ->
     engine = OptimizerEngine(db_path=db_path, timezone=timezone)
 
     try:
-        engine.optimize(
-            start=args.start,
-            end=args.end,
-            saturated=args.saturated,
-            plans=args.plans,
-            pct=args.pct,
-            split_tolerance=args.split_tolerance,
-            stratify=args.stratify,
-            max_lost=args.max_lost,
-            sat_threshold=args.sat_threshold,
-            demand_stat=args.demand_stat,
-            default_min_split=args.default_min_split,
-            c_min=args.c_min,
-            c_max=args.c_max,
-            c_step=args.c_step,
-            flat_tol_pct=args.flat_tol_pct,
-            boundary_rate_tol=100.0,
-            bin_len=args.bin_len,
-            exclude_missing=not args.include_missing,
-            make_plot=not args.no_plot,
-            output_dir=output_dir,
-        )
+        if getattr(args, "validate", False):
+            engine.validate(
+                start=args.start,
+                end=args.end,
+                saturated=args.saturated,
+                plans=args.plans,
+                pct=args.pct,
+                split_tolerance=args.split_tolerance,
+                max_lost=args.max_lost,
+                sat_threshold=args.sat_threshold,
+                min_plan_cycles=args.min_plan_cycles,
+                split_cover_tol=args.split_cover_tol,
+                rank_deadband_pct=args.rank_deadband_pct,
+                change_tol_pp=args.change_tol_pp,
+                output_dir=output_dir,
+            )
+        else:
+            engine.optimize(
+                start=args.start,
+                end=args.end,
+                saturated=args.saturated,
+                plans=args.plans,
+                pct=args.pct,
+                split_tolerance=args.split_tolerance,
+                stratify=args.stratify,
+                max_lost=args.max_lost,
+                sat_threshold=args.sat_threshold,
+                demand_stat=args.demand_stat,
+                default_min_split=args.default_min_split,
+                c_min=args.c_min,
+                c_max=args.c_max,
+                c_step=args.c_step,
+                flat_tol_pct=args.flat_tol_pct,
+                boundary_rate_tol=100.0,
+                bin_len=args.bin_len,
+                exclude_missing=not args.include_missing,
+                make_plot=not args.no_plot,
+                output_dir=output_dir,
+            )
     except Exception as exc:
         if args.verbose:
             traceback.print_exc()
@@ -2675,7 +2695,9 @@ def _add_optimize_parser(subs: argparse._SubParsersAction) -> None:
             "throughput Σ 3600·N_p(s_p) / C over the saturated phases, using\n"
             "measured cumulative discharge curves. Saturated phases are the\n"
             "engineer's declaration (--saturated); the end-slack classifier is\n"
-            "printed as an advisory only.\n\n"
+            "printed as an advisory only.\n"
+            "--validate tests the throughput model against the existing TOD plans\n"
+            "before its recommendations are trusted.\n\n"
             "Outputs (CSV and interactive HTML plots) are saved to:\n"
             "  intersections/<target>/outputs/"
         ),
@@ -2821,6 +2843,40 @@ def _add_optimize_parser(subs: argparse._SubParsersAction) -> None:
         default=None,
         metavar="TZ",
         help="Override the timezone from metadata.json (e.g. 'US/Pacific').",
+    )
+    p_opt.add_argument(
+        "--validate",
+        action="store_true",
+        default=False,
+        help="Run model validation instead of the optimizer.",
+    )
+    p_opt.add_argument(
+        "--min-plan-cycles",
+        type=int,
+        default=30,
+        metavar="N",
+        help="Minimum complete cycles for a plan to be tested (applies to --validate only, default: 30).",
+    )
+    p_opt.add_argument(
+        "--split-cover-tol",
+        type=float,
+        default=1.0,
+        metavar="SEC",
+        help="Split cover tolerance in seconds (applies to --validate only, default: 1.0).",
+    )
+    p_opt.add_argument(
+        "--rank-deadband-pct",
+        type=float,
+        default=2.0,
+        metavar="PCT",
+        help="Ranking deadband percent (applies to --validate only, default: 2.0).",
+    )
+    p_opt.add_argument(
+        "--change-tol-pp",
+        type=float,
+        default=3.0,
+        metavar="PP",
+        help="Magnitude tolerance in percentage points (applies to --validate only, default: 3.0).",
     )
     p_opt.add_argument(
         "--verbose",

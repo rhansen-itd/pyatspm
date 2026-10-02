@@ -67,6 +67,7 @@ from .critical import (
 from .optimizer import (
     OptimizerEngine,
     get_optimization,
+    get_validation,
 )
 
 from .video import (
@@ -125,6 +126,7 @@ __all__ = [
     # Optimizer
     'OptimizerEngine',
     'get_optimization',
+    'get_validation',
     # Video
     'ShapeConfig',
     'resolve_stopbar_target',

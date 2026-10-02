@@ -12,9 +12,9 @@ Package Location: src/atspm/data/optimizer.py
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -31,6 +31,7 @@ from ..analysis.critical import (
 )
 from ..analysis.flow import discharge_profiles, flow_rate, saturation_state
 from ..analysis.optimizer import optimize
+from ..analysis.optimizer_validation import validate_plans
 from ..plotting.optimizer import (
     plot_allocation,
     plot_marginal_rates,
@@ -56,6 +57,25 @@ def _to_json_compatible(obj: Any) -> Any:
     if isinstance(obj, (np.floating, float)):
         return float(obj)
     return obj
+
+
+def _format_date_range_stamp(start_dt: datetime, end_dt: datetime) -> str:
+    """Format start and end datetimes into a filename timestamp string.
+
+    Sub-day windows include the time component (``HHMM``) in the
+    window stamps so peak-period runs on the same day don't collide.
+    """
+    def stamp(dt: datetime) -> str:
+        if (dt.hour, dt.minute) == (0, 0):
+            return f"{dt:%Y_%m_%d}"
+        return f"{dt:%Y_%m_%d_%H%M}"
+
+    end_label = (
+        end_dt - timedelta(days=1)
+        if (end_dt.hour, end_dt.minute) == (0, 0)
+        else end_dt
+    )
+    return f"{stamp(start_dt)}-{stamp(end_label)}"
 
 
 class OptimizerEngine:
@@ -383,6 +403,169 @@ class OptimizerEngine:
 
         return results
 
+    def validate(
+        self,
+        start: Union[str, datetime],
+        end: Union[str, datetime],
+        saturated: List[int],
+        plans: Optional[List[int]] = None,
+        pct: float = 1.0,
+        split_tolerance: float = 0.10,
+        max_lost: float = 10.0,
+        sat_threshold: float = 0.8,
+        min_plan_cycles: int = 30,
+        split_cover_tol: float = 1.0,
+        rank_deadband_pct: float = 2.0,
+        change_tol_pp: float = 3.0,
+        output_dir: Optional[Union[str, Path]] = None,
+    ) -> Optional[Dict[str, object]]:
+        """Test the optimizer's throughput model against existing TOD plans.
+
+        Args:
+            start: Period start (string or datetime).
+            end: Period end (string or datetime).
+            saturated: Declared saturated phase numbers.
+            plans: Optional list of coordination plan IDs to filter cycles.
+            pct: Percentage of the busiest modal-split cycles to keep.
+            split_tolerance: Split duration tolerance around modal split.
+            max_lost: Per-lane end-slack limit for advisory saturation.
+            sat_threshold: Advisory threshold share of qualifying cycles.
+            min_plan_cycles: Minimum complete cycles for a plan to be tested.
+            split_cover_tol: Tolerance in seconds for split coverage.
+            rank_deadband_pct: Deadband percent for ranking sign test.
+            change_tol_pp: Magnitude tolerance in percentage points.
+            output_dir: If set, write CSV outputs to this directory and return None.
+
+        Returns:
+            Dictionary with 'plans', 'pairs', and 'verdict', or None if output_dir
+            is specified, or empty dict if execution fails.
+
+        Raises:
+            ValueError: If saturated is empty.
+        """
+        # 1. Arguments
+        if not saturated:
+            raise ValueError("saturated phase list cannot be empty.")
+
+        # 2. Range and config
+        start_dt, end_dt = self._parse_range(start, end)
+        config = self._get_config(start_dt)
+        if not config:
+            print("  ⚠️  Validation: no configuration found — import int_cfg.csv first.")
+            return None if output_dir is not None else {}
+
+        # 3. Cycles
+        start_epoch = to_epoch(start_dt, self.timezone)
+        end_epoch = to_epoch(end_dt, self.timezone)
+        cycles_df = _query_cycles(self.db_path, start_epoch, end_epoch)
+        if cycles_df.empty:
+            print("  ⚠️  Validation: no cycles found in the requested window.")
+            return None if output_dir is not None else {}
+
+        if plans is not None:
+            cycles_df = cycles_df.loc[cycles_df["coord_plan"].isin(plans)]
+            if cycles_df.empty:
+                print("  ⚠️  Validation: no cycles found for specified plans.")
+                return None if output_dir is not None else {}
+
+        # 4. Events, as UTC epoch floats
+        start_utc = datetime.fromtimestamp(start_epoch, tz=timezone.utc)
+        end_utc = datetime.fromtimestamp(end_epoch, tz=timezone.utc)
+        events = get_events_with_cycles_df(
+            self.db_path,
+            start_utc,
+            end_utc,
+            event_codes=_ALL_FLOW_CODES,
+        )
+        gap_ts = events.loc[events["event_code"] == -1, "timestamp"].to_numpy()
+
+        # 5. Phases under test
+        all_stopbar_sets = _parse_stopbar_sets(config)
+        valid_phases = []
+        for p in saturated:
+            p_int = int(p)
+            dets = all_stopbar_sets.get(p_int)
+            if not dets:
+                print(f"  ⚠️  Ph{p_int} has no stop-bar detectors and is not validated.")
+            else:
+                valid_phases.append(p_int)
+
+        if not valid_phases:
+            return None if output_dir is not None else {}
+
+        # 6. Flow
+        flow: Dict[int, Tuple[pd.DataFrame, pd.DataFrame]] = {}
+        for p in sorted(set(valid_phases)):
+            flow[p] = flow_rate(
+                events, p, sorted(all_stopbar_sets[p]), max_lost=None, plans=plans
+            )
+
+        # 7. Core
+        res = validate_plans(
+            flow,
+            cycles_df,
+            gap_ts=gap_ts,
+            pct=pct,
+            split_tolerance=split_tolerance,
+            max_lost=max_lost,
+            sat_threshold=sat_threshold,
+            min_plan_cycles=min_plan_cycles,
+            split_cover_tol=split_cover_tol,
+            rank_deadband_pct=rank_deadband_pct,
+            change_tol_pp=change_tol_pp,
+        )
+
+        # 8. Console summary
+        print(f"\nValidation Summary:")
+        print(f"  Plans:")
+        for row in res["plans"].itertuples(index=False):
+            err_str = (
+                f"{row.insample_pct_error:+.1f}%"
+                if pd.notna(row.insample_pct_error)
+                else "NaN"
+            )
+            print(
+                f"    Plan {int(row.coord_plan)}: {int(row.n_cycles)} cycles, "
+                f"C={row.c_median:.1f} s, obs={row.observed_vph:.1f} vph, "
+                f"in-sample err={err_str}"
+            )
+
+        print(f"  Pairs:")
+        for row in res["pairs"].itertuples(index=False):
+            a = int(row.anchor_plan)
+            b = int(row.target_plan)
+            if row.status == "tested":
+                print(
+                    f"    Plan {a} → Plan {b}: {row.status}, "
+                    f"obs={row.observed_change_pct:+.1f}%, "
+                    f"pred={row.predicted_change_pct:+.1f}%, "
+                    f"err={row.change_error_pp:+.1f} pp"
+                )
+            else:
+                print(f"    Plan {a} → Plan {b}: {row.status}")
+
+        verdict_info = res["verdict"]
+        verdict = verdict_info["verdict"]
+        print(f"Validation: {verdict}")
+        mean_err = verdict_info.get("mean_abs_change_error_pp")
+        tol = verdict_info.get("change_tol_pp")
+        if mean_err is not None and pd.notna(mean_err):
+            print(
+                f"  Mean absolute change error: {mean_err:.2f} pp (tol: {tol:.1f} pp)"
+            )
+        else:
+            print(f"  Mean absolute change error: NaN (tol: {tol:.1f} pp)")
+
+        for w in verdict_info.get("warnings", []):
+            print(f"  ⚠️  {w}")
+
+        # 9 & 10. Output dir or return
+        if output_dir is not None:
+            self._write_validation_outputs(res, output_dir, start_dt, end_dt)
+            return None
+
+        return res
+
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
@@ -436,18 +619,7 @@ class OptimizerEngine:
         """
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
-
-        def stamp(dt: datetime) -> str:
-            if (dt.hour, dt.minute) == (0, 0):
-                return f"{dt:%Y_%m_%d}"
-            return f"{dt:%Y_%m_%d_%H%M}"
-
-        end_label = (
-            end_dt - timedelta(days=1)
-            if (end_dt.hour, end_dt.minute) == (0, 0)
-            else end_dt
-        )
-        date_str = f"{stamp(start_dt)}-{stamp(end_label)}"
+        date_str = _format_date_range_stamp(start_dt, end_dt)
 
         # 1. Optimize_Scan_{stamp}.csv
         scan_df = results.get("scan")
@@ -503,6 +675,42 @@ class OptimizerEngine:
                     fig.write_html(str(output_dir / html_file))
                     print(f"Wrote {html_file}")
 
+    def _write_validation_outputs(
+        self,
+        results: Dict[str, Any],
+        output_dir: Union[str, Path],
+        start_dt: datetime,
+        end_dt: datetime,
+    ) -> None:
+        """Write validation CSV outputs to disk."""
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        date_str = _format_date_range_stamp(start_dt, end_dt)
+
+        plans_df = results.get("plans")
+        if plans_df is not None:
+            plans_file = f"Optimize_Validation_Plans_{date_str}.csv"
+            plans_df.to_csv(output_dir / plans_file, index=False)
+            print(f"Wrote {plans_file}")
+
+        pairs_df = results.get("pairs")
+        if pairs_df is not None:
+            pairs_file = f"Optimize_Validation_Pairs_{date_str}.csv"
+            pairs_df.to_csv(output_dir / pairs_file, index=False)
+            print(f"Wrote {pairs_file}")
+
+        verdict = results.get("verdict") or {}
+        summary_row = {}
+        for k, v in verdict.items():
+            if k in ("phases", "warnings") or isinstance(v, (list, dict)):
+                summary_row[k] = json.dumps(_to_json_compatible(v))
+            else:
+                summary_row[k] = _to_json_compatible(v)
+
+        summary_file = f"Optimize_Validation_Summary_{date_str}.csv"
+        pd.DataFrame([summary_row]).to_csv(output_dir / summary_file, index=False)
+        print(f"Wrote {summary_file}")
+
 
 def get_optimization(
     db_path: Path,
@@ -549,5 +757,40 @@ def get_optimization(
         bin_len=bin_len,
         exclude_missing=exclude_missing,
         make_plot=make_plot,
+        output_dir=output_dir,
+    )
+
+
+def get_validation(
+    db_path: Path,
+    start: Union[str, datetime],
+    end: Union[str, datetime],
+    saturated: List[int],
+    plans: Optional[List[int]] = None,
+    pct: float = 1.0,
+    split_tolerance: float = 0.10,
+    max_lost: float = 10.0,
+    sat_threshold: float = 0.8,
+    min_plan_cycles: int = 30,
+    split_cover_tol: float = 1.0,
+    rank_deadband_pct: float = 2.0,
+    change_tol_pp: float = 3.0,
+    output_dir: Optional[Union[str, Path]] = None,
+    timezone: Optional[str] = None,
+) -> Optional[Dict[str, object]]:
+    """Convenience wrapper around :class:`OptimizerEngine`.validate."""
+    return OptimizerEngine(db_path, timezone).validate(
+        start=start,
+        end=end,
+        saturated=saturated,
+        plans=plans,
+        pct=pct,
+        split_tolerance=split_tolerance,
+        max_lost=max_lost,
+        sat_threshold=sat_threshold,
+        min_plan_cycles=min_plan_cycles,
+        split_cover_tol=split_cover_tol,
+        rank_deadband_pct=rank_deadband_pct,
+        change_tol_pp=change_tol_pp,
         output_dir=output_dir,
     )
