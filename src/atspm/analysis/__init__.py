@@ -66,6 +66,8 @@ from .critical import (
     critical_movement_analysis,
 )
 
+from .optimizer import optimize
+
 __all__ = [
     # Decoders
     'DatZDecodingError',
@@ -105,4 +107,6 @@ __all__ = [
     'movement_phase_map',
     'phase_demand',
     'critical_movement_analysis',
+    # Optimizer
+    'optimize',
 ]
