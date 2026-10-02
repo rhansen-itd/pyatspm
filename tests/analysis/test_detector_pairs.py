@@ -51,6 +51,20 @@ def test_silent_detector_yields_no_anomalies():
     assert "Ph2 Det 3 (no data)" in fig.layout.yaxis.ticktext
 
 
+def test_detector_silent_in_window_ignores_margin_activity():
+    # Det 3 actuates only at 100-110, before the window; inside (150, 450)
+    # it is silent, so det 42's actuations are an outage, not anomalies.
+    only_margin = EVENTS[(EVENTS["parameter"] == 42) | (EVENTS["timestamp"] < 150)]
+    assert analyze_discrepancies(
+        only_margin, PAIRS[:1], 2.0, window=(150.0, 450.0)
+    ).empty
+    # The same events judged over a window that includes det 3's actuation
+    # still report det 42's lone actuations.
+    assert not analyze_discrepancies(
+        only_margin, PAIRS[:1], 2.0, window=(0.0, 450.0)
+    ).empty
+
+
 def test_shared_detector_anomalies_stay_in_own_band():
     an = analyze_discrepancies(EVENTS, PAIRS, 2.0)
     fig = plot_detector_comparison(EVENTS, an, PAIRS, {"timezone": "UTC"})
@@ -84,7 +98,8 @@ def test_parse_pairs_accepts_flat_and_drops_repeats():
 
 
 def test_window_keeps_overlapping_anomalies_only():
-    an = analyze_discrepancies(EVENTS, PAIRS[:1], 2.0, window=(205.0, 402.0))
+    # Starts at 105 so det 3's 100-110 actuation keeps the pair non-silent.
+    an = analyze_discrepancies(EVENTS, PAIRS[:1], 2.0, window=(105.0, 402.0))
     # (200-210) and (400-405) overlap the window; the later flip half does not.
     assert list(an["start_timestamp"]) == [200.0, 400.0]
 

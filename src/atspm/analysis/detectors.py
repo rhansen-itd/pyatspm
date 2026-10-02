@@ -63,6 +63,20 @@ def _reconstruct_intervals(events_df: pd.DataFrame, det_id: int) -> pd.DataFrame
     })
 
 
+def _active_in(
+    intervals_df: pd.DataFrame, window: Optional[Tuple[float, float]]
+) -> bool:
+    """Whether any ON interval overlaps ``window`` (any interval if ``None``)."""
+    if intervals_df.empty:
+        return False
+    if window is None:
+        return True
+    w_start, w_end = window
+    return bool(
+        ((intervals_df["off_ts"] > w_start) & (intervals_df["on_ts"] < w_end)).any()
+    )
+
+
 def _build_state_array(intervals_df: pd.DataFrame, query_ts: np.ndarray) -> np.ndarray:
     """Map detector ON/OFF state onto a sorted array of query timestamps.
 
@@ -117,6 +131,7 @@ def _analyze_pair(
     det_a_id: int,
     det_b_id: int,
     lag_threshold_sec: float,
+    window: Optional[Tuple[float, float]] = None,
 ) -> list[dict]:
     """Core discrepancy logic for a single detector pair.
 
@@ -144,6 +159,9 @@ def _analyze_pair(
         det_b_id: parameter value identifying Detector B.
         lag_threshold_sec: Minimum disagreement duration (seconds) to raise a
             Rule-1 anomaly; also the half-window for the Rule-2 pulse check.
+        window: Optional ``(start_epoch, end_epoch)`` over which silence is
+            judged; actuations outside it (e.g. in a fetch margin) do not
+            count.  ``None`` judges silence over all of ``events_df``.
 
     Returns:
         List of anomaly dicts (may be empty).  Each dict includes an
@@ -155,7 +173,7 @@ def _analyze_pair(
 
     # A detector silent for the whole window is an outage, not a series of
     # disagreements; flagging every partner actuation would bury the pair.
-    if intervals_a.empty or intervals_b.empty:
+    if not (_active_in(intervals_a, window) and _active_in(intervals_b, window)):
         return []
 
     gap_ts = events_df.loc[events_df["event_code"] == -1, "timestamp"].values
@@ -327,8 +345,9 @@ def analyze_discrepancies(
             to raise a Rule-1 anomaly. Also used as the half-window size for
             the Rule-2 pulse check. Defaults to 2.0.
         window: Optional ``(start_epoch, end_epoch)`` reporting window.  When
-            given, only anomalies overlapping it are returned; timestamps are
-            not clipped.  Pass events that extend past the window so an
+            given, only anomalies overlapping it are returned, and a pair is
+            treated as silent unless both detectors actuate within it;
+            timestamps are not clipped.  Pass events that extend past the window so an
             actuation crossing either edge is reconstructed whole.
 
     Returns:
@@ -370,6 +389,7 @@ def analyze_discrepancies(
                 det_a_id=pair["det_a"],
                 det_b_id=pair["det_b"],
                 lag_threshold_sec=lag_threshold_sec,
+                window=window,
             )
         )
 
