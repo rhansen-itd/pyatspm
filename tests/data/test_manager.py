@@ -1,10 +1,9 @@
 """Fixture-connectivity smoke test for the Imperative Shell DB layer.
 
 Target: src/atspm/data/manager.py — DatabaseManager.get_metadata.
-Happy-path only: confirms the empty_db fixture (tests/conftest.py) connects
-and the metadata table exists / round-trips a row. Edge cases (missing
-metadata table -> {"timezone": "US/Mountain"} fallback) are left for a
-Fable pass per ROADMAP Session E Phase 2.
+Confirms the empty_db fixture (tests/conftest.py) round-trips a metadata row,
+and pins both fallbacks to {"timezone": "US/Mountain"}: metadata table
+missing (the SELECT raises) and present but empty (no lock_id = 1 row).
 """
 
 from pathlib import Path
@@ -26,12 +25,14 @@ class TestGetMetadataSmoke:
         assert meta["intersection_name"] == "Main St & Oak Ave"
         assert meta["timezone"] == "US/Mountain"
 
-    # TODO(fable): missing metadata table -> get_metadata() falls back to
-    # {"timezone": "US/Mountain"} (manager.py:788-789, sqlite3.OperationalError
-    # branch). Requires a DB initialised without ever calling init_db(), or a
-    # DROP TABLE metadata before querying.
+    def test_missing_metadata_table_falls_back_to_default_timezone(self, db_path: Path):
+        # A DB that never went through init_db(): the SELECT itself raises.
+        with DatabaseManager(db_path) as manager:
+            manager.conn.execute("CREATE TABLE events (timestamp REAL)")
+            assert manager.get_metadata() == {"timezone": "US/Mountain"}
 
-    # TODO(fable): metadata table exists but has zero rows (lock_id=1 never
-    # inserted) -> same {"timezone": "US/Mountain"} fallback via the
-    # `if not row` branch (manager.py:791-792). Distinct code path from the
-    # missing-table case above; assert both are pinned separately.
+    def test_empty_metadata_table_falls_back_to_default_timezone(self, empty_db: Path):
+        # Table present, lock_id = 1 row never written: a distinct branch.
+        with DatabaseManager(empty_db) as manager:
+            manager.conn.execute("DELETE FROM metadata")
+            assert manager.get_metadata() == {"timezone": "US/Mountain"}
