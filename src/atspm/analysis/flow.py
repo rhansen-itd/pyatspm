@@ -37,6 +37,10 @@ treatment — it is already embedded in ``t`` (measured from green onset).
 The ``normalize`` parameter selects how the overhead is estimated; see
 :func:`rate_profiles`.
 
+``discharge_profiles`` uses the same cycle selection but returns the raw
+approach cumulative curve ``N(t)``, unnormalised, for the throughput
+optimizer.
+
 Gap Marker Rule
 ---------------
 Split windows are built via ``_build_phase_intervals`` (from
@@ -254,6 +258,67 @@ def _resolve_overhead(
     )
 
 
+def _select_cycles(
+    cycle_df: pd.DataFrame,
+    pct: float,
+    split_tolerance: float,
+    stratify: bool,
+) -> pd.DataFrame:
+    """Select comparable, busy cycles from a per-cycle summary.
+
+    Shared by :func:`rate_profiles` and :func:`discharge_profiles`.  A
+    cycle is one split window, keyed by ``green_ts``; its volume is ``q``
+    summed across detectors.
+
+    * Default mode keeps cycles whose ``split`` lies strictly within
+      ``(1 ± split_tolerance) ×`` the modal split, then the busiest *pct*
+      percent of those.
+    * Stratified mode skips the modal filter.  It groups cycles into
+      strata by ``(coord_plan, round(split))`` and keeps the busiest *pct*
+      percent **within** each stratum, then pools the survivors.  Splits
+      shorter than the modal one stay represented, so a curve's domain
+      isn't set by the longest-split plan alone.
+
+    Args:
+        cycle_df: Per-cycle summary from :func:`flow_rate`.
+        pct: Percentage of the busiest cycles to keep (``1.0`` = top 1%).
+        split_tolerance: Fractional tolerance around the modal split
+            (default mode only).
+        stratify: Use stratified selection.
+
+    Returns:
+        The selected rows of *cycle_df* (same columns, original order).
+        Empty when nothing survives.
+    """
+    if cycle_df.empty:
+        return cycle_df.iloc[0:0]
+
+    q_level = (100.0 - pct) / 100.0
+
+    if not stratify:
+        modal = cycle_df["split"].mode().iloc[0]
+        lo, hi = (1.0 - split_tolerance) * modal, (1.0 + split_tolerance) * modal
+        sel = cycle_df.loc[(cycle_df["split"] > lo) & (cycle_df["split"] < hi)]
+        if sel.empty:
+            return sel
+        q_by_cycle = sel.groupby("green_ts")["q"].sum()
+        threshold = q_by_cycle.quantile(q_level)
+        keep = q_by_cycle.index[q_by_cycle >= threshold]
+        return sel.loc[sel["green_ts"].isin(keep)]
+
+    per_cycle = (
+        cycle_df.groupby("green_ts", as_index=False)
+        .agg(coord_plan=("coord_plan", "first"),
+             split=("split", "first"),
+             q=("q", "sum"))
+    )
+    per_cycle["_stratum_split"] = per_cycle["split"].round()
+    strata = per_cycle.groupby(["coord_plan", "_stratum_split"])["q"]
+    threshold = strata.transform(lambda q: q.quantile(q_level))
+    keep = per_cycle.loc[per_cycle["q"] >= threshold, "green_ts"]
+    return cycle_df.loc[cycle_df["green_ts"].isin(keep)]
+
+
 def _wide_profile(
     veh: pd.DataFrame,
     value_col: str,
@@ -316,7 +381,7 @@ def flow_rate(
     events_df: pd.DataFrame,
     phase: int,
     detector_ids: List[int],
-    max_lost: float = 10.0,
+    max_lost: Optional[float] = 10.0,
     plans: Optional[List[int]] = None,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """Measure per-split stop-bar discharge for one phase and its detectors.
@@ -336,6 +401,9 @@ def flow_rate(
        green onset, and headway to the next departure.
     4. Drop groups whose end slack (``clear_end_ts`` minus last departure)
        exceeds *max_lost* — the phase was not discharging at capacity.
+       Skipped when *max_lost* is ``None``: every group is kept with its
+       ``lost`` value, so a saturation classifier can count the cycles
+       that would fail the filter.
 
     Args:
         events_df: Flat events DataFrame with columns
@@ -347,7 +415,8 @@ def flow_rate(
             *phase*.  Typically sourced from the ``Det_P{phase}_Stopbar``
             config key.
         max_lost: Maximum seconds of slack between the last departure and
-            the end of the split window.  Default ``10.0``.
+            the end of the split window.  Default ``10.0``.  ``None``
+            disables the filter.
         plans: Optional coordination-plan filter; when provided, only split
             windows whose ``coord_plan`` is in this list are analysed.
 
@@ -364,7 +433,8 @@ def flow_rate(
               split        float   – split window length in seconds
               green_dur    float   – green portion in seconds
               clear_dur    float   – yellow + red clearance in seconds
-              lost         float   – end slack in seconds (≤ max_lost)
+              lost         float   – end slack in seconds (≤ max_lost
+                                     unless max_lost is None)
               q            int     – vehicles discharged in the window
 
         * ``vehicle_df`` — one row per departure::
@@ -430,7 +500,8 @@ def flow_rate(
     veh["headway"] = grp["ts_f"].shift(-1) - veh["ts_f"]
     veh["_lost"] = clear_f[veh["win"].values] - grp["ts_f"].transform("max")
 
-    veh = veh.loc[veh["_lost"] <= max_lost].reset_index(drop=True)
+    if max_lost is not None:
+        veh = veh.loc[veh["_lost"] <= max_lost].reset_index(drop=True)
 
     if veh.empty:
         return _empty_results()
@@ -469,6 +540,7 @@ def rate_profiles(
     fixed_lost: Optional[float] = None,
     grid_step: float = 0.5,
     min_cycles: int = 5,
+    stratify: bool = False,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Select comparable cycles and build effective flow-rate profiles.
 
@@ -479,6 +551,9 @@ def rate_profiles(
        compared on the same time base.
     2. Of those, keep the busiest *pct* percent by total vehicles across
        all detectors — split optimisation only matters under demand.
+
+    With *stratify*, step 1 is skipped and step 2 runs within each
+    ``(coord_plan, round(split))`` stratum (see ``_select_cycles``).
 
     Normalisation (overhead) modes
     ------------------------------
@@ -511,6 +586,9 @@ def rate_profiles(
             Default ``0.5``.
         min_cycles: Minimum simultaneous cycles required for a per-detector
             mean value at a grid row.  Default ``5``.
+        stratify: Select the busiest cycles within each
+            ``(coord_plan, round(split))`` stratum instead of around the
+            modal split.  Default ``False``.
 
     Returns:
         Tuple ``(selected_df, rate_df, inst_df)``:
@@ -543,19 +621,8 @@ def rate_profiles(
     if cycle_df.empty or vehicle_df.empty:
         return _empty_sel, pd.DataFrame(), pd.DataFrame()
 
-    # --- 1. Comparable-split filter -----------------------------------------
-    modal = cycle_df["split"].mode().iloc[0]
-    lo, hi = (1.0 - split_tolerance) * modal, (1.0 + split_tolerance) * modal
-    sel = cycle_df.loc[(cycle_df["split"] > lo) & (cycle_df["split"] < hi)]
-
-    if sel.empty:
-        return _empty_sel, pd.DataFrame(), pd.DataFrame()
-
-    # --- 2. Busiest-percentile filter ----------------------------------------
-    q_by_cycle = sel.groupby("green_ts")["q"].sum()
-    threshold = q_by_cycle.quantile((100.0 - pct) / 100.0)
-    keep = q_by_cycle.index[q_by_cycle >= threshold]
-    selected = sel.loc[sel["green_ts"].isin(keep)].copy()
+    # --- 1–2. Comparable, busiest cycles ------------------------------------
+    selected = _select_cycles(cycle_df, pct, split_tolerance, stratify).copy()
 
     if selected.empty:
         return _empty_sel, pd.DataFrame(), pd.DataFrame()
@@ -600,3 +667,136 @@ def rate_profiles(
     inst_df = _wide_profile(veh, "inst", min_cycles)
 
     return selected, rate_df, inst_df
+
+
+def discharge_profiles(
+    cycle_df: pd.DataFrame,
+    vehicle_df: pd.DataFrame,
+    pct: float = 1.0,
+    split_tolerance: float = 0.10,
+    stratify: bool = False,
+    grid_step: float = 0.5,
+    min_cycles: int = 5,
+    rolling: int = 5,
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Build the approach cumulative discharge curve ``N(t)`` for one phase.
+
+    This is the curve the throughput optimizer consumes
+    (``docs/design_optimizer_solver.md`` D0): approach-total vehicles
+    served by elapsed split time ``t``.  No overhead normalisation is
+    applied.  In the optimizer each split already includes its clearance
+    and the splits sum to the cycle length, so ``end_shift`` would charge
+    the termination cost twice.
+
+    Algorithm
+    ---------
+    1. Select cycles with the same rules as :func:`rate_profiles`.
+    2. Pivot each selected cycle's cumulative count ``n`` onto the
+       ``grid_step`` grid and take the per-detector mean, which needs at
+       least *min_cycles* cycles at a grid row.
+    3. The data domain ``t_dom`` is the earliest of the detectors' last
+       supported grid rows.  The profile is truncated there, so its last
+       index marks the boundary of what the data can say.
+    4. On the full grid ``[0, t_dom]``: interior gaps are interpolated
+       linearly, rows before a detector's first supported value are 0.
+       The approach total is the **sum** of the per-detector means (not
+       their average, which is a per-lane quantity), made monotone with a
+       running maximum.
+    5. ``inst`` is the sum of the per-detector mean instantaneous rates
+       (``3600 / headway``), smoothed with a centred rolling mean.  It is
+       a diagnostic only.
+
+    Known approximation: for a hypothetical split ``s`` shorter than the
+    measured one, ``N(s)`` counts continued-green discharge at ``s``
+    rather than the few vehicles that would cross during a clearance
+    ending at ``s``.  The bias is at most about one vehicle and is the
+    same for every candidate split.
+
+    Gap Marker Rule: the inputs come from :func:`flow_rate`, whose split
+    windows never span a gap marker; this function adds no event logic.
+
+    Args:
+        cycle_df: Per-cycle summary from :func:`flow_rate`.
+        vehicle_df: Per-vehicle detail from :func:`flow_rate`.
+        pct: Percentage of the busiest cycles to keep (``1.0`` = top 1%).
+        split_tolerance: Fractional tolerance around the modal split.
+        stratify: Select within ``(coord_plan, round(split))`` strata
+            instead of around the modal split.
+        grid_step: Time-grid resolution in seconds.  Default ``0.5``.
+        min_cycles: Minimum simultaneous cycles for a per-detector mean
+            at a grid row.  Default ``5``.
+        rolling: Centred rolling-mean window (grid rows) for ``inst``.
+            Default ``5``.
+
+    Returns:
+        Tuple ``(selected_df, profile_df)``:
+
+        * ``selected_df`` — the selected rows of *cycle_df*.
+        * ``profile_df`` — indexed by ``t`` (uniform grid from 0.0 to
+          ``t_dom``) with float columns::
+
+              n     – approach cumulative vehicles served by t (monotone)
+              inst  – approach instantaneous rate, vph (smoothed; NaN where
+                      any detector lacks support or the window is short)
+
+        ``profile_df`` is empty (same columns) when nothing survives
+        selection, or when any detector never reaches *min_cycles*
+        support, because the approach total would then omit a lane.
+    """
+    empty_profile = pd.DataFrame(
+        columns=["n", "inst"], index=pd.Index([], name="t"), dtype=float
+    )
+
+    if cycle_df.empty or vehicle_df.empty:
+        return pd.DataFrame(columns=_CYCLE_SCHEMA), empty_profile
+
+    selected = (
+        _select_cycles(cycle_df, pct, split_tolerance, stratify)
+        .reset_index(drop=True)
+    )
+    if selected.empty:
+        return selected, empty_profile
+
+    veh = vehicle_df.merge(
+        selected[["det", "green_ts"]], on=["det", "green_ts"], how="inner"
+    )
+    if veh.empty:
+        return selected, empty_profile
+
+    veh["inst"] = (3600.0 / veh["headway"]).replace([np.inf, -np.inf], np.nan)
+    veh["_t"] = (veh["t"] / grid_step).round() * grid_step
+    veh["_label"] = veh["det"].astype(str) + " " + veh["green_ts"].astype(str)
+
+    mean_cols = [f"{d} Mean" for d in sorted(veh["det"].unique())]
+    n_means = _wide_profile(veh, "n", min_cycles)[mean_cols]
+    inst_means = _wide_profile(veh, "inst", min_cycles)[mean_cols]
+
+    last_valid = n_means.apply(pd.Series.last_valid_index)
+    if last_valid.isna().any():
+        return selected, empty_profile
+
+    n_steps = int(round(float(last_valid.min()) / grid_step))
+    grid = pd.Index(np.arange(n_steps + 1) * grid_step, name="t")
+
+    def _on_grid(means: pd.DataFrame) -> pd.DataFrame:
+        # Interpolate on the union so a grid row between two sparse rows,
+        # including the t_dom row itself, takes its value from both sides.
+        full = means.reindex(means.index.union(grid))
+        return full.interpolate(method="index", limit_area="inside").reindex(grid)
+
+    n_total = _on_grid(n_means).fillna(0.0).sum(axis=1)
+    inst_total = (
+        _on_grid(inst_means)
+        .sum(axis=1, min_count=len(mean_cols))
+        .rolling(rolling, center=True)
+        .mean()
+    )
+
+    profile_df = pd.DataFrame(
+        {
+            "n": np.maximum.accumulate(n_total.to_numpy(dtype=float)),
+            "inst": inst_total.to_numpy(dtype=float),
+        },
+        index=grid,
+    )
+    return selected, profile_df

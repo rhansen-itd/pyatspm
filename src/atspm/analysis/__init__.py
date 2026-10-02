@@ -53,6 +53,7 @@ from .aog import (
 )
 
 from .flow import (
+    discharge_profiles,
     flow_rate,
     rate_profiles,
 )
@@ -96,6 +97,7 @@ __all__ = [
     # Flow
     'flow_rate',
     'rate_profiles',
+    'discharge_profiles',
     # Critical
     'ring_barrier_structure',
     'movement_phase_map',

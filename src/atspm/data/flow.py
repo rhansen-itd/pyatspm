@@ -39,6 +39,7 @@ import pandas as pd
 
 from .manager import DatabaseManager, db_timezone
 from .reader import get_events_with_cycles_df
+from ..analysis.critical import _parse_stopbar_sets
 from ..analysis.flow import (
     flow_rate as _flow_rate_core,
     rate_profiles as _rate_profiles_core,
@@ -117,6 +118,7 @@ class FlowRateEngine:
         split_tolerance: float = 0.10,
         normalize: str = "end_shift",
         fixed_lost: Optional[float] = None,
+        stratify: bool = False,
         rolling: int = 5,
         make_plot: bool = True,
         output_dir: Optional[Union[str, Path]] = None,
@@ -146,6 +148,9 @@ class FlowRateEngine:
                 ``atspm.analysis.flow.rate_profiles``.
             fixed_lost: Constant overhead in seconds; required when
                 ``normalize == 'fixed'``.
+            stratify: Select the busiest cycles within each
+                ``(coord_plan, round(split))`` stratum instead of around
+                the modal split.  Default ``False``.
             rolling: Centred rolling-mean window for the instantaneous
                 traces in the plot.  Default ``5``.
             make_plot: Build a Plotly figure per phase.  Default ``True``.
@@ -215,11 +220,13 @@ class FlowRateEngine:
                 split_tolerance=split_tolerance,
                 normalize=normalize,
                 fixed_lost=fixed_lost,
+                stratify=stratify,
             )
             if selected_df.empty:
                 print(
                     f"  ⚠️  Flow Ph{ph}: no cycles survived selection "
-                    f"(split_tolerance={split_tolerance}, pct={pct}) — skipping."
+                    f"(split_tolerance={split_tolerance}, pct={pct}, "
+                    f"stratify={stratify}) — skipping."
                 )
                 continue
 
@@ -338,7 +345,8 @@ class FlowRateEngine:
     ) -> Dict[int, List[int]]:
         """Build a mapping of phase → list[detector_id] from the config dict.
 
-        Reads ``Det_P{N}_Stopbar`` keys.  Phases with an empty or absent key
+        Reads ``Det_P{N}_Stopbar`` / ``Det_P{N}_Stop_Bar`` keys (both
+        spellings the config import produces).  Phases with an empty or absent key
         are silently skipped.  If *phases* is provided, only those phases are
         resolved.
 
@@ -350,37 +358,17 @@ class FlowRateEngine:
             ``{phase_int: [det_id, ...]}`` for all phases with valid detector
             config.  Empty dict if nothing is configured.
         """
-        result: Dict[int, List[int]] = {}
-
-        stopbar_keys = {
-            k: v for k, v in config.items()
-            if k.startswith("Det_P") and k.endswith("_Stopbar") and v
+        result: Dict[int, List[int]] = {
+            ph: sorted(dets)
+            for ph, dets in _parse_stopbar_sets(config).items()
+            if phases is None or ph in phases
         }
-
-        for key, raw_val in stopbar_keys.items():
-            # Key format: Det_P{N}_Stopbar  →  extract N
-            try:
-                ph_str = key[5:key.index("_Stopbar")]
-                ph = int(ph_str)
-            except (ValueError, IndexError):
-                continue
-
-            if phases is not None and ph not in phases:
-                continue
-
-            try:
-                det_ids = [int(x.strip()) for x in str(raw_val).split(",") if x.strip()]
-            except ValueError:
-                continue
-
-            if det_ids:
-                result[ph] = det_ids
 
         if phases is not None:
             for ph in phases:
                 if ph not in result:
                     print(
-                        f"  ⚠️  Flow: no Det_P{ph}_Stopbar config found — "
+                        f"  ⚠️  Flow: no Det_P{ph}_Stopbar/_Stop_Bar config found — "
                         f"phase {ph} skipped."
                     )
 
@@ -458,6 +446,7 @@ def get_flow_rate(
     split_tolerance: float = 0.10,
     normalize: str = "end_shift",
     fixed_lost: Optional[float] = None,
+    stratify: bool = False,
     rolling: int = 5,
     make_plot: bool = True,
     output_dir: Optional[Union[str, Path]] = None,
@@ -476,6 +465,7 @@ def get_flow_rate(
         split_tolerance: Fractional tolerance around the modal split.
         normalize:       Overhead mode (see ``rate_profiles``).
         fixed_lost:      Constant overhead seconds for ``'fixed'`` mode.
+        stratify:        Select within (plan, split) strata, not the modal split.
         rolling:         Rolling window for instantaneous plot traces.
         make_plot:       Build Plotly figures.  Default ``True``.
         output_dir:      Write CSV/HTML files and return ``None`` when provided.
@@ -494,6 +484,7 @@ def get_flow_rate(
         split_tolerance=split_tolerance,
         normalize=normalize,
         fixed_lost=fixed_lost,
+        stratify=stratify,
         rolling=rolling,
         make_plot=make_plot,
         output_dir=output_dir,

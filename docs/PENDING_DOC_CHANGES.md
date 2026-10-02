@@ -18,3 +18,5 @@ See CLAUDE.md "Documentation Workflow" for the rules.
 - [src/atspm/analysis/detectors.py] analyze_discrepancies gains window=; flipping disagreements split; one-side-silent pairs yield none
 - [src/atspm/plotting/detectors.py] plot_detector_comparison gains window=; hard-reset lines, per-pair summary, no layout shapes
 - [src/atspm/data/detectors.py] DetectorEngine uses every config overlapping the window; fetches ±900 s edge margin
+- [src/atspm/analysis/__init__.py] export discharge_profiles
+- [src/atspm/cli.py] flow --stratify; flow now reads Det_P{N}_Stop_Bar as well as _Stopbar

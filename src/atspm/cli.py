@@ -909,6 +909,8 @@ def _flow_single_intersection(target_name: str, args: argparse.Namespace) -> Non
     print(f"    DB:     {db_path.name}")
     print(f"    Window: {args.start} → {args.end}")
     print(f"    Normalize: {args.normalize}")
+    if args.stratify:
+        print("    Selection: stratified by (plan, split)")
     if args.phases:
         print(f"    Phases: {args.phases}")
     if args.plans:
@@ -927,6 +929,7 @@ def _flow_single_intersection(target_name: str, args: argparse.Namespace) -> Non
             split_tolerance=args.split_tolerance,
             normalize=args.normalize,
             fixed_lost=args.fixed_lost,
+            stratify=args.stratify,
             rolling=args.rolling,
             make_plot=not args.no_plot,
             output_dir=output_dir,
@@ -2405,6 +2408,15 @@ def _add_flow_parser(subs: argparse._SubParsersAction) -> None:
         help=(
             "Fractional tolerance around the modal split length "
             "(default: 0.10 = ±10%%)."
+        ),
+    )
+    p_flow.add_argument(
+        "--stratify",
+        action="store_true",
+        help=(
+            "Keep the busiest --pct percent within each (plan, split) "
+            "stratum and pool them, instead of filtering around the modal "
+            "split.  Keeps shorter-split plans in the profile."
         ),
     )
     p_flow.add_argument(
