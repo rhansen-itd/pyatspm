@@ -24,6 +24,97 @@ Small and actionable; each carries enough file/line detail to be picked up cold.
 - **Operational: rebuild the production DBs onto the corrected timestamp basis.** The decision is settled and the tooling exists (see the completed item above) — what remains is running it. `atspm process --rebuild --all` re-derives every `events` row from `raw_data/`, so any DB ingested before the header-offset fix still holds rows 0–1.0 s early until it is run. Only worth doing where `raw_data/` still holds the full history; anything already pruned rebuilds to whatever files survive, so check coverage per intersection first. Not urgent — the error is sub-second and uniform within a file — but until it happens each of those DBs is mixed-basis at the cutover point.
 - **Fable edge-case pass on the SQLite fixture smoke tests.** `tests/data/test_manager.py` and `tests/data/test_reader.py` carry happy-path smoke tests plus `# TODO(fable):` stubs for the real edge cases: `get_metadata` falling back to `{"timezone": "US/Mountain"}` when the `metadata` table is *missing* vs. *present-but-empty* (two distinct code paths in `manager.py`), and `check_data_quality` completeness scoring around gap markers (marker on the window boundary, `gap_count > event_count` flooring at 0.0, the zero-event-count denominator guard). Adversarial edge-case reasoning → a Fable lane, carrying the standing `event_code == -1` gap-marker audit mandate (CLAUDE.md §5).
 
+## Session-scoped items
+
+Promoted from *Future features*. Each is one session; the scope and the done-criteria are written so it can be picked up cold. Order matters: S2 consumes S1.
+
+- **S1 — Decode `eos_set_time`'s clock marks: ped phases 14/15/16.** *(Promoted 2026-10-01. The measured record below was first written on branch `docs/eos-clock-marks` (707f200, never merged) and is carried over verbatim; that branch is now superseded.)* The upstream half shipped 2026-09-30 (`econ_itd_tools/EOS/eos_set_time.py`; field bundle `econ-field-tools`), and every head unit running it now writes these into the controller's own `.datZ`. Nothing here reads them yet. This is the decoder, and the input to the correction item below. Everything below was measured on the bench (10.70.10.51, firmware 03.02.60) by pairing 13 pulses sent against the 1-minute files they produced.
+
+  **What is emitted.** Pedestrian calls on three ped phases the site does not use, logged as event **90 (PedDetector On) / 89 (Off)** with the ped phase as the parameter, plus a code **45** at each ON. The site config (`EOS_MARKER_PED_*`) names them; the shipped defaults are:
+
+  | ped | role | held for (host time) |
+  |---|---|---|
+  | 15 | **BEHIND**: controller slow | `|drift|`, 0.1 s resolution, at least 0.1 s, capped at 30.0 s |
+  | 16 | **AHEAD**: controller fast | same |
+  | 14 | **SET**: brackets a clock correction | `L`, a whole multiple of 10 s, spanning every edit |
+
+  `drift` is controller minus true (host) time. Positive means the controller is ahead, so its labels are *late* and true time = label − drift. A site may configure other peds, but only 9–16, all different, and the tool refuses any ped whose phase draws as in use on STATUS. The per-run JSONL (below) records which peds were used.
+
+  **When.** An **hourly drift check** (cron `37 * * * *` UTC) logs in, fires one drift pulse, logs out, and changes nothing. The **daily set** (`17 9 * * *` UTC, retried up to 4× 30 min apart) fires, in this order: a drift pulse (the pre-set measurement) → the SET bracket, if the clock needs moving (|drift| ≥ 0.75 s) → a second drift pulse with the residual. A drift pulse never spans a clock step; the bracket always does. The bracket's ON comes after the preceding drift pulse's OFF.
+
+  **Decoding a drift pulse.** `|drift| ≈ logged_width + 0.15 s`. Logged widths ran 0.0–0.3 s short of what was sent (mean −0.15, n = 13; the ON registers later than the OFF). With the 0.1 s minimum, a logged 0.0–0.1 means |drift| ≲ 0.2 s. A logged width near 29.8 s means the drift is saturated (≥ 30 s): take the magnitude from the JSONL. Precision is ±0.05 s on top of the bias. The tool times the controller's tick against the host to within the 100 ms front-panel frame interval.
+
+  **Decoding the bracket.** The logged width is `w = L + shift`, where `shift` is the whole seconds the controller clock moved (positive = set forward). `L` is chosen so that `w ≥ 5 s` whatever the direction: a backward shift longer than the pulse would otherwise log the OFF before the ON, 113 s early in one emulator run. The shift is **always a whole number of seconds**, because a front-panel edit replaces the integer seconds and keeps the controller's sub-second phase. So:
+  - `shift_est = −drift_pre`, from the drift pulse immediately before (sign from its ped, magnitude from its width);
+  - `L = 10 · round((w − shift_est) / 10)`;
+  - `shift = round(w − L)`, which is exact.
+
+  Checked against four bench sets (−2, +3, +40, −40 s): all recovered exactly. Where the pre-set drift pulse is saturated, `L` is known only modulo 10 s from the log alone; use the JSONL.
+
+  **Where the step is.** Inside the bracket: the first edit lands ≥ 1.4 s after ON, and the edits of one correction finish within ~4 s. A correction can be up to three edits (seconds, then minutes, then hours, where the shift crosses a minute or an hour boundary), each a separate step. Their total is `shift`. A backward shift shows as decreasing offsets, which `_fence_clock_steps` already fences. A forward one shows as a hole.
+
+  **After a set the controller is not exactly right.** The panel cannot touch the sub-second phase, so the residual is up to ±0.5 s. It is reported by the post-set drift pulse and by every hourly check after it. That is the point of the hourly pulses: a drift *series* per controller, to model between sets and to apply sub-second corrections that no set can make.
+
+  **Cross-check record.** Every run appends one JSON object to `eos-time.jsonl` beside `run.sh` on the head unit. It carries the mode, before/after drift with half-width, each pulse's ped, role, sent width and host ON/OFF epochs, and each field edit with its ENTER epoch and applied seconds. The MOE puller does not fetch it yet. It is the authority when a pulse is saturated or missing, and the pulses are the authority for *position*.
+
+  **Two traps.** (1) Code 45 is in `_TERMINATION_CODES`. Exclude the marker peds explicitly rather than relying on no walk ever following. (2) Marks cover only this tool's adjustments. A keypad change or a power event is still unmarked.
+
+  **Status check 2026-10-01.** The shipped code is unchanged since the record above was written (last `eos_set_time.py` commit 9cede43, 2026-09-30 12:21). **No local DB holds a single marker event yet**: 0 rows of code 89/90 on peds 9–16 in any of 201/313/315/701, and 201 is ingested through 2026-10-01 19:59 UTC. The owner confirmed the same day that **markers aren't running in the field yet**. So the bench files below are the only real marker data until rollout. The session can build and test against them, but the field-day done-criterion waits for rollout.
+
+  **Bench fixtures, recovered 2026-10-01** from a `/tmp` scratchpad of the 2026-09-30 econ_itd_tools session (where they could have been lost on reboot) into `tests/fixtures/clock_marks_bench_2026_09_30/`, 80 KB, not yet committed:
+  - `ECON_10.70.10.51_2026_09_30_1303`–`1310.datZ`: eight 1-minute files carrying the 13 drift pulses and the four SET brackets.
+  - `bench.jsonl`: the head-unit send log, with two drift checks and sets of −2, +3 (two edits, crossing a minute), +40 and −40 s, each edit's ENTER epoch and applied seconds.
+  - `bench{1,2,3}_log.json`: host ON/OFF epochs from the earlier CIB probes.
+  - `emu.jsonl` and `py38.jsonl`: emulator runs only (`127.0.0.1`), no `.datZ`.
+  - `decode.py` and `pairs.py`: the throwaway decoders used at the time, as a reference only.
+
+  Visible in the files: the −40 s set leaves the 13:05 file's header at 13:05:13.0, and its bracket OFF lands in the next file. Both are cross-file cases the tests must cover.
+
+  **Session scope.**
+  - Pure core (`analysis/clock_marks.py`): pair 90→89 on the configured marker peds, stopping at `event_code = -1` per CLAUDE.md §5. Classify each pulse by role. Emit a **drift-sample** frame (`ts`, `drift`, `drift_lo`/`drift_hi` from the bias band, `saturated`) and a **set** frame (`bracket_on`, `bracket_off`, `shift`, `edits_window`), using the bracket arithmetic above. Unpaired or saturated pulses get flagged, never guessed.
+  - Marker peds per intersection come from config: a new `int_cfg.csv` key, or the JSONL, but **no default**, mirroring upstream's no-default rule. The key name needs owner sign-off; it's the same class of change as `Min_P{N}_Split`.
+  - Exclude the marker peds from the termination query (trap 1).
+  - Shell engine plus an `atspm clock-drift` CLI with `--target/--targetid/--all`, writing the drift series as CSV and a drift-vs-time Plotly figure.
+  - Golden tests built from the bench fixtures above, using `bench.jsonl` as the oracle, plus synthetic edge cases: saturated drift, a set crossing a file boundary, a bracket split by a comms gap, a missing post-set pulse.
+  - **Done when** the four bench sets recover their exact `shift` and the hourly series decodes from at least one real field day.
+  - Routing: the pairing and decoding math stays with Opus; the shell, CLI and plot are Gemini-eligible against the Opus tests.
+
+- **S2 — Drift-corrected (true-time) axis.** *(Promoted 2026-10-01; feasibility assessed, decisions open.)* Use S1's drift series to map every controller label onto true time, `true = label − d(label)`, where `d` is the controller's drift modelled between samples and stepping by `shift` at each SET. The owner's framing was "if the drift over an hour was 0.5 s, stretch everything". The assessment below concludes the *offset* is what matters, while the *stretch* is negligible.
+
+  **Magnitudes.** Upstream assumed "a few seconds per day", about 0.1 s per hour. The owner's 0.5 s/hour example is about 140 ppm. Even at that rate, a stretch rescales durations by about 1.4 × 10⁻⁴: a 10 s green moves by 1.4 ms and a 120 s cycle by 17 ms, both one to two orders below the logger's 0.1 s resolution. **No duration-based measure changes measurably from the stretch.** The absolute offset `d` is what matters: up to ±0.5 s right after a set (the panel can't touch the sub-second phase), and growing at the drift rate until the next set.
+
+  **What it buys:** cross-source and cross-controller alignment, where hundreds of milliseconds are visible.
+  - Comparing two controllers' timelines (corridor progression and offsets, travel time between intersections, the throughput optimizer's validation across sites).
+  - Joining against sources that carry their own clock without a per-clip calibration: EVO radar logs, INRIX, a camera's burned-in clock (notebook idea P).
+  - It does **not** improve `video-sync`, which measures the video-to-data offset per clip and so already absorbs controller drift.
+
+  **What it costs at 0.1 s granularity.** Less than it seems.
+  - Stored timestamps are *already* off a global decisecond grid: the header-offset fix adds each file's sub-second header fraction, so offsets are deciseconds from a per-file base, not from the epoch.
+  - The decisecond assumptions that remain are all per-file and inside ingestion: `_CLOCK_STEP_MARKER_LEAD = 0.05` and the `prev + 0.1` comms-gap marker (`data/ingestion.py:50-54, 523-525`). They hold if the correction is applied *after* those markers are placed. `d` is monotone (|rate| ≪ 1), so a corrected marker still sorts immediately ahead of the event it fences, and `UNIQUE(timestamp, event_code, parameter)` gains no new collisions.
+  - Bin edges (15-min counts) can move an event across a boundary by a few hundred ms, which is negligible.
+
+  **The finding that changes the old (a)/(b)/(c) decision.** The *Future features* entry rejected (b), a real-time axis, mainly because "a single missed adjustment silently skews everything after it". Hourly drift samples remove that objection: each one is an **absolute** measurement against host time, so an error or a missed set heals at the next sample instead of accumulating. Drift-based correction is (b) with absolute anchoring. Because the correction is global rather than per-file, it also avoids (c)'s file-overlap problem and its synthetic per-file warp.
+
+  **What still needs care.**
+  - **Backward-set bands.** Inside a replayed band, the label→true map isn't a function: two real moments share labels. Sorted by timestamp, the pre-step tail and post-step head interleave. Telling them apart needs **file order**, which only ingestion has: `_fence_clock_steps` sees the break index. So the SET jump must be applied at ingest (re-timestamp the post-step band by the exact `shift`) or recorded as a segment id. A read-time-only correction can't do it.
+  - **Noise versus rate.** One drift sample is good to about ±0.1 s (the ±0.15 s width bias band, ±0.05 s precision, and a ≲0.2 s floor where the sign is unresolved). That's comparable to an hour's drift, so point-to-point interpolation would follow noise. Fit `d` per inter-set segment (linear, or robust linear) instead. The JSONL's host-timed measurement (target half-width 0.06 s) is tighter than the pulse width, so prefer it for magnitude once the MOE puller fetches it; that fetch is an upstream dependency.
+  - **Unmarked steps** (keypad sets, power events) still break the model. Where a backward one is fenced but unmarked, the correction must stop at that marker and restart from the next drift sample, never interpolate across (CLAUDE.md §5).
+  - **"True" means the head unit's host clock.** Whether that's NTP-disciplined, and how well, bounds the whole scheme. Confirm it upstream.
+
+  **Decisions — settled by the owner 2026-10-01, conditional on read-time lag, which was then measured as negligible.**
+  1. **`events` keeps controller labels; the correction is applied on read.** Storage stays rebuildable and idempotent, and `--rebuild` stays exact. The backward-set band fix is the one exception and is applied at ingest, the only place file order exists. Rewriting everything at ingest was rejected: the next drift sample isn't known yet when a file is ingested.
+  2. **`d` is derived on the fly** from the 89/90 marker rows already in `events`. No new table and no schema change.
+  3. **`cycles.cycle_start` stays in label time** and is mapped on read alongside events, through the same function.
+
+  **Lag measured** on 201's DB (1.6 M events): the marker query over a window ±2 h runs in under 1 ms, because it uses the existing `idx_events_ts_code`. The `np.interp` map costs about 10 ns per event, so about 0.3 ms per day of data and about 70 ms for the full 6.7 M-event corpus. Fitting a few hundred hourly samples is negligible. If a large batch run ever shows otherwise, revisit decision 2 (persist `d`) before anything else. The read window must pull marker rows back to the segment's previous SET or unmarked fence, not just ±2 h, so the fit has its anchors.
+
+  **Session scope.** A pure `drift_model()` (per-segment fit, segment boundaries at SETs and unmarked gap markers) and `to_true_time(ts, model)` in `analysis/`. The ingest-time band fix in `_fence_clock_steps`'s path. The read-path map for `events` and `cycles`. An opt-in `--true-time` read flag threaded through the shell. Golden tests:
+  - a synthetic controller at a known ppm with injected sets recovers true time to within the sample noise;
+  - a backward-set band unscrambles to file order;
+  - an unmarked fence stops the model.
+
+  **Done when** two controllers sharing a time reference agree after correction to within the drift-sample noise. Routing: Opus throughout (timestamp semantics and gap-marker logic).
+
 ## Deferred — needs a project-wide decision first
 
 - **`get_phase_splits()`'s 10-keyword-argument signature (`data/phases.py:423`).** Real, but *every* Engine's `get_X` convenience wrapper has a similarly long explicit kwarg list by convention (`get_vehicle_counts`, `get_arrival_on_green`, …). Fixing this one in isolation would make it inconsistent with its siblings. If worth doing, decide on a project-wide convention (e.g. a shared options dataclass) first, then apply everywhere at once — don't one-off it.
@@ -32,7 +123,17 @@ Small and actionable; each carries enough file/line detail to be picked up cold.
 
 - **Candidates from the archived SPMs notebooks** (split failures, timing-plan history from codes 131–149, preemption suite, code-13 unused green, sensor-fault detection, and others): see [spms_notebook_ideas.md](spms_notebook_ideas.md). It has the triage against pyatspm and the non-obvious details of each.
 
-- **Correcting for controller clock adjustments, informed by a marker pulse.** The near-term fix above only *fences off* a backward clock set. This is the ambition of actually repairing the affected window, using a known-length detector pulse that `eos_set_time.py` fires across every adjustment it makes (see `econ_itd_tools/ROADMAP.md` — the pulse is the upstream half of this work and has to land first).
+- **Throughput cycle-length optimizer (`atspm optimize`).** For oversaturated critical intersections that set corridor `C`: pick the cycle length and splits that maximize `Σ 3600·n_p(s_p)/C` over saturated critical phases, using the *measured* cumulative discharge curves from `analysis/flow.py` rather than a constant saturation flow. The hypothesis is that existing long cycles (up to 210 s) are too long, because measured rates decay after ~40 s of green, giving a finite interior optimum. Design is settled in two docs; don't re-litigate them: [design_throughput_optimizer.md](design_throughput_optimizer.md) (objective, regime, solver shape, scope) and [design_optimizer_solver.md](design_optimizer_solver.md) (implementation-ready addendum from 2026-07-19: curve contract, exact max-plus DP allocation, ring/barrier decomposition, interior/boundary result states and the "lengthen cycle and re-measure" directive, flatness metric, test battery). **Status 2026-10-01:** §6.1 critical movement analysis is done (`atspm critical`); nothing downstream exists yet. Remaining sequence, each step independently testable (addendum D7):
+  1. Flow extensions: `discharge_profiles()` with a shared `_select_cycles` helper and a `stratify` mode (plus `flow --stratify`), and `flow_rate(max_lost=None)` to keep non-qualifying cycles for the classifier.
+  2. `saturation_state()` classifier.
+  3. `analysis/optimizer.py` pure core with the D8 unit tests.
+  4. `plotting/optimizer.py` (throughput-vs-C, allocation, marginal-rate figures).
+  5. `data/optimizer.py` `OptimizerEngine` plus the `optimize` CLI subcommand (`--target/--targetid/--all`).
+  6. `--validate` against real data: existing TOD plans are natural experiments, and the model must predict observed throughput differences between plans before its recommendations are trusted.
+
+  Open before step 5: the new `Min_P{N}_Split` `int_cfg.csv` key needs the owner's sign-off (name, and whether values include clearance). The saturation threshold (0.8), `boundary_rate_tol` (100 vph) and the validation tolerance are provisional until real distributions are seen. Routing: steps 1–3 are functional-core math → Opus; 4–5 follow established patterns and are Gemini-eligible against an Opus-written spec and tests.
+
+- **Correcting for controller clock adjustments, informed by a marker pulse.** The near-term fix above only *fences off* a backward clock set. This is the ambition of actually repairing the affected window, using the SET bracket `eos_set_time.py` now fires across every adjustment (landed 2026-09-30, together with hourly drift pulses). **Superseded in part 2026-10-01 by session items S1 (decoder) and S2 (drift-corrected axis) above.** S2 reopens the (a)/(b)/(c) choice below: absolute hourly drift samples remove (b)'s main objection. The text below is kept as the design record.
 
   What the experiment established about the mechanism (2026-07-29, hardware-verified): recorded offsets track the *controller clock*, not elapsed real time. A file's clock window is always exactly nominal, but its real duration flexes — the −5 s set made a 1-minute file cover 65 real seconds, the +5 s set made one cover 55. So a backward set duplicates a band of labels and a forward set skips one. No events are ever lost or invented; only the labels are wrong.
 
@@ -103,6 +204,52 @@ Small and actionable; each carries enough file/line detail to be picked up cold.
     - *Discharge Flow Rate / Saturation Capacity*: Compare observed maximum discharge rate during saturated green splits (`FlowRateEngine` / `atspm.analysis.flow`) against standard single-lane saturation flow (~1800–1900 vphpl) to infer effective number of discharge lanes per phase (e.g., ~3600 vph peak discharge → 2 lanes).
     - *Arrival / Departure Patterns & Shared Lanes*: Analyze vehicle-by-vehicle arrival patterns, co-actuations across movement detectors, and time-gap distributions during queue clearance to detect shared-lane behavior (e.g. left-turn blockages causing distinct headway distributions in shared thru/left lanes).
     - Surface inferred lane counts as an automated sanity check against `int_cfg.csv` configurations or as a fallback when configuration entries are omitted.
+
+  **Status and direction (added 2026-10-01).** Neither option is built: `int_cfg.csv` has no lane rows (its row types today are `Det`, `Exc`, `Plt`, `RB`, `TM`, `WD`), and `phase_demand()` still divides by `n_detectors` (`analysis/critical.py:369-391`). Nor is either option decided: no key format, no shared-lane rule, no spec.
+  - **Recommendation:** Option 1 first, as the source of truth, with Option 2 later as a cross-check. Have the config record **which lane each stop-bar detector covers**, not just a count per phase. A count fixes critical movement analysis's per-lane basis. Only the detector-to-lane map fixes the optimizer's exposure: its approach curve sums per-detector means (`design_optimizer_solver.md` D0), which double-counts two stop-bar detectors in one lane.
+  - **Hand entry needn't be the only source.** Two cross-project feeds below could populate these rows instead: the *shared signal-network data store* (UTDF lane geometry) and the *EVO zone → detector → lane mapping* (radar sites). Settle the key format with both in mind, and with the optimizer's pending `Min_P{N}_Split` key, since all three add `int_cfg.csv` rows.
+  - **Effect on the optimizer:** it needs lanes less than critical movement analysis does. Its solver uses approach totals and total vph, and the per-lane basis is "for criticality ranking only" (`design_optimizer_solver.md:183`). So lane configuration corrects its inputs but doesn't block building it.
+
+- **Shared signal-network data store (central UTDF) with an `int_cfg` puller.** *(Added 2026-10-01, owner's direction; cross-project with `econ_itd_tools`.)* One store of each managed intersection's timing, phasing and, eventually, geometry and detection, built from the controller databases. `econ_itd_tools` (EOS) and pyatspm both read it, instead of each project hand-maintaining its own copy.
+  - **What exists:** only a one-off script, `econ_itd_tools/working/build_utdf.py` (≈520 lines). It writes Synchro UTDF `Phasing.CSV` and `Timing.CSV` for the 6 Moscow intersections (`working/README.md`). Five sites are parsed from EOS DBPrint text exports. The sixth (6th & Main, an ASC/3) is read by hardcoded byte offsets from its binary database. Some values are hand-entered fallbacks ("per user verification" ped timing). It produces no lanes, detectors or volumes. Nothing in pyatspm or `volume_explorer` reads or writes UTDF. The one UTDF reference here is SPMs notebook idea O (a turning-movement volume export whose header looks invented; check it against Synchro's spec before reuse).
+  - **What makes it buildable network-wide:** the EOS effort to reverse-engineer the controller database files so they can be read directly. That replaces DBPrint parsing and per-site offsets. It lives in `econ_itd_tools` and is that project's to sequence.
+  - **pyatspm's side is a puller, not a second source of truth.** CLAUDE.md §3 makes `int_cfg.csv` the single source of truth for `config`. So the puller *writes `int_cfg.csv`* (or a proposed diff against it) from the store, and ingestion is unchanged. Hand edits stay possible, and the puller must report where they disagree with the store rather than silently overwrite them.
+  - **Overlap with `int_cfg`:**
+
+    | `int_cfg` today / planned | from the store |
+    |---|---|
+    | `RB` (ring-barrier) | phasing: phases in use and the ring/barrier structure |
+    | `Det` (detector → phase) | the controller's detector assignment, which is the EOS 6 > 1 screen `econ_itd_tools` is already mapping; detector channel and position, if UTDF carries them |
+    | `TM` (movement → detectors) | lane geometry plus detector placement |
+    | planned lane rows (above) | UTDF lane geometry: lanes per lane group, shared lanes, storage |
+    | planned `Min_P{N}_Split` (optimizer) | timing: min green plus clearance per phase |
+
+    UTDF's lane data includes lane counts, shared designations and storage length. Whether it carries **detector** placement (number, position, size, channel) depends on the Synchro version. Verify against the UTDF spec of the version in use before designing around it. If it does, much of `Det`/`TM` could come from the store too.
+  - **Open decisions (cross-project).**
+    1. **Format.** UTDF files themselves, or a normalized store (SQLite) with UTDF as one export. Recommended: the latter. UTDF is Synchro's interchange format: one snapshot, no history, and no field for things like marker peds or controller channel numbering. A store can export UTDF on demand.
+    2. **Ownership.** Recommended: `econ_itd_tools` owns the schema and the builder, since it reads the controllers. pyatspm owns only its puller.
+    3. **Time.** `config` is temporal (`start_date`/`end_date`), so the store must be too. That ties it to the controller-settings history item below.
+  - **Not yet:** spec, schema, or an entry in `econ_itd_tools/ROADMAP.md`. This entry is pyatspm's half; mirror it there when that project scopes the store.
+
+- **Controller-settings history: programmed (EOS) and observed (event log).** *(Added 2026-10-01; cross-project.)* Two views of the same thing, settings over time, that should be built to meet.
+  - **Observed (pyatspm):** SPMs notebook idea B in [spms_notebook_ideas.md](spms_notebook_ideas.md) §2.2. It rebuilds timing-plan history from controller events 131–149 (plan, cycle, offset, splits per phase each time a plan is selected). pyatspm reads only 131 today (`cycles.py:_merge_coordination_plan`). The notebook's filter bug is documented there: it drops legitimate 10 s splits and 0 s offsets, so don't copy it.
+  - **Programmed (EOS):** a history tracker the owner plans in `econ_itd_tools`: periodic snapshots of the controller database, diffed over time. Not started, and not yet in that project's roadmap. Its nearest existing work is the detector-settings item there ("audit … against an intended baseline and diff two controllers").
+  - **How they meet:** the event log shows what the controller *ran*, and the database shows what it was *programmed* to run. Cross-checking catches unlogged keypad changes, plans that never fire, and splits that differ from programming. The programmed history is also the natural feed for the time ranges of `int_cfg`'s temporal `config` and of the shared store above. Today those ranges are hand-set, as in the date header of each intersection's `int_cfg.csv`.
+  - **pyatspm's piece, buildable now and independent of EOS:** decode 132–149 alongside 131 into a plan-history table or report, with a CLI subcommand (CLAUDE.md §7). Candidate for promotion once the history tracker's output format is known, so the two can share a shape.
+
+- **EVO radar zones → controller detectors → lanes.** *(Added 2026-10-01; cross-project, about half of signals.)* EVO radar project files (`.iprj`, documented in `econ_itd_tools/EVO/iprj_designer/IPRJ_FORMAT.md`, with parse/write code in `iprj_io` and `dxf_iprj_excel_conv.py`) hold, per sensor, up to 64 event zones. Each zone has a polygon (≤10 vertices, in the background image's world coordinates), `ZoneType` (Motion / Presence / Sidewalk), `PhaseNumber`, `OutputNumber` and a free-text `ZoneName` (e.g. `"PH 4 SB inside"`). Zones were confirmed by overlay to "land precisely on the lanes". `OutputNumber` maps 1:1 to the controller detector input it drives.
+  - **The chain:**
+    1. EVO zone (polygon) → `OutputNumber`
+    2. → controller detector, whose phase assignment comes from EOS's 6 > 1 screen
+    3. → pyatspm's detector event parameter and `int_cfg` `Det` rows.
+
+    Following it gives each pyatspm detector a physical footprint. That yields the detector-to-lane map recommended in the lane configuration entry, the stop-bar/advance distinction, setbacks, and which detectors really sit on a shared lane, without hand entry. It can feed the shared store, `int_cfg` directly, or both.
+  - **Gaps:**
+    - Lanes themselves aren't stored in `.iprj`: zones are drawn *over* them, so lane count and identity must come from UTDF geometry or hand entry, with zones assigned to lanes against it.
+    - Coordinates are image pixels, so distances in feet need a per-site scale; check the EVO calibration plan (`CALIBRATION_ALIGNMENT_PLAN.md`) for one.
+    - `OutputNumber` values 0 and 17–64 appear in the surveyed files, so verify the zone-output → controller-input numbering per site.
+    - Only radar sites are covered, so loop sites need another source.
+  - **Next step:** a read-only prototype on one radar site that pyatspm already ingests. Join `.iprj` zones to `Det` rows through the controller's detector assignment, and hand-check the result against the background image.
 
 ## Rejected / no action
 
