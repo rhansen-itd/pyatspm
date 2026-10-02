@@ -11,7 +11,7 @@ _select_cycles: default mode = modal split ± tolerance, then the busiest
     percent within each (coord_plan, round(split)) stratum, pooled.
 flow_rate termination: codes 4/5/6 in a window → gap_out/max_out/force_off.
     Unfiltered output adds q=0 rows for lanes with no departure.
-saturation_state / saturated_cycles: a window qualifies only when it maxed
+saturation_state (advisory): a window qualifies only when it maxed
     out or was forced off and (default) every lane has lost <= max_lost;
     all_lanes=False judges each (window, lane) row alone.
 discharge_profiles: approach cumulative curve N(t) = SUM of per-detector
@@ -30,7 +30,6 @@ from atspm.analysis.flow import (
     discharge_profiles,
     flow_rate,
     rate_profiles,
-    saturated_cycles,
     saturation_state,
 )
 
@@ -350,18 +349,3 @@ class TestSaturationState:
         assert out.empty
         assert "saturated" in out.columns
 
-
-class TestSaturatedCycles:
-
-    def test_matches_classifier_rule(self):
-        df = _obs(TestSaturationState._ROWS)
-        all_l = saturated_cycles(df)
-        assert sorted(set(all_l["green_ts"])) == [1.0, 4.0]
-        assert len(all_l) == 4                    # whole windows kept
-        per = saturated_cycles(df, all_lanes=False)
-        assert len(per) == 5
-        assert per.loc[per["green_ts"] == 2.0, "det"].tolist() == [_DET_A]
-
-    def test_empty(self):
-        assert saturated_cycles(_obs([]).reindex(columns=_obs(
-            [(2, _DET_A, 1.0, 1.0, "max_out")]).columns)).empty

@@ -41,7 +41,7 @@ The ``normalize`` parameter selects how the overhead is estimated; see
 approach cumulative curve ``N(t)``, unnormalised, for the throughput
 optimizer.  ``saturation_state`` classifies phases as saturated from the
 share of max-out / force-off cycles in an unfiltered ``flow_rate``
-result, and ``saturated_cycles`` returns those cycles for the curves.
+result.  It is advisory: the optimizer takes saturated phases as declared.
 
 Gap Marker Rule
 ---------------
@@ -904,7 +904,12 @@ def _saturation_pass(
     max_lost: float,
     all_lanes: bool,
 ) -> pd.Series:
-    """Boolean pass flag per *cycle_df* row (see :func:`saturated_cycles`)."""
+    """Boolean pass flag per *cycle_df* row.
+
+    A row passes when its window ended by max-out or force-off and its
+    lane had ``lost <= max_lost``.  With *all_lanes*, every lane of the
+    window must pass for any row of it to pass.
+    """
     capped = cycle_df["termination"].isin(_SATURATED_TERMINATIONS)
     lane_ok = cycle_df["lost"].astype(float) <= max_lost
     if not all_lanes:
@@ -915,54 +920,26 @@ def _saturation_pass(
     return capped & every_lane
 
 
-def saturated_cycles(
-    cycle_df: pd.DataFrame,
-    max_lost: float = 10.0,
-    all_lanes: bool = True,
-) -> pd.DataFrame:
-    """Keep the rows of an unfiltered ``cycle_df`` that count as saturated.
-
-    A window qualifies only when its green ended by **max-out or
-    force-off**.  End slack alone can't tell a gap-out from a saturated
-    phase: ``lost`` runs to the end of red clearance, so a phase that gaps
-    out a second or two after its last vehicle still scores under
-    ``max_lost``.  On top of that:
-
-    * ``all_lanes=True`` (default) — every lane in the window must have
-      ``lost <= max_lost``; all its rows are kept or dropped together.
-    * ``all_lanes=False`` — each (window, lane) row is judged alone.
-
-    Feed the result to :func:`discharge_profiles` so the curves use the
-    same cycles that :func:`saturation_state` counts.
-
-    Args:
-        cycle_df: Unfiltered per-cycle summary from
-            ``flow_rate(..., max_lost=None)``, whose ``termination``
-            column needs codes 4–6 in the events.
-        max_lost: Per-lane end-slack limit in seconds.  Default ``10.0``.
-        all_lanes: Require every lane of a window to pass.  Default
-            ``True``.
-
-    Returns:
-        The qualifying rows of *cycle_df*, index reset.
-    """
-    if cycle_df.empty:
-        return cycle_df.iloc[0:0]
-    keep = _saturation_pass(cycle_df, max_lost, all_lanes)
-    return cycle_df.loc[keep].reset_index(drop=True)
-
-
 def saturation_state(
     cycle_df: pd.DataFrame,
     max_lost: float = 10.0,
     threshold: float = 0.8,
     all_lanes: bool = True,
 ) -> pd.DataFrame:
-    """Classify each phase as saturated from its share of capped cycles.
+    """Advisory saturation check per phase from its share of capped cycles.
 
-    Uses the per-row rule of :func:`saturated_cycles`: the window maxed
-    out or was forced off, and (``all_lanes=True``, the default) every lane
-    had ``lost <= max_lost``.  ``pass_rate`` is the share of windows that
+    **Advisory only.**  The optimizer takes the saturated phases as an
+    engineer's declaration, not from this function: end slack can't
+    reliably tell saturation apart (a coordinated phase always forces off,
+    and a busy unsaturated through movement often has a departure near
+    yellow).  This reports the evidence beside that declaration.  Curves
+    are built by percentile selection (:func:`discharge_profiles`), never
+    from these verdicts.
+
+    A window qualifies when it maxed out or was forced off, and
+    (``all_lanes=True``, the default) every lane had ``lost <= max_lost``.
+    Gap-outs never qualify, because ``lost`` includes clearance and a
+    gap-out scores under ``max_lost`` by construction.  ``pass_rate`` is the share of windows that
     qualify; with ``all_lanes=False`` it is the share of (window, lane)
     rows.  A phase is saturated when ``pass_rate`` reaches *threshold*.
 

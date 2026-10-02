@@ -474,6 +474,17 @@ Marker Rule" section (house convention).
    `threshold=0.8` is provisional pending real distributions (parent
    §6.3); it is a plain parameter end to end.
 
+   **Amended 2026-10-01 (owner decision; supersedes the classifier's role
+   above and in the shell orchestration below).** `saturated` comes from
+   the engineer as `--saturated N ...`, not from `saturation_state`. End
+   slack can't reliably separate the regimes: `lost` includes clearance,
+   so gap-outs pass, and coordinated phases always force off. As built,
+   `saturation_state` gates on max-out/force-off (`flow_rate`'s new
+   `termination` column), requires all lanes by default, and is printed
+   as an **advisory** beside the declaration. Curves stay on percentile
+   selection (`discharge_profiles`); no per-cycle saturation filter feeds
+   them. The intended eventual advisory is split failures (GOR/ROR5).
+
 §6.1 (`critical.py`) is already implemented and is consumed verbatim.
 
 ### New modules
