@@ -22,3 +22,6 @@ See CLAUDE.md "Documentation Workflow" for the rules.
 - [src/atspm/data/manager.py] int_cfg.csv Clk: category → Clk_Behind/Clk_Ahead/Clk_Set config columns
 - [src/atspm/data/ingestion.py] backward-clock-step fences stored with parameter = -2 (comms gaps stay -1)
 - [src/atspm/data/reader.py] check_data_quality: gap_count excludes clock-step fences; new clock_step_count
+- [src/atspm/data/__init__.py] export ClockMarkEngine, get_clock_marks
+- [src/atspm/plotting/__init__.py] export plot_clock_drift
+- [src/atspm/cli.py] new clock-drift subcommand

@@ -64,6 +64,11 @@ from .critical import (
     get_critical_movements,
 )
 
+from .clock_marks import (
+    ClockMarkEngine,
+    get_clock_marks,
+)
+
 from .video import (
     ShapeConfig,
     resolve_stopbar_target,
@@ -117,6 +122,9 @@ __all__ = [
     # Critical
     'CriticalMovementEngine',
     'get_critical_movements',
+    # Clock marks
+    'ClockMarkEngine',
+    'get_clock_marks',
     # Video
     'ShapeConfig',
     'resolve_stopbar_target',

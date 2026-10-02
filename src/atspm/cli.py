@@ -18,6 +18,7 @@ Exposes subcommands from intersection configuration setup through reporting and 
     atspm video-overlay      --targetid <id> [...]       Render a video with live status overlays
     atspm video-locate-phase-change --targetid <id> [...] Find a phase's exact transition time for --start alignment
     atspm video-sync         --targetid <id> [...]       Find corrected --start from signal lamps
+    atspm clock-drift        --targetid <id> [...]       Decode clock marks and plot controller clock drift
 
 The package must be installed (``pip install -e .``) for the ``atspm`` entry
 point to be available.  All logic uses clean absolute imports from the
@@ -1063,6 +1064,105 @@ def handle_critical(args: argparse.Namespace) -> None:
         except Exception as exc:
             print(
                 f"\n❌ Unexpected error in critical movement analysis for "
+                f"{target_name}: {exc}",
+                file=sys.stderr,
+            )
+            if getattr(args, "verbose", False):
+                traceback.print_exc()
+
+
+# ---------------------------------------------------------------------------
+# clock-drift
+# ---------------------------------------------------------------------------
+
+def _clock_drift_single_intersection(target_name: str, args: argparse.Namespace) -> None:
+    """Core logic to decode clock marks and plot drift for one intersection.
+
+    Resolves the database path and timezone from ``metadata.json``, then
+    delegates to :class:`atspm.data.clock_marks.ClockMarkEngine`. All I/O
+    (SQL queries, CSV writing, HTML plot rendering) is handled inside the engine.
+
+    Args:
+        target_name: Exact intersection folder name
+            (e.g., ``'2068_US-95_and_SH-8'``).
+        args: Parsed CLI arguments from the ``clock-drift`` subcommand.
+    """
+    from atspm.data.clock_marks import ClockMarkEngine
+
+    target_dir = _get_target_dir(target_name)
+    meta = _load_metadata(target_dir)
+    db_path = _resolve_db_path(target_dir, meta)
+
+    output_dir = target_dir / "outputs"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    int_name = meta.get("intersection_name", target_name)
+    timezone = args.timezone or meta.get("timezone") or DEFAULT_TIMEZONE
+
+    if not db_path.exists():
+        _die(
+            f"Database not found: {db_path}\n"
+            f"Run 'atspm process --target {target_name}' first."
+        )
+
+    # Determine send_log_path
+    send_log_path = args.send_log
+    if send_log_path is None:
+        candidate = target_dir / "eos-time.jsonl"
+        if candidate.exists():
+            send_log_path = candidate
+
+    print(f"\n⏰  Clock drift analysis for {int_name}")
+    print(f"    DB:       {db_path.name}")
+    print(f"    Window:   {args.start} → {args.end}")
+    if send_log_path:
+        print(f"    Send log: {send_log_path}")
+
+    engine = ClockMarkEngine(db_path=db_path, timezone=timezone)
+
+    try:
+        engine.decode(
+            start=args.start,
+            end=args.end,
+            send_log_path=send_log_path,
+            output_dir=output_dir,
+        )
+    except Exception as exc:
+        if args.verbose:
+            traceback.print_exc()
+        _die(f"Clock drift analysis failed: {exc}")
+
+
+def handle_clock_drift(args: argparse.Namespace) -> None:
+    """Decode clock marks and plot drift for one or more intersections.
+
+    Args:
+        args: Parsed CLI arguments from the ``clock-drift`` subcommand.
+    """
+    if getattr(args, "all", False) and getattr(args, "send_log", None):
+        _die("--send-log cannot be combined with --all (one send log belongs to one controller).")
+
+    intersections_dir = _get_intersections_dir()
+
+    if getattr(args, "all", False):
+        targets = [p.name for p in intersections_dir.iterdir() if p.is_dir()]
+        if not targets:
+            _die(f"No intersection directories found in {intersections_dir}")
+        print(
+            f"\n🌍 Batch clock drift analysis for "
+            f"{len(targets)} intersections..."
+        )
+    else:
+        targets = [_resolve_target_name(args.target, args.targetid)]
+
+    for target_name in targets:
+        try:
+            _clock_drift_single_intersection(target_name, args)
+        except SystemExit:
+            print(f"\n⏭️ Skipping {target_name} due to errors.", file=sys.stderr)
+        except Exception as exc:
+            print(
+                f"\n❌ Unexpected error in clock drift analysis for "
                 f"{target_name}: {exc}",
                 file=sys.stderr,
             )
@@ -2550,6 +2650,76 @@ def _add_critical_parser(subs: argparse._SubParsersAction) -> None:
     p_crit.set_defaults(func=handle_critical)
 
 
+def _add_clock_drift_parser(subs: argparse._SubParsersAction) -> None:
+    """Attach the ``clock-drift`` subcommand parser."""
+    p_clk = subs.add_parser(
+        "clock-drift",
+        help="Decode clock marks and plot controller clock drift.",
+        description=(
+            "Decode pedestrian-call clock marks from the controller log,\n"
+            "measure controller clock drift against the host clock,\n"
+            "and identify clock correction sets.\n\n"
+            "Outputs (CSV and HTML plot) are saved to:\n"
+            "  intersections/<target>/outputs/"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    group_clk = p_clk.add_mutually_exclusive_group(required=True)
+    group_clk.add_argument(
+        "--target",
+        metavar="FOLDER",
+        help="Exact intersection folder name (e.g. '2068_US-95_and_SH-8').",
+    )
+    group_clk.add_argument(
+        "--targetid",
+        metavar="ID",
+        help="Intersection ID prefix (e.g. '2068').",
+    )
+    group_clk.add_argument(
+        "--all",
+        action="store_true",
+        help="Run the analysis for all intersections in the directory.",
+    )
+    p_clk.add_argument(
+        "--start",
+        required=True,
+        metavar="DATETIME",
+        help=(
+            "Period start (local time): 'YYYY-MM-DD' or 'YYYY-MM-DD HH:MM' "
+            "for sub-day peak periods."
+        ),
+    )
+    p_clk.add_argument(
+        "--end",
+        required=True,
+        metavar="DATETIME",
+        help=(
+            "Period end (local time): 'YYYY-MM-DD' (inclusive whole day) or "
+            "'YYYY-MM-DD HH:MM' (exclusive)."
+        ),
+    )
+    p_clk.add_argument(
+        "--send-log",
+        dest="send_log",
+        default=None,
+        metavar="PATH",
+        help="The head unit's eos-time.jsonl send log file.",
+    )
+    p_clk.add_argument(
+        "--timezone",
+        default=None,
+        metavar="TZ",
+        help="Override the timezone from metadata.json (e.g. 'US/Pacific').",
+    )
+    p_clk.add_argument(
+        "--verbose",
+        action="store_true",
+        default=False,
+        help="Print full tracebacks for any errors.",
+    )
+    p_clk.set_defaults(func=handle_clock_drift)
+
+
 def _add_plot_coordination_parser(subs: argparse._SubParsersAction) -> None:
     """Attach the ``plot-coordination`` subcommand parser."""
     p_coord = subs.add_parser(
@@ -2870,6 +3040,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_aog_parser(subs)
     _add_flow_parser(subs)
     _add_critical_parser(subs)
+    _add_clock_drift_parser(subs)
     _add_plot_coordination_parser(subs)
     _add_plot_termination_parser(subs)
     _add_discrepancies_parser(subs)
