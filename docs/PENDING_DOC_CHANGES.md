@@ -20,3 +20,4 @@ See CLAUDE.md "Documentation Workflow" for the rules.
 - [src/atspm/data/detectors.py] DetectorEngine uses every config overlapping the window; fetches ±900 s edge margin
 - [src/atspm/analysis/__init__.py] export discharge_profiles
 - [src/atspm/cli.py] flow --stratify; flow now reads Det_P{N}_Stop_Bar as well as _Stopbar
+- [src/atspm/analysis/__init__.py] export saturation_state

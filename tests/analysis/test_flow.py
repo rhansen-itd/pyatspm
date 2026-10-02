@@ -9,6 +9,9 @@ flow_rate(max_lost=None): the end-slack filter is off; every (window,
 _select_cycles: default mode = modal split ± tolerance, then the busiest
     pct percent of cycles by summed q.  Stratified mode = busiest pct
     percent within each (coord_plan, round(split)) stratum, pooled.
+saturation_state: per phase, pass_rate = share of (window, detector) rows
+    with lost <= max_lost; saturated = pass_rate >= threshold.  Diagnostics:
+    window_pass_rate (all lanes in a window pass) and min_lane_pass_rate.
 discharge_profiles: approach cumulative curve N(t) = SUM of per-detector
     mean cumulative counts on a uniform grid from 0 to t_dom, where t_dom
     is the earliest per-detector last supported row.  Leading rows are 0,
@@ -25,6 +28,7 @@ from atspm.analysis.flow import (
     discharge_profiles,
     flow_rate,
     rate_profiles,
+    saturation_state,
 )
 
 _PHASE = 2
@@ -225,3 +229,57 @@ class TestDischargeProfiles:
         selected, prof = discharge_profiles(cycle_df, vehicle_df)
         assert selected.empty and prof.empty
         assert list(prof.columns) == ["n", "inst"]
+
+
+def _obs(rows) -> pd.DataFrame:
+    """cycle_df rows from ``(phase, det, green_ts, lost)``."""
+    return pd.DataFrame(
+        [dict(det=d, phase=p, green_ts=g, cycle_start=g, coord_plan=1.0,
+              split=46.0, green_dur=40.0, clear_dur=6.0, lost=l, q=10)
+         for p, d, g, l in rows]
+    )
+
+
+class TestSaturationState:
+
+    def test_pooled_rate_and_diagnostics(self):
+        # Phase 2: lane A passes 4/4; lane B passes 2/4.
+        # Windows 1-2 all pass, 3-4 fail on B.
+        rows = [(2, _DET_A, g, 3.0) for g in (1.0, 2.0, 3.0, 4.0)]
+        rows += [(2, _DET_B, 1.0, 3.0), (2, _DET_B, 2.0, 10.0),
+                 (2, _DET_B, 3.0, 25.0), (2, _DET_B, 4.0, 10.01)]
+        out = saturation_state(_obs(rows)).iloc[0]
+        assert out["phase"] == 2
+        assert out["n_cycles"] == 4
+        assert out["n_obs"] == 8
+        assert out["pass_rate"] == pytest.approx(0.75)   # 10.0 is a pass
+        assert out["window_pass_rate"] == pytest.approx(0.5)
+        assert out["min_lane_pass_rate"] == pytest.approx(0.5)
+        assert not out["saturated"]                       # 0.75 < 0.8
+
+    def test_threshold_and_max_lost_are_parameters(self):
+        rows = [(2, _DET_A, g, l) for g, l in
+                ((1.0, 2.0), (2.0, 4.0), (3.0, 6.0), (4.0, 8.0), (5.0, 30.0))]
+        assert saturation_state(_obs(rows))["saturated"].iloc[0]          # 0.8
+        assert not saturation_state(_obs(rows), max_lost=5.0)["saturated"].iloc[0]
+        assert not saturation_state(_obs(rows), threshold=0.9)["saturated"].iloc[0]
+
+    def test_one_row_per_phase_sorted(self):
+        rows = [(6, _DET_A, 1.0, 30.0), (2, _DET_B, 1.0, 1.0)]
+        out = saturation_state(_obs(rows))
+        assert out["phase"].tolist() == [2, 6]
+        assert out["saturated"].tolist() == [True, False]
+
+    def test_from_unfiltered_flow_rate(self):
+        events = _events([(40.0, 1, {_DET_A: [5.0, 20.0, 40.0]}),
+                          (40.0, 1, {_DET_A: [5.0, 10.0]})])
+        cycle_df, _ = flow_rate(events, _PHASE, [_DET_A], max_lost=None)
+        out = saturation_state(cycle_df).iloc[0]
+        assert out["n_cycles"] == 2
+        assert out["pass_rate"] == pytest.approx(0.5)
+
+    def test_empty(self):
+        out = saturation_state(pd.DataFrame(columns=_obs(
+            [(2, _DET_A, 1.0, 1.0)]).columns))
+        assert out.empty
+        assert "saturated" in out.columns

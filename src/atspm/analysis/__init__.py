@@ -56,6 +56,7 @@ from .flow import (
     discharge_profiles,
     flow_rate,
     rate_profiles,
+    saturation_state,
 )
 
 from .critical import (
@@ -98,6 +99,7 @@ __all__ = [
     'flow_rate',
     'rate_profiles',
     'discharge_profiles',
+    'saturation_state',
     # Critical
     'ring_barrier_structure',
     'movement_phase_map',

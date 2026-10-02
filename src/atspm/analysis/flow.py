@@ -39,7 +39,8 @@ The ``normalize`` parameter selects how the overhead is estimated; see
 
 ``discharge_profiles`` uses the same cycle selection but returns the raw
 approach cumulative curve ``N(t)``, unnormalised, for the throughput
-optimizer.
+optimizer.  ``saturation_state`` classifies phases as saturated from the
+end-slack pass rate of an unfiltered ``flow_rate`` result.
 
 Gap Marker Rule
 ---------------
@@ -800,3 +801,87 @@ def discharge_profiles(
         index=grid,
     )
     return selected, profile_df
+
+
+_SATURATION_SCHEMA = [
+    "phase",
+    "n_cycles",
+    "n_obs",
+    "pass_rate",
+    "window_pass_rate",
+    "min_lane_pass_rate",
+    "saturated",
+]
+
+
+def saturation_state(
+    cycle_df: pd.DataFrame,
+    max_lost: float = 10.0,
+    threshold: float = 0.8,
+) -> pd.DataFrame:
+    """Classify each phase as saturated from its end-slack pass rate.
+
+    A (window, detector) observation passes when its end slack ``lost`` is
+    at most *max_lost*: the lane was still discharging near the end of the
+    split.  A phase is saturated when the share of passing observations
+    reaches *threshold*.
+
+    The input must be **unfiltered** — ``flow_rate(..., max_lost=None)``.
+    A ``cycle_df`` already filtered by ``flow_rate``'s default
+    ``max_lost`` holds only passing rows, so every phase would read 1.0.
+    For a per-period verdict (e.g. per coordination plan), filter
+    *cycle_df* to that period first.
+
+    Two diagnostics sit beside the verdict, because how lanes combine
+    into a phase is still open (``docs/ROADMAP.md``, optimizer entry):
+    ``window_pass_rate`` counts a window as passing only when every lane
+    observed in it passes, and ``min_lane_pass_rate`` is the weakest
+    lane's own rate.  A lane with no departures in a window has no row in
+    ``cycle_df`` and so does not count against that window.
+
+    ``threshold=0.8`` is provisional until real distributions are seen.
+
+    Gap Marker Rule: the input comes from :func:`flow_rate`, whose split
+    windows never span a gap marker; this function adds no event logic.
+
+    Args:
+        cycle_df: Unfiltered per-cycle summary from :func:`flow_rate`.
+        max_lost: End-slack limit in seconds for an observation to pass.
+            Default ``10.0``.
+        threshold: Minimum ``pass_rate`` for a saturated verdict.
+            Default ``0.8``.
+
+    Returns:
+        One row per phase, sorted by phase::
+
+            phase               int
+            n_cycles            int    – split windows observed
+            n_obs               int    – (window, detector) observations
+            pass_rate           float  – share of observations passing
+            window_pass_rate    float  – share of windows where all pass
+            min_lane_pass_rate  float  – lowest per-detector pass rate
+            saturated           bool   – pass_rate >= threshold
+
+        Empty (same columns) when *cycle_df* is empty.
+    """
+    if cycle_df.empty:
+        return pd.DataFrame(columns=_SATURATION_SCHEMA)
+
+    obs = cycle_df[["phase", "det", "green_ts"]].copy()
+    obs["_pass"] = cycle_df["lost"].astype(float) <= max_lost
+
+    by_phase = obs.groupby("phase")["_pass"].agg(n_obs="size", pass_rate="mean")
+    windows = obs.groupby(["phase", "green_ts"])["_pass"].all()
+    by_window = windows.groupby(level="phase").agg(
+        n_cycles="size", window_pass_rate="mean"
+    )
+    by_lane = (
+        obs.groupby(["phase", "det"])["_pass"].mean()
+        .groupby(level="phase").min()
+        .rename("min_lane_pass_rate")
+    )
+
+    out = by_phase.join(by_window).join(by_lane).reset_index()
+    out["phase"] = out["phase"].astype(int)
+    out["saturated"] = out["pass_rate"] >= threshold
+    return out[_SATURATION_SCHEMA].sort_values("phase").reset_index(drop=True)
