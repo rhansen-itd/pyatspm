@@ -228,6 +228,15 @@ class TestDischargeProfiles:
                                 min_cycles=3)
         assert (np.diff(prof["n"].to_numpy()) >= 0).all()
 
+    def test_single_vehicle_cycle_does_not_raise(self):
+        # One vehicle per detector has no headway, so inst is all NaN and
+        # pivot_table would drop every column of the inst pivot.
+        one = {_DET_A: [3.0], _DET_B: [4.0]}
+        selected, prof = self._profile([(40.0, 1, one)], min_cycles=1)
+        assert not selected.empty
+        assert list(prof.columns) == ["n", "inst"]
+        assert prof["inst"].isna().all()
+
     def test_empty_inputs(self):
         cycle_df, vehicle_df = flow_rate(pd.DataFrame(
             columns=["timestamp", "event_code", "parameter",

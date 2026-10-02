@@ -409,9 +409,13 @@ def _wide_profile(
     if veh.empty:
         return pd.DataFrame()
 
+    # pivot_table drops all-NaN columns (e.g. ``inst`` for a cycle with a
+    # single vehicle has no headway); restore them so every detector keeps
+    # its block and its ``"{det} Mean"`` column.
     wide = (
         veh.pivot_table(index="_t", columns="_label",
                         values=value_col, aggfunc="last")
+        .reindex(columns=sorted(veh["_label"].unique()))
         .sort_index()
     )
 
