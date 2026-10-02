@@ -235,7 +235,7 @@ class DatabaseManager:
         """Import intersection configuration from the ``int_cfg.csv`` format.
 
         Transforms ``int_cfg.csv`` into the hybrid schema:
-        - Standard rows (TM, RB, Det, WD) become wide columns.
+        - Standard rows (TM, RB, Det, WD, Clk) become wide columns.
         - Exclusion rows (Exc) become JSON in ``TM_Exclusions``.
 
         Args:
@@ -310,6 +310,10 @@ class DatabaseManager:
                 for param, value in cat_data.items():
                     if pd.notna(value) and str(value).strip():
                         result[f"WD_{param.replace(' ', '_')}"] = str(value).strip()
+            elif category == "Clk:":
+                for param, value in cat_data.items():
+                    if pd.notna(value) and str(value).strip():
+                        result[f"Clk_{param.replace(' ', '_')}"] = str(value).strip()
         return result
 
     def _parse_exclusions(self, exc_series: pd.Series) -> list:

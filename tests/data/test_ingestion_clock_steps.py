@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 import pytz
 
+from atspm.analysis.decoders import CLOCK_STEP_FENCE_PARAM
 from atspm.data.ingestion import IngestionEngine
 from atspm.data.manager import DatabaseManager
 
@@ -100,6 +101,20 @@ class TestBackwardClockStepWithinAFile:
         # Just below the first post-step event (26.2 s), never on a real one.
         assert _markers(empty_db) == pytest.approx([base + 26.15])
         assert engine.get_ingestion_stats()["clock_steps"] == 1
+
+    def test_marker_is_tagged_as_a_clock_step_fence(self, empty_db, raw_dir):
+        # The parameter tells a fenced step from lost data (comms gap = -1),
+        # so the clock-mark decoder can pair a set bracket across it.
+        _write_datz(
+            raw_dir, "ECON_10.0.0.1_2026_06_20_0400.datZ", "6/20/2026,04:00:00.0",
+            offsets_deciseconds=(0, 200, 310, 262, 300),
+        )
+        IngestionEngine(empty_db, raw_dir, timezone="US/Mountain").run()
+
+        with DatabaseManager(empty_db) as m:
+            cur = m.conn.cursor()
+            cur.execute("SELECT parameter FROM events WHERE event_code = -1")
+            assert [r[0] for r in cur.fetchall()] == [CLOCK_STEP_FENCE_PARAM]
 
     def test_marker_sorts_between_the_pre_step_band_and_the_replay(
         self, empty_db, raw_dir

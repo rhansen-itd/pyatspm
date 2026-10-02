@@ -10,6 +10,7 @@ Modules:
 - cycles:   Cycle detection and barrier logic
 - counts:   Vehicle and pedestrian count aggregations
 - aog:      Arrival on Green calculations
+- clock_marks: eos_set_time drift/set marker decoding
 """
 
 from .decoders import (
@@ -64,6 +65,15 @@ from .critical import (
     critical_movement_analysis,
 )
 
+from .clock_marks import (
+    MarkerPeds,
+    marker_peds_from_config,
+    drop_marker_events,
+    send_log_pulses,
+    pair_marker_pulses,
+    decode_clock_marks,
+)
+
 __all__ = [
     # Decoders
     'DatZDecodingError',
@@ -101,4 +111,11 @@ __all__ = [
     'movement_phase_map',
     'phase_demand',
     'critical_movement_analysis',
+    # Clock marks
+    'MarkerPeds',
+    'marker_peds_from_config',
+    'drop_marker_events',
+    'send_log_pulses',
+    'pair_marker_pulses',
+    'decode_clock_marks',
 ]

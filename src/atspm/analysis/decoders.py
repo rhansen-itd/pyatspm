@@ -24,6 +24,11 @@ _HEADER_PATTERN = re.compile(
 )
 
 
+# ``event_code = -1`` marker kinds, carried in ``parameter``.
+COMMS_GAP_PARAM = -1          # data missing (comms gap, absent files)
+CLOCK_STEP_FENCE_PARAM = -2   # backward controller-clock step, fenced at ingest
+
+
 class DatZDecodingError(Exception):
     """
     Custom exception for DatZ file decoding errors.
@@ -359,17 +364,23 @@ def parse_datz_batch(
 
 def insert_gap_marker(
     df: pd.DataFrame, 
-    gap_timestamp: float
+    gap_timestamp: float,
+    parameter: int = COMMS_GAP_PARAM,
 ) -> pd.DataFrame:
     """
     Insert a gap/discontinuity marker into event DataFrame.
     
-    Gap markers use event_code = -1, parameter = -1 to signal
-    data discontinuity (e.g., missing files).
+    Gap markers use event_code = -1 to signal a hard reset.  The parameter
+    says why: ``COMMS_GAP_PARAM`` (-1) for missing data (e.g. missing files),
+    ``CLOCK_STEP_FENCE_PARAM`` (-2) for a backward controller-clock step.
+    Every consumer must stop at either kind; the parameter only lets the
+    clock-mark decoder tell a fenced step from lost data.
     
     Args:
         df: Existing events DataFrame
         gap_timestamp: Timestamp where gap begins (UTC epoch float)
+        parameter: Marker kind, ``COMMS_GAP_PARAM`` or
+            ``CLOCK_STEP_FENCE_PARAM``.
         
     Returns:
         DataFrame with gap marker inserted and re-sorted
@@ -382,7 +393,7 @@ def insert_gap_marker(
     gap_row = pd.DataFrame([{
         'timestamp': gap_timestamp,
         'event_code': -1,
-        'parameter': -1
+        'parameter': parameter
     }])
     
     combined = pd.concat([df, gap_row], ignore_index=True)
