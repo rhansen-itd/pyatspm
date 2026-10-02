@@ -317,6 +317,19 @@ class TestBoundary:
         assert s2["s_star"] == 40.0
         assert s2["surplus"] and not s2["at_boundary"]
 
+    def test_stop_just_short_of_rising_edge_is_boundary(self):
+        # Rising to 29 s, then a flat last second, as a mean curve looks
+        # when every cycle's last departure is just before the force-off.
+        # The DP stops at 29 s, short of t_dom = 30; still a boundary.
+        n_fn = lambda t: 0.5 * np.minimum(np.maximum(0.0, t - 2.0), 27.0)
+        curves = {1: _curve(n_fn, 30.0), 2: _curve(n_fn, 30.0)}
+        res = optimize(curves, _structure([(1, 1, 0), (2, 1, 0)]),
+                       saturated={1: True, 2: True}, demand_vph={},
+                       min_splits={1: 5.0, 2: 5.0}, c_min=50.0, c_max=70.0)
+        assert _split(res, 1)["s_star"] < 30.0
+        assert res["optimum"]["state"] == "boundary"
+        assert [p["phase"] for p in res["directive"]["phases"]] == [1, 2]
+
     def test_high_c_edge(self):
         # Startup loss makes throughput rise with C all the way to c_max.
         curves = {1: _curve(_linear(0.5, 5.0), 300.0), 2: _curve(_linear(0.5, 5.0), 300.0)}

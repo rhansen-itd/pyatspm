@@ -67,7 +67,8 @@ _DEFAULT_GRID_STEP = 0.5
 _EPS = 1e-9
 
 # Seconds at the end of a curve's domain over which the tail rate is
-# judged rising or flat (D4).
+# judged rising or flat, and within which a split on a rising curve counts
+# as at the data boundary (D4, widened from the design's Δ/2).
 _TAIL_SECONDS = 5.0
 
 # Number of feasible scan points that must rise strictly toward a scan
@@ -517,13 +518,18 @@ def optimize(
 
     tail_rate = {p: _tail_rate(curves[p], grid) for p in optimised}
 
+    tail_k = _to_steps(_TAIL_SECONDS, grid)
+
     def _edge_flags(alloc):
+        # at_boundary looks at the whole tail window, not just the last grid
+        # row.  Each cycle's curve stops at its last departure, so the mean
+        # curve gains almost nothing in its final step and the DP stops just
+        # short of t_dom; a strict edge test would call that interior.
         at_b, surp = {}, {}
         for p in optimised:
-            hit = alloc[p] >= dom_k[p]
             rising = tail_rate[p] > boundary_rate_tol
-            at_b[p] = hit and rising
-            surp[p] = hit and not rising
+            at_b[p] = rising and alloc[p] >= dom_k[p] - tail_k
+            surp[p] = (not rising) and alloc[p] >= dom_k[p]
         return at_b, surp
 
     # --- Scan over C --------------------------------------------------------

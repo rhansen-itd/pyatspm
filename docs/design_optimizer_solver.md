@@ -306,6 +306,14 @@ phases when curves are concave (parent §3 marginal condition).
   surplus_p     = hit_edge_p and not rising_p    # flat tail; edge is benign
   ```
 
+  **Amended 2026-10-02 (implementation finding):** `at_boundary_p` uses
+  `s*_p ≥ t_dom_p − 5.0 s` (the same tail window as `rising_p`), not
+  `− Δ/2`. Each cycle's curve stops at its last departure, so the mean
+  curve gains almost nothing in its final grid step and the DP stops
+  just short of `t_dom`. In the saturated regime the domain is always
+  about the current green, so the strict test called the textbook
+  boundary case `interior`. `surplus_p` keeps the strict `− Δ/2` edge.
+
 - **Overall result state** (exactly one):
 
   ```
