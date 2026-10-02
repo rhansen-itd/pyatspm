@@ -2730,7 +2730,7 @@ def _add_optimize_parser(subs: argparse._SubParsersAction) -> None:
         type=float,
         default=1.0,
         metavar="PCT",
-        help="Percentile for discharge profile selection (default: 1.0).",
+        help="Percentage of the busiest modal-split cycles to keep (default: 1.0 = top 1%%; 100 = all).",
     )
     p_opt.add_argument(
         "--split-tolerance",

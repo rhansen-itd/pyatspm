@@ -111,16 +111,25 @@ def plot_throughput_curve(
         )
     )
 
-    # 2. Filled trace: Infeasible C values when any exist
+    # 2. Filled trace: one rectangle per contiguous run of infeasible C values
     if scan_df is not None and not scan_df.empty:
-        inf_mask = ~scan_df["feasible"].fillna(False).astype(bool)
-        inf_df = scan_df.loc[inf_mask]
-        if not inf_df.empty:
-            c_inf = inf_df["C"].to_numpy(dtype=float)
-            c_inf_min = float(np.nanmin(c_inf))
-            c_inf_max = float(np.nanmax(c_inf))
-            inf_x = [c_inf_min, c_inf_max, c_inf_max, c_inf_min]
-            inf_y = [y_min, y_min, y_max, y_max]
+        scan_sorted = scan_df.sort_values("C")
+        c_all = scan_sorted["C"].to_numpy(dtype=float)
+        infeasible = ~scan_sorted["feasible"].fillna(False).astype(bool).to_numpy()
+        if infeasible.any():
+            half = float(np.median(np.diff(c_all))) / 2.0 if len(c_all) > 1 else 0.5
+            run_id = np.cumsum(np.r_[True, infeasible[1:] != infeasible[:-1]])
+            runs = (
+                pd.DataFrame({"C": c_all, "run": run_id})[infeasible]
+                .groupby("run")["C"].agg(["min", "max"])
+            )
+            lo = runs["min"].to_numpy() - half
+            hi = runs["max"].to_numpy() + half
+            n = len(runs)
+            inf_x = np.column_stack(
+                [lo, hi, hi, lo, lo, np.full(n, np.nan)]
+            ).ravel()
+            inf_y = np.tile([y_min, y_min, y_max, y_max, y_min, np.nan], n)
             fig.add_trace(
                 go.Scatter(
                     x=inf_x,
@@ -232,89 +241,71 @@ def plot_allocation(
     c_star = optimum.get("c_star") if optimum else None
 
     if splits_df is not None and not splits_df.empty and "ring" in splits_df.columns:
-        rings = sorted(splits_df["ring"].dropna().unique().astype(int))
+        # Barrier group first, then splits_df row order (structure order)
+        # within a (group, ring). Excluded phases and NaN s_star draw nothing.
+        df = splits_df.reset_index(drop=True)
+        s_star = pd.to_numeric(df["s_star"], errors="coerce")
+        keep = (
+            df["ring"].notna()
+            & np.isfinite(s_star)
+            & (df["allocation_basis"] != "excluded")
+        )
+        df = df.loc[keep].assign(
+            s_star=s_star[keep].astype(float), _order=np.flatnonzero(keep)
+        )
+        sort_cols = ["ring", "barrier_group", "_order"] if "barrier_group" in df.columns else ["ring", "_order"]
+        df = df.sort_values(sort_cols, kind="stable")
+        df["_end"] = df.groupby("ring")["s_star"].cumsum()
+        df["_start"] = df["_end"] - df["s_star"]
 
-        # Collect segments grouped by allocation_basis
-        basis_data: Dict[str, Dict[str, list]] = {}
+        def _fmt_sec(col: str) -> pd.Series:
+            v = pd.to_numeric(df[col], errors="coerce") if col in df.columns else pd.Series(np.nan, index=df.index)
+            return v.map(lambda x: f"{x:.1f}s" if np.isfinite(x) else "N/A")
 
-        for r in rings:
-            ring_df = splits_df.loc[splits_df["ring"] == r].copy()
-            # Order by barrier group then row order
-            if "barrier_group" in ring_df.columns:
-                ring_df = ring_df.sort_values(
-                    by=["barrier_group"], kind="stable"
-                )
+        flag_cols = [
+            c for c in (
+                "at_boundary", "surplus", "sufficiency_at_boundary",
+                "curve_missing", "sufficiency_unverified",
+            ) if c in df.columns
+        ]
+        flags = pd.Series("", index=df.index)
+        for c in flag_cols:
+            on = df[c].fillna(False).astype(bool)
+            flags = flags.where(~on, flags + np.where(flags == "", "", ", ") + c)
+        flags = flags.replace("", "none")
 
-            current_x = 0.0
-            for row in ring_df.itertuples(index=False):
-                s_star = getattr(row, "s_star", np.nan)
-                basis = getattr(row, "allocation_basis", "")
-                if (
-                    pd.isna(s_star)
-                    or not np.isfinite(s_star)
-                    or basis == "excluded"
-                ):
-                    continue
+        df["_hover"] = (
+            "Ph" + df["phase"].astype(int).astype(str)
+            + " (" + df["allocation_basis"].astype(str) + ")<br>"
+            + "s*: " + df["s_star"].map("{:.1f}s".format) + "<br>"
+            + "s_min: " + _fmt_sec("s_min") + "<br>"
+            + "s_domain: " + _fmt_sec("s_domain") + "<br>"
+            + "flags: " + flags
+        )
+        df["_ring_label"] = "Ring " + df["ring"].astype(int).astype(str)
 
-                length = float(s_star)
-                start_x = current_x
-                end_x = current_x + length
-                current_x = end_x
-
-                if basis not in basis_data:
-                    basis_data[basis] = {"x": [], "y": [], "text": []}
-
-                phase = int(getattr(row, "phase", 0))
-                s_min_val = getattr(row, "s_min", np.nan)
-                s_min_str = (
-                    f"{s_min_val:.1f}s"
-                    if pd.notna(s_min_val) and np.isfinite(s_min_val)
-                    else "N/A"
-                )
-                s_dom_val = getattr(row, "s_domain", np.nan)
-                s_dom_str = (
-                    f"{s_dom_val:.1f}s"
-                    if pd.notna(s_dom_val) and np.isfinite(s_dom_val)
-                    else "N/A"
-                )
-
-                flags = []
-                for fld in (
-                    "at_boundary",
-                    "surplus",
-                    "sufficiency_at_boundary",
-                    "curve_missing",
-                    "sufficiency_unverified",
-                ):
-                    if getattr(row, fld, False) is True:
-                        flags.append(fld)
-                flag_str = ", ".join(flags) if flags else "none"
-
-                hover = (
-                    f"Ph{phase} ({basis})<br>"
-                    f"s*: {length:.1f}s<br>"
-                    f"s_min: {s_min_str}<br>"
-                    f"s_domain: {s_dom_str}<br>"
-                    f"flags: {flag_str}"
-                )
-
-                ring_label = f"Ring {r}"
-                basis_data[basis]["x"].extend([start_x, end_x, None])
-                basis_data[basis]["y"].extend([ring_label, ring_label, None])
-                basis_data[basis]["text"].extend([hover, hover, None])
-
-        for basis, d in basis_data.items():
+        for basis, g in df.groupby("allocation_basis", sort=False):
+            n = len(g)
+            x = np.column_stack(
+                [g["_start"].to_numpy(), g["_end"].to_numpy(), np.full(n, None)]
+            ).ravel()
+            y = np.column_stack(
+                [g["_ring_label"].to_numpy(), g["_ring_label"].to_numpy(), np.full(n, None)]
+            ).ravel()
+            text = np.column_stack(
+                [g["_hover"].to_numpy(), g["_hover"].to_numpy(), np.full(n, None)]
+            ).ravel()
             fig.add_trace(
                 go.Scatter(
-                    x=d["x"],
-                    y=d["y"],
+                    x=x,
+                    y=y,
                     mode="lines",
                     line=dict(
                         width=28,
                         color=_BASIS_COLORS.get(basis, "#7f7f7f"),
                     ),
                     name=basis,
-                    hovertext=d["text"],
+                    hovertext=text,
                     hoverinfo="text",
                 )
             )

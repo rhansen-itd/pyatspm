@@ -49,12 +49,12 @@ def _to_json_compatible(obj: Any) -> Any:
         return {str(k): _to_json_compatible(v) for k, v in obj.items()}
     if isinstance(obj, (list, tuple)):
         return [_to_json_compatible(v) for v in obj]
+    if isinstance(obj, (np.bool_, bool)):
+        return bool(obj)
     if isinstance(obj, (np.integer, int)):
         return int(obj)
     if isinstance(obj, (np.floating, float)):
         return float(obj)
-    if isinstance(obj, (np.bool_, bool)):
-        return bool(obj)
     return obj
 
 
@@ -106,7 +106,8 @@ class OptimizerEngine:
             end: Period end (string or datetime).
             saturated: Declared saturated phase numbers.
             plans: Optional list of coordination plan IDs to filter cycles.
-            pct: Percentile for discharge profile selection (0-1.0 or 0-100).
+            pct: Percentage of the busiest modal-split cycles to keep
+                (``1.0`` = top 1%, ``100`` = all).
             split_tolerance: Tolerance around target percentile green duration.
             stratify: Whether to stratify percentile selection by plan.
             max_lost: Maximum lost time for saturation qualification.
