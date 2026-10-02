@@ -27,6 +27,7 @@ intersections/*
 *.db-wal
 *.db-shm
 *.datZ
+!tests/fixtures/**/*.datZ
 *.zip
 *.gz
 *.log
