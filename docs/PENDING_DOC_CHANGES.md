@@ -23,3 +23,10 @@ See CLAUDE.md "Documentation Workflow" for the rules.
 - [src/atspm/analysis/__init__.py] export saturation_state (advisory)
 - [src/atspm/analysis/flow.py] flow_rate cycle_df gains termination column (Flow_Cycle CSV too)
 - [src/atspm/analysis/__init__.py] export optimize (new analysis/optimizer.py)
+- [src/atspm/data/optimizer.py] new OptimizerEngine and get_optimization
+- [src/atspm/plotting/optimizer.py] new plot_throughput_curve, plot_allocation, plot_marginal_rates
+- [src/atspm/data/__init__.py] export OptimizerEngine, get_optimization
+- [src/atspm/plotting/__init__.py] export plot_allocation, plot_marginal_rates, plot_throughput_curve
+- [src/atspm/cli.py] new optimize subcommand
+
+

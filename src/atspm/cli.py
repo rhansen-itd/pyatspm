@@ -18,6 +18,7 @@ Exposes subcommands from intersection configuration setup through reporting and 
     atspm video-overlay      --targetid <id> [...]       Render a video with live status overlays
     atspm video-locate-phase-change --targetid <id> [...] Find a phase's exact transition time for --start alignment
     atspm video-sync         --targetid <id> [...]       Find corrected --start from signal lamps
+    atspm optimize           --targetid <id> [...]       Optimize cycle length and splits for saturated throughput
 
 The package must be installed (``pip install -e .``) for the ``atspm`` entry
 point to be available.  All logic uses clean absolute imports from the
@@ -1066,6 +1067,108 @@ def handle_critical(args: argparse.Namespace) -> None:
         except Exception as exc:
             print(
                 f"\n❌ Unexpected error in critical movement analysis for "
+                f"{target_name}: {exc}",
+                file=sys.stderr,
+            )
+            if getattr(args, "verbose", False):
+                traceback.print_exc()
+
+
+# ---------------------------------------------------------------------------
+# optimize
+# ---------------------------------------------------------------------------
+
+def _optimize_single_intersection(target_name: str, args: argparse.Namespace) -> None:
+    """Core logic to run cycle length and split optimization for one intersection.
+
+    Args:
+        target_name: Exact intersection folder name.
+        args: Parsed CLI arguments from the ``optimize`` subcommand.
+    """
+    from atspm.data.optimizer import OptimizerEngine
+
+    target_dir = _get_target_dir(target_name)
+    meta = _load_metadata(target_dir)
+    db_path = _resolve_db_path(target_dir, meta)
+
+    output_dir = target_dir / "outputs"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    int_name = meta.get("intersection_name", target_name)
+    timezone = args.timezone or meta.get("timezone") or DEFAULT_TIMEZONE
+
+    if not db_path.exists():
+        _die(
+            f"Database not found: {db_path}\n"
+            f"Run 'atspm process --target {target_name}' first."
+        )
+
+    print(f"\n🚦  Throughput optimization for {int_name}")
+    print(f"    DB:        {db_path.name}")
+    print(f"    Window:    {args.start} → {args.end}")
+    print(f"    Saturated: {args.saturated}")
+
+    engine = OptimizerEngine(db_path=db_path, timezone=timezone)
+
+    try:
+        engine.optimize(
+            start=args.start,
+            end=args.end,
+            saturated=args.saturated,
+            plans=args.plans,
+            pct=args.pct,
+            split_tolerance=args.split_tolerance,
+            stratify=args.stratify,
+            max_lost=args.max_lost,
+            sat_threshold=args.sat_threshold,
+            demand_stat=args.demand_stat,
+            default_min_split=args.default_min_split,
+            c_min=args.c_min,
+            c_max=args.c_max,
+            c_step=args.c_step,
+            flat_tol_pct=args.flat_tol_pct,
+            boundary_rate_tol=100.0,
+            bin_len=args.bin_len,
+            exclude_missing=not args.include_missing,
+            make_plot=not args.no_plot,
+            output_dir=output_dir,
+        )
+    except Exception as exc:
+        if args.verbose:
+            traceback.print_exc()
+        _die(f"Optimization failed: {exc}")
+
+
+def handle_optimize(args: argparse.Namespace) -> None:
+    """Run throughput cycle-length and split optimization for one or more intersections.
+
+    Args:
+        args: Parsed CLI arguments from the ``optimize`` subcommand.
+    """
+    intersections_dir = _get_intersections_dir()
+
+    if getattr(args, "all", False):
+        targets = [p.name for p in intersections_dir.iterdir() if p.is_dir()]
+        if not targets:
+            _die(f"No intersection directories found in {intersections_dir}")
+        print(
+            f"\n🌍 Batch throughput optimization for "
+            f"{len(targets)} intersections..."
+        )
+        print(
+            f"   Note: saturated phases {args.saturated} apply to all intersections."
+        )
+    else:
+        targets = [_resolve_target_name(args.target, args.targetid)]
+
+    for target_name in targets:
+        try:
+            _optimize_single_intersection(target_name, args)
+        except SystemExit:
+            print(f"\n⏭️ Skipping {target_name} due to errors.", file=sys.stderr)
+        except Exception as exc:
+            print(
+                f"\n❌ Unexpected error in optimization for "
                 f"{target_name}: {exc}",
                 file=sys.stderr,
             )
@@ -2562,6 +2665,172 @@ def _add_critical_parser(subs: argparse._SubParsersAction) -> None:
     p_crit.set_defaults(func=handle_critical)
 
 
+def _add_optimize_parser(subs: argparse._SubParsersAction) -> None:
+    """Attach the ``optimize`` subcommand parser."""
+    p_opt = subs.add_parser(
+        "optimize",
+        help="Optimize cycle length and splits for saturated throughput.",
+        description=(
+            "Picks the cycle length C and splits that maximize saturated\n"
+            "throughput Σ 3600·N_p(s_p) / C over the saturated phases, using\n"
+            "measured cumulative discharge curves. Saturated phases are the\n"
+            "engineer's declaration (--saturated); the end-slack classifier is\n"
+            "printed as an advisory only.\n\n"
+            "Outputs (CSV and interactive HTML plots) are saved to:\n"
+            "  intersections/<target>/outputs/"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    group_opt = p_opt.add_mutually_exclusive_group(required=True)
+    group_opt.add_argument(
+        "--target",
+        metavar="FOLDER",
+        help="Exact intersection folder name (e.g. '2068_US-95_and_SH-8').",
+    )
+    group_opt.add_argument(
+        "--targetid",
+        metavar="ID",
+        help="Intersection ID prefix (e.g. '2068').",
+    )
+    group_opt.add_argument(
+        "--all",
+        action="store_true",
+        help="Run the optimization for all intersections in the directory.",
+    )
+    p_opt.add_argument(
+        "--start",
+        required=True,
+        metavar="DATETIME",
+        help="Period start (local time): 'YYYY-MM-DD' or 'YYYY-MM-DD HH:MM'.",
+    )
+    p_opt.add_argument(
+        "--end",
+        required=True,
+        metavar="DATETIME",
+        help="Period end (local time): 'YYYY-MM-DD' (inclusive) or 'YYYY-MM-DD HH:MM' (exclusive).",
+    )
+    p_opt.add_argument(
+        "--saturated",
+        required=True,
+        type=int,
+        nargs="+",
+        metavar="N",
+        help="Declared saturated phase numbers (required).",
+    )
+    p_opt.add_argument(
+        "--plans",
+        type=int,
+        nargs="+",
+        default=None,
+        metavar="ID",
+        help="Optional coordination plan IDs to filter cycles.",
+    )
+    p_opt.add_argument(
+        "--pct",
+        type=float,
+        default=1.0,
+        metavar="PCT",
+        help="Percentile for discharge profile selection (default: 1.0).",
+    )
+    p_opt.add_argument(
+        "--split-tolerance",
+        type=float,
+        default=0.10,
+        metavar="TOL",
+        help="Split duration tolerance around target percentile (default: 0.10).",
+    )
+    p_opt.add_argument(
+        "--stratify",
+        action="store_true",
+        help="Stratify discharge profiles by coordination plan.",
+    )
+    p_opt.add_argument(
+        "--max-lost",
+        type=float,
+        default=10.0,
+        metavar="SEC",
+        help="Per-lane end-slack limit in seconds for advisory saturation (default: 10.0).",
+    )
+    p_opt.add_argument(
+        "--sat-threshold",
+        type=float,
+        default=0.8,
+        metavar="FRAC",
+        help="Threshold pass rate for advisory saturation (default: 0.8).",
+    )
+    p_opt.add_argument(
+        "--demand-stat",
+        choices=["mean", "peak"],
+        default="mean",
+        help="Statistic used for unsaturated phase demand (default: 'mean').",
+    )
+    p_opt.add_argument(
+        "--default-min-split",
+        type=float,
+        default=10.0,
+        metavar="SEC",
+        help="Fallback minimum split in seconds (default: 10.0).",
+    )
+    p_opt.add_argument(
+        "--c-min",
+        type=float,
+        default=60.0,
+        metavar="SEC",
+        help="Shortest cycle scanned in seconds (default: 60.0).",
+    )
+    p_opt.add_argument(
+        "--c-max",
+        type=float,
+        default=220.0,
+        metavar="SEC",
+        help="Longest cycle scanned in seconds (default: 220.0).",
+    )
+    p_opt.add_argument(
+        "--c-step",
+        type=float,
+        default=1.0,
+        metavar="SEC",
+        help="Scan step in seconds (default: 1.0).",
+    )
+    p_opt.add_argument(
+        "--flat-tol-pct",
+        type=float,
+        default=1.0,
+        metavar="PCT",
+        help="Flat-band tolerance percent of peak throughput (default: 1.0).",
+    )
+    p_opt.add_argument(
+        "--bin-len",
+        type=int,
+        default=15,
+        metavar="MIN",
+        help="Demand aggregation bin width in minutes (default: 15).",
+    )
+    p_opt.add_argument(
+        "--include-missing",
+        action="store_true",
+        help="Include bins with partial/missing count data when averaging demand.",
+    )
+    p_opt.add_argument(
+        "--no-plot",
+        action="store_true",
+        help="Skip generating HTML plot files.",
+    )
+    p_opt.add_argument(
+        "--timezone",
+        default=None,
+        metavar="TZ",
+        help="Override the timezone from metadata.json (e.g. 'US/Pacific').",
+    )
+    p_opt.add_argument(
+        "--verbose",
+        action="store_true",
+        default=False,
+        help="Print full tracebacks for any errors.",
+    )
+    p_opt.set_defaults(func=handle_optimize)
+
+
 def _add_plot_coordination_parser(subs: argparse._SubParsersAction) -> None:
     """Attach the ``plot-coordination`` subcommand parser."""
     p_coord = subs.add_parser(
@@ -2882,6 +3151,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_aog_parser(subs)
     _add_flow_parser(subs)
     _add_critical_parser(subs)
+    _add_optimize_parser(subs)
     _add_plot_coordination_parser(subs)
     _add_plot_termination_parser(subs)
     _add_discrepancies_parser(subs)

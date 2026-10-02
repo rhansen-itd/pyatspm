@@ -64,6 +64,11 @@ from .critical import (
     get_critical_movements,
 )
 
+from .optimizer import (
+    OptimizerEngine,
+    get_optimization,
+)
+
 from .video import (
     ShapeConfig,
     resolve_stopbar_target,
@@ -117,6 +122,9 @@ __all__ = [
     # Critical
     'CriticalMovementEngine',
     'get_critical_movements',
+    # Optimizer
+    'OptimizerEngine',
+    'get_optimization',
     # Video
     'ShapeConfig',
     'resolve_stopbar_target',
