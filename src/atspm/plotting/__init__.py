@@ -17,6 +17,7 @@ from .optimizer import (
 from .clock_marks import plot_clock_drift
 from .split_failures import plot_split_failures
 from .detector_health import plot_detector_health
+from .timing_actuation import plot_timing_actuation
 
 __all__ = [
     'plot_termination',
@@ -29,4 +30,5 @@ __all__ = [
     'plot_clock_drift',
     'plot_split_failures',
     'plot_detector_health',
+    'plot_timing_actuation',
 ]

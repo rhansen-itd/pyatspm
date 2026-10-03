@@ -14,6 +14,7 @@ Modules:
 - detector_activity: Per-detector activity profile per local day/window
 - detector_health: Deterministic detector-health rules and onset bursts
 - clock_marks: eos_set_time drift/set marker decoding
+- timing_actuation: Timing-and-actuation intervals, row layout, finding links
 """
 
 from .decoders import (
@@ -101,6 +102,13 @@ from .detector_health import (
     wd_thresholds,
     wd_units,
 )
+from .timing_actuation import (
+    TIMING_CODES,
+    finding_plot_windows,
+    ring_phase_order,
+    timing_actuation_intervals,
+    timing_actuation_rows,
+)
 
 __all__ = [
     # Decoders
@@ -170,4 +178,10 @@ __all__ = [
     'send_log_pulses',
     'pair_marker_pulses',
     'decode_clock_marks',
+    # Timing and actuation
+    'TIMING_CODES',
+    'finding_plot_windows',
+    'ring_phase_order',
+    'timing_actuation_intervals',
+    'timing_actuation_rows',
 ]

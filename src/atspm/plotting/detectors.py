@@ -311,17 +311,18 @@ def _gap_marker_trace(
     )
 
 
-def _format_title(metadata: dict) -> str:
-    """Build a dynamic intersection title from metadata keys.
+def _location_title(metadata: dict) -> str:
+    """Intersection location from metadata keys.
 
     Format: ``"{major_route} ({major_road_name}) & {minor_route} ({minor_road_name})"``
-    Components that are ``None`` / empty are omitted gracefully.
+    Components that are ``None`` / empty are omitted gracefully; with no road
+    information at all, ``intersection_name`` is used.
 
     Args:
         metadata: Intersection metadata dict.
 
     Returns:
-        Formatted title string, prefixed with ``"Detector Comparison -- "``.
+        Location string.
     """
     def _segment(route: Optional[str], name: Optional[str]) -> str:
         r, n = (route or "").strip(), (name or "").strip()
@@ -339,13 +340,22 @@ def _format_title(metadata: dict) -> str:
     )
 
     if major and minor:
-        location = f"{major} & {minor}"
-    elif major:
-        location = major
-    else:
-        location = metadata.get("intersection_name", "Unknown Intersection")
+        return f"{major} & {minor}"
+    if major:
+        return major
+    return metadata.get("intersection_name", "Unknown Intersection")
 
-    return f"Detector Comparison -- {location}"
+
+def _format_title(metadata: dict) -> str:
+    """Build a dynamic intersection title from metadata keys.
+
+    Args:
+        metadata: Intersection metadata dict.
+
+    Returns:
+        :func:`_location_title`, prefixed with ``"Detector Comparison -- "``.
+    """
+    return f"Detector Comparison -- {_location_title(metadata)}"
 
 
 # ---------------------------------------------------------------------------

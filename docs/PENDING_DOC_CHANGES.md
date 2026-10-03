@@ -58,3 +58,5 @@ See CLAUDE.md "Documentation Workflow" for the rules.
 - [src/atspm/data/__init__.py] export DetectorHealthEngine, get_detector_health
 - [src/atspm/plotting/__init__.py] export plot_detector_health
 - [src/atspm/cli.py] new detector-health subcommand
+- [src/atspm/analysis/__init__.py] export TIMING_CODES, timing_actuation_intervals, timing_actuation_rows, ring_phase_order, finding_plot_windows (new analysis/timing_actuation.py)
+- [src/atspm/plotting/__init__.py] export plot_timing_actuation
