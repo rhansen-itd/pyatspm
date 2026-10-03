@@ -43,15 +43,7 @@ def plot_split_failures(
     if cycle_df is not None and not cycle_df.empty and "aggregate" in cycle_df.columns:
         aggregate = str(cycle_df["aggregate"].iloc[0])
 
-    meta = dict(metadata) if metadata else {}
-    if meta.get("major_road_name") and not meta.get("minor_road_name"):
-        intx = meta.get("intersection_name")
-        if intx and intx != meta["major_road_name"]:
-            meta["intersection_name"] = f"{intx} ({meta['major_road_name']})"
-        else:
-            meta["intersection_name"] = str(meta["major_road_name"])
-
-    title = _build_title(meta, suffix=f"Split Failures — GOR vs ROR5 ({aggregate})")
+    title = _build_title(metadata, suffix=f"Split Failures — GOR vs ROR5 ({aggregate})")
 
     if cycle_df is None or cycle_df.empty:
         fig = go.Figure()
@@ -110,16 +102,13 @@ def plot_split_failures(
                     "%Y-%m-%d %H:%M:%S"
                 )
 
-            hover = [
-                f"Time: {t}<br>GOR: {g:.3f}<br>ROR5: {r5:.3f}<br>Lanes: {nl}<br>Failed Lanes: {nlf}"
-                for t, g, r5, nl, nlf in zip(
-                    time_str,
-                    sub["gor"],
-                    sub["ror5"],
-                    sub["n_lanes"],
-                    sub["n_lanes_failed"],
-                )
-            ]
+            hover = (
+                "Time: " + time_str
+                + "<br>GOR: " + sub["gor"].map("{:.3f}".format)
+                + "<br>ROR5: " + sub["ror5"].map("{:.3f}".format)
+                + "<br>Lanes: " + sub["n_lanes"].astype(str)
+                + "<br>Failed Lanes: " + sub["n_lanes_failed"].astype(str)
+            )
 
             fig.add_trace(
                 go.Scatter(
@@ -130,7 +119,7 @@ def plot_split_failures(
                     marker=dict(color=color, size=6),
                     hoverlabel=dict(bgcolor=color),
                     hoverinfo="text",
-                    hovertext=hover,
+                    hovertext=hover.tolist(),
                 ),
                 row=r,
                 col=c,

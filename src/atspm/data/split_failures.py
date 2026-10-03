@@ -228,7 +228,7 @@ class SplitFailureEngine:
             n_cyc = len(sub)
             n_fail = int(sub["fail"].sum())
             sf_pct = (n_fail / n_cyc * 100.0) if n_cyc > 0 else 0.0
-            n_lanes = int(sub["n_lanes"].iloc[0]) if not sub.empty else 0
+            n_lanes = int(sub["n_lanes"].max())
             print(f"    Ph{ph}: {n_cyc} cycles, {n_fail} fails ({sf_pct:.1f}% SF), {n_lanes} lanes")
 
         if output_dir is not None:

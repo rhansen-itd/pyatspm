@@ -251,7 +251,8 @@ class TestPlot:
     def test_title_uses_metadata_and_aggregate(self, cycle_df):
         fig = plot_split_failures(
             cycle_df.assign(aggregate="mean"),
-            metadata={"intersection_name": "X", "major_road_name": "Main St"})
+            metadata={"intersection_name": "X", "major_road_name": "Main St",
+                      "minor_road_name": "Side St"})
         assert "Main St" in fig.layout.title.text
         assert "mean" in fig.layout.title.text
 
