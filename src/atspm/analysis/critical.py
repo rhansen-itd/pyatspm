@@ -63,6 +63,9 @@ _DEFAULT_R2_GROUPS: List[List[int]] = [[5, 6], [7, 8]]
 # Det_P2_Stopbar, 'P2 Stop Bar' → Det_P2_Stop_Bar)
 _STOPBAR_KEY_RE = re.compile(r"^Det_P(\d+)_(?:Stopbar|Stop_Bar)$")
 
+# 'P2 Occupancy' → Det_P2_Occupancy: the presence zone at the stop line
+_OCCUPANCY_KEY_RE = re.compile(r"^Det_P(\d+)_Occupancy$")
+
 # Output schemas
 _STRUCTURE_SCHEMA = [
     "phase", "ring", "barrier_group", "position",
@@ -134,9 +137,37 @@ def _parse_stopbar_sets(config: Dict[str, Any]) -> Dict[int, frozenset]:
     Returns:
         ``{phase: frozenset(det_ids)}`` for phases with a non-empty key.
     """
+    return _parse_detector_sets(config, _STOPBAR_KEY_RE)
+
+
+def _parse_occupancy_sets(config: Dict[str, Any]) -> Dict[int, frozenset]:
+    """Extract per-phase presence (``Det_P{N}_Occupancy``) detector sets.
+
+    Args:
+        config: Active config dict.
+
+    Returns:
+        ``{phase: frozenset(det_ids)}`` for phases with a non-empty key.
+    """
+    return _parse_detector_sets(config, _OCCUPANCY_KEY_RE)
+
+
+def _parse_detector_sets(
+    config: Dict[str, Any], key_re: "re.Pattern[str]"
+) -> Dict[int, frozenset]:
+    """Per-phase detector sets for config keys matching *key_re*.
+
+    Args:
+        config: Active config dict; matching keys hold comma-separated
+            detector IDs.
+        key_re: Pattern whose group 1 is the phase number.
+
+    Returns:
+        ``{phase: frozenset(det_ids)}`` for phases with a non-empty key.
+    """
     result: Dict[int, frozenset] = {}
     for key, raw_val in config.items():
-        match = _STOPBAR_KEY_RE.match(key)
+        match = key_re.match(key)
         if not match or not raw_val or (
             isinstance(raw_val, float) and pd.isna(raw_val)
         ):

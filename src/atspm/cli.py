@@ -2644,8 +2644,9 @@ def _add_split_failures_parser(subs: argparse._SubParsersAction) -> None:
         help="Generate Purdue split-failure tables and scatter plots.",
         description=(
             "Calculate Purdue split failures (GOR vs ROR5) per phase split window.\n"
-            "Stop-bar detector IDs are read from the active configuration\n"
-            "(Det_P{N}_Stop_Bar / Det_P{N}_Stopbar keys in int_cfg.csv).\n\n"
+            "Presence detector IDs (zones at the stop line, one per lane) are\n"
+            "read from the active configuration ('P{N} Occupancy' rows in\n"
+            "int_cfg.csv → Det_P{N}_Occupancy). Stop Bar channels are not used.\n\n"
             "Outputs (CSV + interactive HTML) are saved to:\n"
             "  intersections/<target>/outputs/"
         ),

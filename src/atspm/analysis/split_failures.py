@@ -6,7 +6,7 @@ Input / output is DataFrames and plain Python scalars.
 
 Algorithm overview
 ------------------
-For each phase split window, stop-bar detector occupancy is measured over two
+For each phase split window, presence-detector occupancy is measured over two
 windows:
 
 * **GOR** (green occupancy ratio): ``[green_ts, yellow_ts)``, Code 1 → Code 8.
@@ -18,7 +18,7 @@ windows:
 A cycle fails when **both** ratios are strictly greater than ``threshold``
 (UDOT default 0.79).
 
-Each configured stop-bar detector is one lane.  Occupancy is measured per lane
+Each configured presence detector is one lane.  Occupancy is measured per lane
 and then aggregated two ways, both always reported:
 
 * ``union`` — the window is occupied while *any* lane's detector is on.  This
@@ -211,7 +211,7 @@ def _lane_intervals(
 
     Args:
         ev: Events with float ``timestamp``, sorted; detector rows for the
-            stop-bar lanes plus every gap marker.
+            presence lanes plus every gap marker.
         det: Detector channel (``parameter``).
         gap_ts: Sorted gap-marker timestamps.
         data_start: First timestamp of the data (start of segment 0).
@@ -285,7 +285,7 @@ def split_failures(
     ror_seconds: float = 5.0,
     include_yellow: bool = False,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """Per-cycle Purdue split failures for one phase over its stop-bar lanes.
+    """Per-cycle Purdue split failures for one phase over its presence lanes.
 
     Args:
         events_df: Flat events DataFrame with columns
@@ -294,8 +294,8 @@ def split_failures(
             Must carry phase codes 1/8/9/10/11/12, detector codes 81/82 and
             gap markers (``event_code == -1``).
         phase: Signal phase number.
-        detector_ids: Stop-bar detector channels of *phase*, one per lane
-            (``Det_P{N}_Stop_Bar`` / ``Det_P{N}_Stopbar``).
+        detector_ids: Presence detector channels of *phase* at the stop
+            line, one per lane (``Det_P{N}_Occupancy``).
         threshold: A cycle fails when GOR > threshold **and**
             ROR5 > threshold.  Default ``0.79`` (UDOT).
         aggregate: ``"union"`` or ``"mean"``; selects which lane aggregate

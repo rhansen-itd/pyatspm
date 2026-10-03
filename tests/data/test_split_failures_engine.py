@@ -43,7 +43,7 @@ _CYCLE = 100.0
 _PLAN = {2: (0.0, 54.0), 4: (60.0, 34.0)}
 
 
-def _build_db(root: Path, key: str = "Stop_Bar") -> Path:
+def _build_db(root: Path, key: str = "Occupancy") -> Path:
     t0 = to_epoch(datetime.strptime(START, "%Y-%m-%d %H:%M"), TZ)
     n_cycles = int(2 * 3600 / _CYCLE)
     rng = np.random.default_rng(3)
@@ -163,10 +163,13 @@ class TestEngine:
         res = SplitFailureEngine(db).split_failures(START, END, bin_len="cycle")
         assert set(res) == {"cycle", "lane"}
 
-    def test_stopbar_spelling_also_accepted(self, tmp_path):
-        db = _build_db(tmp_path, key="Stopbar")
-        res = SplitFailureEngine(db).split_failures(START, END)
-        assert set(res["cycle"]["phase"]) == {2, 4}
+    @pytest.mark.parametrize("key", ["Stop_Bar", "Stopbar"])
+    def test_stop_bar_count_loops_are_not_used(self, tmp_path, capsys, key):
+        # Stop Bar channels are downstream count loops; presence comes from
+        # Det_P{N}_Occupancy only.
+        db = _build_db(tmp_path, key=key)
+        assert SplitFailureEngine(db).split_failures(START, END) == {}
+        assert "Occupancy" in capsys.readouterr().out
 
     def test_configured_phase_with_no_cycles_is_warned(self, db, capsys):
         SplitFailureEngine(db).split_failures(START, END)
@@ -174,13 +177,13 @@ class TestEngine:
 
     def test_requested_phase_without_config_is_warned(self, db, capsys):
         res = SplitFailureEngine(db).split_failures(START, END, phases=[2, 6])
-        assert "Det_P6_Stop_Bar" in capsys.readouterr().out
+        assert "Det_P6_Occupancy" in capsys.readouterr().out
         assert set(res["cycle"]["phase"]) == {2}
 
     def test_no_stopbar_config_returns_empty(self, tmp_path, capsys):
         db = _build_db(tmp_path, key="Arrival")
         assert SplitFailureEngine(db).split_failures(START, END) == {}
-        assert "Stop_Bar" in capsys.readouterr().out
+        assert "Occupancy" in capsys.readouterr().out
 
     def test_bad_aggregate_raises(self, db):
         with pytest.raises(ValueError):

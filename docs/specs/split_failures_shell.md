@@ -1,3 +1,5 @@
+> **Superseded in one point (2026-10-02):** the engine reads `Det_P{N}_Occupancy` (presence zones) via `_parse_occupancy_sets`, not `Stop_Bar`; see UDOT S-M1 recommendation 4.
+
 # Spec: split-failure shell engine, scatter plot and `atspm split-failures` CLI (UDOT S-M1)
 
 The pure core already exists and is tested: `src/atspm/analysis/split_failures.py`

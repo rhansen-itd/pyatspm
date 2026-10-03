@@ -45,3 +45,4 @@ See CLAUDE.md "Documentation Workflow" for the rules.
 - [src/atspm/plotting/__init__.py] export plot_split_failures
 - [src/atspm/cli.py] new split-failures subcommand
 - [src/atspm/analysis/__init__.py] export split_failures, bin_split_failures (new analysis/split_failures.py)
+- [src/atspm/data/split_failures.py] split-failures reads Det_P{N}_Occupancy (presence), not Stop_Bar

@@ -2,19 +2,22 @@
 ATSPM Purdue Split Failure Engine (Imperative Shell)
 
 Orchestrates Purdue split failure analysis by querying the SQLite database,
-resolving per-phase stop-bar detector configuration, and delegating all
+resolving per-phase presence detector configuration, and delegating all
 calculations to the Functional Core (``atspm.analysis.split_failures``).
 
 Package Location: src/atspm/data/split_failures.py
 
 Configuration
 -------------
-Stop-bar detector IDs are read from the active ``config`` row via
-``DatabaseManager.get_config_at_date`` and parsed by
-``atspm.analysis.critical._parse_stopbar_sets``.  The expected key formats are::
+Presence detector IDs (the zones at the stop line, one per lane) are read
+from the active ``config`` row via ``DatabaseManager.get_config_at_date`` and
+parsed by ``atspm.analysis.critical._parse_occupancy_sets``.  The key is::
 
-    Det_P{phase}_Stop_Bar   →   "1,2,3"  (comma-separated detector IDs)
-    Det_P{phase}_Stopbar    →   "1,2,3"
+    Det_P{phase}_Occupancy   →   "1,2,3"  (comma-separated detector IDs)
+
+``Det_P{N}_Stop_Bar`` is deliberately not used: those channels are short
+count loops downstream of the stop bar, and their occupancy is meaningless
+for GOR/ROR5.
 
 If no key is found for a requested phase, that phase is skipped with a
 printed warning.
@@ -53,7 +56,7 @@ import pandas as pd
 from .critical import CriticalMovementEngine
 from .manager import DatabaseManager, db_timezone
 from .reader import get_events_with_cycles_df
-from ..analysis.critical import _parse_stopbar_sets
+from ..analysis.critical import _parse_occupancy_sets
 from ..analysis.split_failures import (
     AGGREGATES,
     bin_split_failures as _bin_split_failures_core,
@@ -128,7 +131,7 @@ class SplitFailureEngine:
             end: Period end. Date-only extends to end-of-day; datetime is
                 exclusive.
             phases: Phase numbers to analyse. When ``None``, all configured
-                phases with stop-bar detectors are analysed.
+                phases with presence (``Det_P{N}_Occupancy``) detectors are analysed.
             aggregate: ``"union"`` (default) or ``"mean"`` lane aggregation.
             threshold: Occupancy ratio threshold (default 0.79).
             ror_seconds: Length of red occupancy window (default 5.0).
@@ -153,24 +156,24 @@ class SplitFailureEngine:
         start_dt, end_dt = CriticalMovementEngine._parse_range(start, end)
         config = self._get_config(start_dt)
 
-        stopbar_sets = _parse_stopbar_sets(config)
+        presence_sets = _parse_occupancy_sets(config)
 
         if phases is not None:
-            phase_dets = {p: stopbar_sets[p] for p in phases if p in stopbar_sets}
+            phase_dets = {p: presence_sets[p] for p in phases if p in presence_sets}
             for ph in phases:
-                if ph not in stopbar_sets:
+                if ph not in presence_sets:
                     print(
-                        f"  ⚠️  SplitFailures: no Det_P{ph}_Stop_Bar config found — "
+                        f"  ⚠️  SplitFailures: no Det_P{ph}_Occupancy config found — "
                         f"phase {ph} skipped."
                     )
         else:
-            phase_dets = dict(stopbar_sets)
+            phase_dets = dict(presence_sets)
 
         if not phase_dets:
             _phases_req = phases if phases is not None else "all"
             print(
-                f"  ⚠️  SplitFailures: no Stop_Bar detector config found for "
-                f"phases={_phases_req}. Check Det_P{{N}}_Stop_Bar keys in int_cfg.csv."
+                f"  ⚠️  SplitFailures: no presence detector config found for "
+                f"phases={_phases_req}. Check Det_P{{N}}_Occupancy (P{{N}} Occupancy) rows in int_cfg.csv."
             )
             return {} if output_dir is None else None
 
@@ -194,7 +197,7 @@ class SplitFailureEngine:
                 include_yellow=include_yellow,
             )
             if ph_cyc.empty:
-                print(f"  ⚠️  SplitFailures Ph{ph}: no split windows with a known stop-bar lane state (no windows, or every lane silent) — skipping.")
+                print(f"  ⚠️  SplitFailures Ph{ph}: no split windows with a known presence-lane state (no windows, or every lane silent) — skipping.")
                 continue
             cycle_frames.append(ph_cyc)
             if not ph_lane.empty:
