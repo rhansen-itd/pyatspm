@@ -15,7 +15,7 @@ UDOT v5 measures (`Application/Business/*`, `ReportApi/ReportServices/*`), mappe
 | Split Monitor | `splits` (tables only) | **Partial**: no plot, no programmed-split overlay → S-M2 |
 | **Watchdog** (detector/phase diagnostics) | `discrepancies` covers co-located pairs only | **Missing** → track D (priority) |
 | Timing and Actuation | — | **Missing** → S-D5 |
-| Purdue Split Failure | `split-failures` (`SplitFailureEngine`, union/mean lane aggregation) | **Have** (2026-10-02); needs a presence-role key → S-M1 |
+| Purdue Split Failure | `split-failures` (`SplitFailureEngine`, union/mean lane aggregation) | **Have** (2026-10-02); should read `Det_P{N}_Occupancy` → S-M1 |
 | Arrivals on Red, Approach Delay | — | **Missing** → S-M3 |
 | Yellow and Red Actuations | — | **Missing** → S-M4 |
 | Pedestrian Delay, Wait Time | ped *counts* only | **Missing** → S-M5 |
@@ -96,7 +96,7 @@ Sessions D0 → D1 → D2 run in order. D3, D4 and D5 can run in parallel after 
   - **Movement:** per-lane totals match across a chain; channels of one approach split totals by lane.
   - **Silence and drift:** configured-but-silent channels and active-but-unconfigured ones (201's 60/63/64 vs its active zones) are flagged, as is a suspect role (201 channel 41).
 
-  Output: a proposed role table with a confidence per row, diffed against the current config. Golden cases: 315's confirmed P2/P6 mapping, and its `TM_*` count loops. Depends on S-D0 (the role table it fills). Feeds S-M1's presence key and S-D2's `UnconfiguredDetector` rule.
+  Output: a proposed role table with a confidence per row, diffed against the current config. Golden cases: 315's confirmed P2/P6 mapping, and its `TM_*` count loops. Depends on S-D0 (the role table it fills). Fills S-M1's `_Occupancy` (presence) keys and feeds S-D2's `UnconfiguredDetector` rule.
 
 ## 4. Track M — Remaining measures
 
@@ -125,7 +125,7 @@ Ordered by value multiplied by readiness. Each session follows the same shape: p
   1. Keep **`union` + 0.79 as the default**, for parity with UDOT and the published thresholds, and label it as such.
   2. Give `mean` **no default failure threshold of its own yet**. At 0.79 it is close to unreachable on three lanes (p99 GOR 0.54), so read it as a diagnostic beside union. There are no saturated multi-lane cycles in the corpus to calibrate it against (the same blocker as optimizer step 6).
   3. **Add `any` (a cycle fails when any lane fails on its own GOR/ROR5) as a third aggregate.** It is the only rule under which 0.79 keeps its single-detector meaning at every lane count, and it catches one jammed lane beside empty ones, which `mean` averages away (golden test `test_one_jammed_lane_beside_empty_lanes`). `n_lanes_failed` already carries it, so the change is small. Report the worst lane's GOR/ROR5 with it.
-  4. **Blocker for real-data use: a presence role key.** Proposed `Det_P{N}_Presence` (name needs owner sign-off). It belongs in S-D0's role parser; `SplitFailureEngine` then reads Presence and stops reading `Stop_Bar`. Until then, a real run needs the presence channels written into `Stop_Bar`, which would break `flow`.
+  4. **Blocker for real-data use: read the presence zones, which already have a key.** `Plt: P{N} Occupancy` → `Det_P{N}_Occupancy` is the zone at the stop line (the coordination plot draws it at 0 s, between Arrival at −10 s and Stop Bar at +10 s). Filled at 201 (P2/3/4/6/7/8 = 46/53/39/33/38/51) and 313 (P1/2/6/8 = 43/38/34/42), blank at 315 and 701 (315's would be P2 = 50,51,52 and P6 = 34,35,36). `SplitFailureEngine` should read `_Occupancy`, not `Stop_Bar`; S-D0's role parser should name the role. (Corrected 2026-10-02: an earlier draft proposed a new `Det_P{N}_Presence` key.)
   - **Open:** the PCD parity spot-check from this item's scope wasn't done this session.
 - **S-M2: Split Monitor plot and programmed splits.** *Gemini-eligible.* Parse 131–149 into a plan-timeline DataFrame (`start, plan, cycle, offset, split_1..16`). The corpus has these codes everywhere. Plot the per-cycle split per phase, colored by termination type, with the programmed split as a step line, plus UDOT's per-plan percentile (50th/85th) stats. `splits` already has the durations.
 - **S-M3: Arrivals on Red and Approach Delay.** *Opus.* Extend the AoG core to return green/yellow/red arrival shares (AoR = red arrivals ÷ total). Approach delay is UDOT's: for a vehicle arriving on red, delay is the time to the next green, from `Arrival` detectors shifted by distance/speed like AoG. It reuses the AoG shift and its gap-marker handling. Outputs: per-cycle and binned delay per vehicle, and total delay per hour. It could be one engine with AoG or a sibling; decide at spec time.
