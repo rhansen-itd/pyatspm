@@ -194,7 +194,7 @@ class SplitFailureEngine:
                 include_yellow=include_yellow,
             )
             if ph_cyc.empty:
-                print(f"  ⚠️  SplitFailures Ph{ph}: no split windows found — skipping.")
+                print(f"  ⚠️  SplitFailures Ph{ph}: no split windows with a known stop-bar lane state (no windows, or every lane silent) — skipping.")
                 continue
             cycle_frames.append(ph_cyc)
             if not ph_lane.empty:
