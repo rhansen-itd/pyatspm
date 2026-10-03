@@ -151,6 +151,23 @@ Sessions D0 → D1 → D2 run in order. D3, D4 and D5 can run in parallel after 
   - **Follow-up to check:** `aog` for P8 at 701 looks for P8 greens and there are none, so that approach gets no AoG. Fixing it would need an approach → served-phase mapping (a design question).
   - The holdout doesn't tell us much about accuracy until split-phase numbering is accounted for.
 
+  **Phase-call cue (2026-10-02, owner's suggestion).** A Code 43 call logged in the same tenth of a second as a detector-on is the controller's own detector → phase assignment.
+  - **The share used** is the share of a channel's on-events with a same-tenth call to a candidate phase that called each phase.
+  - **Decisions:** one phase ≥ 0.8 (no other ≥ 0.5, at least 20 such on-events) overrides timing at high confidence. Two or more phases ≥ 0.5 are reported as a multi-phase detector (e.g. `P2|P5`).
+  - **Chain-inherited phases are now `medium`** (the lane's evidence, not the channel's own). High needs the channel's own calls or timing.
+
+  At 315 the cue gives:
+  - **The dilemma-zone loops** (owner, 2026-10-02: 37 and 53 are dilemma-zone protection loops) call their through phases: **37 → P6** (2,628 calls; next highest P2 82) and **53 → P2** (2,542).
+  - **It places the minor-approach zones** that timing couldn't, because P4/P8 onsets coincide 100 %: 42 → P4, 43 → P3, 44 → P8, 47 → P8, 58 → P8, 59 → P7 and 60 → P4, all high. The light hours (23–05) are near-pure, e.g. 42 → P4 113 of 120.
+  - **It corrected 58,** which timing had put on P7.
+  - **Every 315 count loop (17–32) calls P9.** P9 never goes green, so this is presumably a dummy phase so they count without calling. Calls therefore can't place 315's count loops, and 22/30 stay P4|P8 ties.
+
+  Pattern worth a look: on each minor approach a zone calling the through phase precedes a zone calling the left phase by 1.6–1.8 s (42 P4 → 43 P3, 58 P8 → 59 P7).
+
+  **With calls (configured, active channels):** 315 has 20 match, 1 consistent and 3 conflicts (left loops 22/30 and 25). 201 has 6 match (33 now matches P6 by its calls) and 2 conflicts (41 → P3 with ring phases, 43). 313 has 6 match (34 → P6 by calls; the timing regression had said P2) and 1 conflict: 48 (P8 Arrival / TM_NBR) inherits P1 at medium from its chain to 43, and its own calls are not decisive.
+
+  **701 calls:** 36 (configured P6 Arrival) calls P3 (0.88). 44 → P2 and 61 → P4 agree with config. 53 (P8 Arrival, the P3 approach) splits P6 0.45 / P3 0.30.
+
   **Not done:** formal threshold freeze. Thresholds are the prototype values above, chosen on 315/201/313 rather than formally frozen.
 
 ## 4. Track M — Remaining measures

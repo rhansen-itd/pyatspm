@@ -61,12 +61,20 @@ def _config_rows(db: Path) -> int:
 class TestEngine:
 
     def test_codes(self):
-        assert sorted(_INFERENCE_CODES) == [-1, 1, 8, 9, 81, 82]
+        assert sorted(_INFERENCE_CODES) == [-1, 1, 8, 9, 43, 81, 82]
 
     def test_reproduces_the_core(self, db, events):
         res = DetectorInferenceEngine(db).infer(START, END)
         exp = infer_detector_roles(events, phases=[2, 4])
         pd.testing.assert_frame_equal(res["proposed"].reset_index(drop=True), exp)
+
+    def test_phase_calls_reach_the_core(self, tmp_path):
+        ev = _synthetic(days=2, p6_offset=0.0, calls=True)
+        db = _build_db(tmp_path, ev)
+        res = DetectorInferenceEngine(db).infer(START, END, use_ring_config=False)
+        exp = infer_detector_roles(ev)
+        pd.testing.assert_frame_equal(res["proposed"].reset_index(drop=True), exp)
+        assert res["proposed"].set_index("detector").loc[2, "phase"] == 2   # calls break the tie
 
     def test_diff_against_active_config(self, db, events):
         res = DetectorInferenceEngine(db).infer(START, END)

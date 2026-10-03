@@ -5,6 +5,9 @@
 # has an advance zone (1), a stop-line presence zone (2) and a count loop
 # downstream of the stop bar (3); vehicles queue on red and discharge 2 s
 # apart from green.  P4 has a presence zone (4).  Channel 9 pulses at random.
+# With calls=True the controller logs Code 43 in the same tenth as an on-event
+# outside the called phase's green (once per red): 1 and 2 call P2, 4 calls
+# P4, and count loop 3 calls dummy phase 9 (never green).
 
 from datetime import datetime
 from pathlib import Path
@@ -62,7 +65,26 @@ def _serve(arrivals, green):
     return holds, np.asarray(departs)
 
 
-def _synthetic(days=2, p6_offset=None, gap_at=None, seed=7):
+def _calls(rows, chan, assign, greens):
+    """Code-43 rows: same tenth as an on-event, once per red of the called phase."""
+    out = []
+    for det, phases in assign.items():
+        ons = np.sort([a for a, _ in chan[det]])
+        for ph in phases:
+            g = greens.get(ph)
+            if g is None:                       # never green (dummy phase): always calls
+                called_cycle = None
+                out += [(np.round(a, 1), 43, ph) for a in ons[::7]]
+                continue
+            rel = (ons - _T0) % _CYC
+            cyc = np.floor((ons - _T0) / _CYC)
+            red = (rel < g[0]) | (rel >= g[1])
+            first = pd.Series(ons[red]).groupby(cyc[red] + (rel[red] >= g[1])).first()
+            out += [(np.round(a, 1), 43, ph) for a in first.to_numpy()]
+    return out
+
+
+def _synthetic(days=2, p6_offset=None, gap_at=None, seed=7, calls=False, multi=False):
     rng = np.random.default_rng(seed)
     hours = days * 24
     rows = []
@@ -94,9 +116,13 @@ def _synthetic(days=2, p6_offset=None, gap_at=None, seed=7):
     chan[4] = _union(holds4)
     noise = poisson(60, 60)
     chan[9] = [(a, a + 0.2) for a in noise]
+    chan = {d: [(np.round(a, 1), np.round(b, 1)) for a, b in ivs] for d, ivs in chan.items()}
     for det, ivs in chan.items():
         for a, b in ivs:
             rows += [(a, 82, det), (b, 81, det)]
+    if calls:
+        assign = {1: [2], 2: [2], 3: [9], 4: [4, 2] if multi else [4]}
+        rows += _calls(rows, chan, assign, {2: _G2, 4: _G4})
     df = pd.DataFrame(rows, columns=["timestamp", "event_code", "parameter"])
     if gap_at is not None:
         g = _T0 + gap_at
@@ -149,8 +175,9 @@ def test_count_loop(base):
 
 
 def test_advance_takes_phase_from_its_lane(base):
+    # No calls: the phase comes only from the lane chain, so medium.
     r = base.loc[1]
-    assert (r["role"], r["phase"], r["confidence"]) == ("arrival", 2, "high")
+    assert (r["role"], r["phase"], r["confidence"]) == ("arrival", 2, "medium")
     assert "2(4.0s)" in r["downstream"].replace("2(3.9s)", "2(4.0s)").replace("2(4.1s)", "2(4.0s)")
 
 
@@ -296,7 +323,7 @@ def _corpus(folder, db, start, days):
     with sqlite3.connect(path) as con:
         ev = pd.read_sql(
             "SELECT timestamp, event_code, parameter FROM events WHERE timestamp >= ? "
-            "AND timestamp < ? AND event_code IN (-1, 1, 8, 9, 81, 82) ORDER BY timestamp",
+            "AND timestamp < ? AND event_code IN (-1, 1, 8, 9, 43, 81, 82) ORDER BY timestamp",
             con, params=(t0, t0 + days * 86400))
     return ev, path
 
@@ -320,6 +347,12 @@ def test_315_confirmed_mapping():
                  (38, 34, 18), (39, 35, 19), (40, 36, 20)):
         assert out.loc[list(lane), "lane_group"].nunique() == 1, lane
     assert out.loc[37, "wide"] and out.loc[53, "wide"]
+    # Minor approaches: P4/P8 onsets coincide, so only the controller's calls place them.
+    for det, ph in {42: 4, 43: 3, 44: 8, 58: 8, 59: 7, 60: 4}.items():
+        assert (out.loc[det, "phase"], out.loc[det, "confidence"]) == (ph, "high"), det
+    # Count loops call dummy phase 9 at 315: only stray same-tenth calls of
+    # other detectors match them, never decisively.
+    assert (out.loc[[18, 26], "call_share"].fillna(0) < 0.8).all()
 
 
 def test_201_diff():
@@ -329,11 +362,65 @@ def test_201_diff():
     with DatabaseManager(path) as m:
         cfg = m.get_config_at_date(datetime(2026, 6, 23))
     counts = ev[ev["event_code"] == 82].groupby("parameter").size().to_dict()
-    out = diff_detector_roles(infer_detector_roles(ev), parse_detector_roles(cfg), counts)
+    from atspm.analysis.cycles import _parse_ring_groups
+
+    ring = sorted({p for k in ("RB_R1", "RB_R2") for g in _parse_ring_groups(cfg.get(k)) for p in g})
+    out = diff_detector_roles(infer_detector_roles(ev, phases=ring), parse_detector_roles(cfg), counts)
     out = out.set_index("detector")
     assert (out.loc[41, "status"], out.loc[41, "proposed_role"], out.loc[41, "proposed_phase"]) == \
         ("conflict", "occupancy", 3)
     for det in (60, 63, 64):
         assert out.loc[det, "status"] == "silent"
     assert out.loc[38, "status"] == "match"
-    assert out.loc[33, "status"] == "consistent"
+    assert out.loc[33, "status"] == "match"           # its calls say P6; timing alone tied P2|P6
+
+
+# ---------------------------------------------------------------------------
+# Phase calls (Code 43 in the same tenth as the on-event)
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(scope="module")
+def called():
+    return infer_detector_roles(_synthetic(days=2, calls=True)).set_index("detector")
+
+
+def test_calls_give_advance_its_own_phase(called):
+    r = called.loc[1]
+    assert (r["role"], r["phase"], r["confidence"]) == ("arrival", 2, "high")
+    assert r["call_phase"] == 2 and r["call_share"] >= 0.99
+
+
+def test_calls_break_a_coincident_tie():
+    out = infer_detector_roles(_synthetic(days=2, p6_offset=0.0, calls=True)).set_index("detector")
+    assert (out.loc[2, "phase"], out.loc[2, "confidence"], out.loc[2, "candidates"]) == (2, "high", "")
+    assert out.loc[1, "phase"] == 2
+
+
+def test_calls_to_a_dummy_phase_are_ignored(called):
+    r = called.loc[3]
+    # its own calls go to P9 (not a candidate); only stray coincidences remain
+    assert r["n_calls"] < 0.2 * r["n_act"]
+    assert (r["role"], r["phase"]) == ("stop_bar", 2)
+
+
+def test_detector_calling_two_phases_is_reported_as_candidates():
+    out = infer_detector_roles(_synthetic(days=2, calls=True, multi=True)).set_index("detector")
+    r = out.loc[4]
+    assert pd.isna(r["phase"]) and r["candidates"] == "P2|P4" and r["confidence"] == "medium"
+
+
+def test_calls_override_timing():
+    ev = _synthetic(days=2, calls=True)
+    # Relabel P4 zone 4's calls as P2: the controller says P2, timing says P4.
+    is4 = (ev["event_code"] == 43) & (ev["parameter"] == 4)
+    ev.loc[is4, "parameter"] = 2
+    out = infer_detector_roles(ev).set_index("detector")
+    assert (out.loc[4, "phase"], out.loc[4, "confidence"]) == (2, "high")
+    assert out.loc[4, "onset_phase"] == 4
+
+
+def test_too_few_calls_leave_timing_in_charge():
+    out = infer_detector_roles(_synthetic(days=2, calls=True), call_min_calls=10**9)
+    out = out.set_index("detector")
+    assert out.loc[1, "confidence"] == "medium"        # chain only
+    assert out.loc[2, "phase"] == 2

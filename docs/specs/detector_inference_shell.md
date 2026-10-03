@@ -37,7 +37,7 @@ timezone resolution (`self.timezone = timezone or <metadata timezone>`, like Aog
 and config lookup.
 
 ```python
-_INFERENCE_CODES: List[int]   # exactly [-1, 1, 8, 9, 81, 82] (sorted)
+_INFERENCE_CODES: List[int]   # exactly [-1, 1, 8, 9, 43, 81, 82] (sorted; 43 added 2026-10-02 for the call cue)
 
 class DetectorInferenceEngine:
     def __init__(self, db_path: Path, timezone: Optional[str] = None) -> None

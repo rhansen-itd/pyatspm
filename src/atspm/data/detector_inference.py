@@ -26,7 +26,7 @@ from ..analysis.detector_inference import diff_detector_roles, infer_detector_ro
 from ..analysis.detector_roles import parse_detector_roles
 from ..utils.timezone import to_epoch
 
-_INFERENCE_CODES: List[int] = [-1, 1, 8, 9, 81, 82]
+_INFERENCE_CODES: List[int] = [-1, 1, 8, 9, 43, 81, 82]
 
 
 class DetectorInferenceEngine:

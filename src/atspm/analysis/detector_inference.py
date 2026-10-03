@@ -32,10 +32,23 @@ Evidence, per active channel
    lags — is tested.  A channel entered from ≥ 2 unlinked lanes is
    ``wide`` (spans lanes) and is kept out of lane groups.
 
+5. **Phase calls** (Code 43): a call registered in the *same tenth of a
+   second* as the channel's on-event is the controller's own detector →
+   phase assignment.  Calls register only when the phase isn't green or
+   already called, so they are sparse but unambiguous; they also separate
+   phases whose onsets always coincide (4/8).  Only calls to candidate
+   phases count (a dummy phase a count loop is assigned to, P9 at 315, is
+   ignored).  Per phase, the share of the channel's on-events that called
+   it: one phase ≥ ``call_min_share`` and no other ≥ ``call_multi_share``,
+   over at least ``call_min_calls`` such on-events, wins over timing
+   (confidence high).  Two or more phases ≥ ``call_multi_share`` means the
+   detector is assigned to several phases; they are reported as candidates.
+
 Roles: presence → ``occupancy``; pulse with a decisive onset jump →
 ``stop_bar`` (count loop at/after the stop line); pulse without one that
-leads a chain → ``arrival`` (advance), taking its phase from its chain;
-otherwise ``unknown``.
+leads a chain → ``arrival`` (advance); otherwise ``unknown``.  A channel
+with no phase of its own (calls or timing) takes its lane chain's phase at
+medium confidence.
 
 Gap Marker Rule
 ---------------
@@ -57,13 +70,15 @@ from .detectors import _reconstruct_intervals
 
 _GAP_CODE = -1
 _CODE_GREEN = 1
+_CODE_CALL = 43
 _CODE_DET_OFF = 81
 _CODE_DET_ON = 82
 
 INFERRED_SCHEMA = [
     "detector", "role", "phase", "lane_group", "wide", "confidence", "candidates",
     "n_act", "med_on", "frac_long", "onset_phase", "onset_ratio",
-    "reg_phase", "reg_margin", "upstream", "downstream",
+    "reg_phase", "reg_margin", "n_calls", "call_phase", "call_share",
+    "upstream", "downstream",
 ]
 DIFF_SCHEMA = [
     "detector", "status", "configured", "proposed_role", "proposed_phase",
@@ -76,6 +91,7 @@ _INF_DTYPES = {
     "wide": "bool", "confidence": "str", "candidates": "str", "n_act": "int64",
     "med_on": "float64", "frac_long": "float64", "onset_phase": "Int64",
     "onset_ratio": "float64", "reg_phase": "Int64", "reg_margin": "float64",
+    "n_calls": "int64", "call_phase": "Int64", "call_share": "float64",
     "upstream": "str", "downstream": "str",
 }
 
@@ -219,6 +235,9 @@ def infer_detector_roles(
     onset_min_ratio: float = 1.5,
     onset_high_ratio: float = 3.0,
     count_min_jump: float = 3.0,
+    call_min_calls: int = 20,
+    call_min_share: float = 0.8,
+    call_multi_share: float = 0.5,
     reg_min_margin: float = 0.5,
     chain_max_lag_s: float = 20.0,
     chain_min_share: float = 0.3,
@@ -244,6 +263,11 @@ def infer_detector_roles(
         onset_high_ratio: Same, for high confidence.
         count_min_jump: A pulse channel whose best onset jump reaches this is
             a count loop (``stop_bar``) even when concurrent phases tie.
+        call_min_calls: On-events with a same-tenth call to a candidate
+            phase needed to use the call cue.
+        call_min_share: Share of those on-events one phase needs to win.
+        call_multi_share: Share at which a second phase marks the detector
+            as calling several phases.
         reg_min_margin: ``(best − second) / best`` regression coefficient for
             a decisive phase.
         chain_max_lag_s: Longest a → b lag searched.
@@ -271,6 +295,10 @@ def infer_detector_roles(
             onset_ratio  float  – its jump over the runner-up's
             reg_phase    Int64  – best phase by release regression (presence)
             reg_margin   float
+            n_calls      int64  – on-events with a same-tenth Code-43 call
+                                  to a candidate phase
+            call_phase   Int64  – the phase called most often
+            call_share   float  – share of those on-events calling it
             upstream     str    – linked upstream channels "54(4.0s)", comma-joined
             downstream   str    – linked downstream channels
     """
@@ -358,6 +386,28 @@ def infer_detector_roles(
     if not rows:
         return pd.DataFrame(columns=INFERRED_SCHEMA).astype(_INF_DTYPES)
     df = pd.DataFrame(rows).set_index("detector")
+
+    # --- Phase calls in the same tenth as the on-event -----------------------
+    on_k = pd.DataFrame({
+        "detector": par[code == _CODE_DET_ON],
+        "k": np.rint(t[code == _CODE_DET_ON] * 10.0).astype(np.int64),
+    })
+    call_k = pd.DataFrame({
+        "call": par[code == _CODE_CALL],
+        "k": np.rint(t[code == _CODE_CALL] * 10.0).astype(np.int64),
+    }).drop_duplicates()
+    call_k = call_k[call_k["call"].isin(phases)]
+    matched = on_k.drop_duplicates().merge(call_k, on="k")
+    n_events = matched.groupby("detector")["k"].nunique()
+    per = matched.groupby(["detector", "call"]).size().rename("n").reset_index()
+    per["share"] = per["n"] / per["detector"].map(n_events)
+    top = per.sort_values(["detector", "share", "call"], ascending=[True, False, True]) \
+             .drop_duplicates("detector").set_index("detector")
+    multi = (per[per["share"] >= call_multi_share].groupby("detector")["call"]
+             .agg(lambda c: sorted(int(v) for v in c)))
+    df["n_calls"] = n_events.reindex(df.index).fillna(0).astype(int)
+    df["call_phase"] = top["call"].reindex(df.index)
+    df["call_share"] = top["share"].reindex(df.index)
 
     # --- Lane chains ----------------------------------------------------------
     links = _chain_links(on_times, gaps, chain_max_lag_s, chain_min_share,
@@ -463,6 +513,19 @@ def infer_detector_roles(
     cand[tie] = ("P" + df.loc[tie, "onset_phase"].astype(int).astype(str)
                  + "|P" + df.loc[tie, "onset_second"].astype(int).astype(str))
 
+    # The controller's calls override timing where they are decisive.
+    enough = df["n_calls"] >= call_min_calls
+    n_multi = pd.Series({d: len(v) for d, v in multi.items()}).reindex(df.index).fillna(0)
+    by_call = enough & (df["call_share"] >= call_min_share) & (n_multi <= 1)
+    phase[by_call] = df.loc[by_call, "call_phase"].astype(int)
+    conf[by_call] = "high"
+    cand[by_call] = ""
+    several = enough & (n_multi >= 2)
+    for det in df.index[several]:
+        phase[det] = pd.NA
+        conf[det] = "medium"
+        cand[det] = "|".join(f"P{q}" for q in multi[det])
+
     # Phase-less channels take the phase of their lane chain, repeated so it
     # propagates along a chain (presence → advance lane → lane-spanning zone).
     if not links.empty:
@@ -478,7 +541,7 @@ def infer_detector_roles(
                     continue
                 if len(phs) == 1:
                     phase[det] = phs[0]
-                    conf[det] = "high" if df.at[det, "role"] == "arrival" else "medium"
+                    conf[det] = "medium"          # indirect: the lane's, not its own
                     cand[det] = ""
                     changed = True
                 else:
@@ -502,6 +565,7 @@ def infer_detector_roles(
     out = df.reset_index()
     out["onset_phase"] = out["onset_phase"].astype("Int64")
     out["reg_phase"] = out["reg_phase"].astype("Int64")
+    out["call_phase"] = out["call_phase"].astype("Int64")
     return out[INFERRED_SCHEMA].astype(_INF_DTYPES).sort_values("detector").reset_index(drop=True)
 
 
