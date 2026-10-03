@@ -36,6 +36,7 @@ from ..analysis.detector_health import (
     wd_units,
 )
 from ..analysis.detector_roles import parse_detector_roles
+from ..analysis.detector_inference import _to_epoch
 from ..analysis.timing_actuation import finding_plot_windows
 from ..plotting.detector_health import plot_detector_health
 from ..utils.timezone import resolve_pytz
@@ -143,9 +144,8 @@ class DetectorHealthEngine:
         # Convert timestamp column to plain UTC epoch floats
         ts_col = events_df["timestamp"]
         if pd.api.types.is_datetime64_any_dtype(ts_col):
-            events_df["timestamp"] = (
-                ts_col.astype("int64").to_numpy(dtype=float) / 1e9
-            )
+            # Resolution-safe: whole-second fetches come back as datetime64[s].
+            events_df["timestamp"] = _to_epoch(ts_col)
         else:
             first_ts = ts_col.iloc[0]
             if hasattr(first_ts, "timestamp"):

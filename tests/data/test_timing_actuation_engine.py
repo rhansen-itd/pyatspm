@@ -57,7 +57,8 @@ def _cycles(start: str, end: str):
 def seeded_db(empty_db: Path) -> Path:
     from ..conftest import seed_events
 
-    rows = _cycles(f"{DATE} 06:00", f"{DATE} 20:00")
+    # The whole local day, so detector-health judges it (min_observed_share).
+    rows = _cycles(f"{DATE} 00:00", "2026-01-11 00:00")
     rows += [(_loc(f"{DATE} 07:50"), 82, 30)]        # stuck on from 07:50, never off
     seed_events(empty_db, rows)
     with DatabaseManager(empty_db) as m:
@@ -101,10 +102,12 @@ class TestEngine:
         assert "Timing & Actuation" in res["figure"].layout.title.text
 
     def test_no_output_dir_writes_nothing(self, seeded_db: Path, tmp_path: Path, monkeypatch):
-        monkeypatch.chdir(tmp_path)
+        cwd = tmp_path / "cwd"          # tmp_path itself holds the DB
+        cwd.mkdir()
+        monkeypatch.chdir(cwd)
         res = TimingActuationEngine(seeded_db, timezone=TZ).plot(f"{DATE} 08:00", f"{DATE} 08:30")
         assert res["html"] is None
-        assert list(tmp_path.iterdir()) == []
+        assert list(cwd.iterdir()) == []
 
     def test_stuck_on_since_before_window_fills_it(self, seeded_db: Path):
         res = TimingActuationEngine(seeded_db, timezone=TZ).plot(f"{DATE} 08:00", f"{DATE} 08:30")
