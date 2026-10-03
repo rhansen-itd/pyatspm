@@ -10,6 +10,7 @@ Modules:
 - cycles:   Cycle detection and barrier logic
 - counts:   Vehicle and pedestrian count aggregations
 - aog:      Arrival on Green calculations
+- detector_roles: Detector role table and per-role detector sets
 - clock_marks: eos_set_time drift/set marker decoding
 """
 
@@ -79,6 +80,11 @@ from .clock_marks import (
     decode_clock_marks,
 )
 
+from .detector_roles import (
+    parse_detector_roles,
+    detector_sets,
+)
+
 __all__ = [
     # Decoders
     'DatZDecodingError',
@@ -124,6 +130,9 @@ __all__ = [
     # Optimizer
     'optimize',
     'validate_plans',
+    # Detector roles
+    'parse_detector_roles',
+    'detector_sets',
     # Clock marks
     'MarkerPeds',
     'marker_peds_from_config',

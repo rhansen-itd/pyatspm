@@ -43,6 +43,7 @@ import pandas as pd
 import pytz
 
 from .manager import DatabaseManager, db_timezone
+from ..analysis.detector_roles import parse_detector_roles
 from ..analysis.decoders import CLOCK_STEP_FENCE_PARAM
 from ..utils.timezone import to_epoch
 
@@ -326,21 +327,44 @@ def get_config_dict(db_path: Path, date: datetime) -> Dict[str, Any]:
     return config_dict
 
 
+_ROLE_TO_LABEL: Dict[str, str] = {
+    "arrival": "Arrival",
+    "stop_bar": "Stop Bar",
+    "occupancy": "Occupancy",
+}
+
+
 def get_det_config(db_path: Path, date: datetime) -> Dict[str, str]:
-    """
-    Extract detector configuration keys in the expected ``"P{phase} {Type}"`` format.
+    """Extract detector configuration keys in the expected ``"P{phase} {Label}"`` format.
+
+    Rebuilt on the detector role table. Produces entries for ``'arrival'``,
+    ``'stop_bar'``, and ``'occupancy'`` roles.
+
+    Args:
+        db_path: Path to the intersection SQLite database.
+        date: Reference datetime to select the active configuration row.
+
+    Returns:
+        Mapping of ``"P{phase} {Label}"`` to comma-separated detector IDs,
+        sorted ascending.
     """
     config = get_config_dict(db_path, date)
-    result: Dict[str, str] = {}
+    if not config:
+        return {}
 
-    for key, val in config.items():
-        if not key.startswith('Det_') or not val:
-            continue
-        suffix = key[4:]
-        config_key = suffix.replace('_', ' ')
-        result[config_key] = str(val).strip()
+    roles = parse_detector_roles(config)
+    sub = roles[roles["role"].isin(_ROLE_TO_LABEL)]
+    if sub.empty:
+        return {}
 
-    return result
+    grouped = (
+        sub.groupby(["phase", "role"])["detector"]
+        .apply(lambda s: ",".join(str(int(d)) for d in sorted(s.unique())))
+    )
+    return {
+        f"P{int(phase)} {_ROLE_TO_LABEL[role]}": det_str
+        for (phase, role), det_str in grouped.items()
+    }
 
 
 def get_date_range(

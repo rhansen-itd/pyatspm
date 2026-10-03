@@ -11,7 +11,7 @@ Configuration
 -------------
 Presence detector IDs (the zones at the stop line, one per lane) are read
 from the active ``config`` row via ``DatabaseManager.get_config_at_date`` and
-parsed by ``atspm.analysis.critical._parse_occupancy_sets``.  The key is::
+parsed by ``atspm.analysis.detector_roles.detector_sets``.  The key is::
 
     Det_P{phase}_Occupancy   →   "1,2,3"  (comma-separated detector IDs)
 
@@ -56,7 +56,7 @@ import pandas as pd
 from .critical import CriticalMovementEngine
 from .manager import DatabaseManager, db_timezone
 from .reader import get_events_with_cycles_df
-from ..analysis.critical import _parse_occupancy_sets
+from ..analysis.detector_roles import detector_sets, parse_detector_roles
 from ..analysis.split_failures import (
     AGGREGATES,
     bin_split_failures as _bin_split_failures_core,
@@ -156,7 +156,7 @@ class SplitFailureEngine:
         start_dt, end_dt = CriticalMovementEngine._parse_range(start, end)
         config = self._get_config(start_dt)
 
-        presence_sets = _parse_occupancy_sets(config)
+        presence_sets = detector_sets(parse_detector_roles(config), "occupancy")
 
         if phases is not None:
             phase_dets = {p: presence_sets[p] for p in phases if p in presence_sets}

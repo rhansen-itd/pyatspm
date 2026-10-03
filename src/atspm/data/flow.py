@@ -39,7 +39,7 @@ import pandas as pd
 
 from .manager import DatabaseManager, db_timezone
 from .reader import get_events_with_cycles_df
-from ..analysis.critical import _parse_stopbar_sets
+from ..analysis.detector_roles import detector_sets, parse_detector_roles
 from ..analysis.flow import (
     flow_rate as _flow_rate_core,
     rate_profiles as _rate_profiles_core,
@@ -361,9 +361,10 @@ class FlowRateEngine:
             ``{phase_int: [det_id, ...]}`` for all phases with valid detector
             config.  Empty dict if nothing is configured.
         """
+        sb_sets = detector_sets(parse_detector_roles(config), "stop_bar")
         result: Dict[int, List[int]] = {
             ph: sorted(dets)
-            for ph, dets in _parse_stopbar_sets(config).items()
+            for ph, dets in sorted(sb_sets.items())
             if phases is None or ph in phases
         }
 

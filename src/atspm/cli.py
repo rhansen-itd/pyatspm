@@ -1050,7 +1050,8 @@ def handle_flow(args: argparse.Namespace) -> None:
     """Generate split flow-rate tables and plots for one or more intersections.
 
     Reads stop-bar detector mappings from the active configuration
-    (``Det_P{N}_Stopbar`` keys) and writes per-cycle CSVs, wide rate
+    (``P{N} Stop Bar`` rows: ``Det_P{N}_Stop_Bar``; ``Det_P{N}_Stopbar``
+    also accepted) and writes per-cycle CSVs, wide rate
     profiles, and interactive HTML plots to
     ``intersections/<target>/outputs/``.
 
@@ -2772,7 +2773,7 @@ def _add_flow_parser(subs: argparse._SubParsersAction) -> None:
             "Compute effective cumulative flow-rate profiles from stop-bar\n"
             "detector departures (Code 81) within each phase split window.\n"
             "Stop-bar detector IDs are read from the active configuration\n"
-            "(Det_P{N}_Stopbar keys in int_cfg.csv).\n\n"
+            "(P{N} Stop Bar rows: Det_P{N}_Stop_Bar; Det_P{N}_Stopbar also accepted).\n\n"
             "Only near-capacity cycles qualify (end slack <= --max-lost);\n"
             "cycles are then restricted to the modal split and the busiest\n"
             "--pct percent.  The peak of the mean profile identifies the\n"
@@ -2818,7 +2819,8 @@ def _add_flow_parser(subs: argparse._SubParsersAction) -> None:
         default=None,
         help=(
             "Signal phase numbers to analyse, e.g. --phases 2 6. "
-            "Omit to analyse all phases with a configured Det_P{N}_Stopbar key."
+            "Omit to analyse all phases with configured P{N} Stop Bar rows "
+            "(Det_P{N}_Stop_Bar; Det_P{N}_Stopbar also accepted)."
         ),
     )
     p_flow.add_argument(
@@ -2932,7 +2934,7 @@ def _add_critical_parser(subs: argparse._SubParsersAction) -> None:
             "from RB_R1/RB_R2 config (NEMA-standard fallback), cross-checked\n"
             "against observed cycle sequences; movement counts (TM_* keys)\n"
             "are mapped to phases by stop-bar detector overlap\n"
-            "(Det_P{N}_Stopbar keys).\n\n"
+            "(P{N} Stop Bar rows: Det_P{N}_Stop_Bar; Det_P{N}_Stopbar also accepted).\n\n"
             "Demand (vph, or vphpl with --basis per_lane) is the\n"
             "required-time proxy: per barrier group, the ring with the\n"
             "larger demand sum is the critical path.\n\n"

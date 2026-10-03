@@ -24,11 +24,11 @@ from .flow import _ALL_FLOW_CODES
 from .manager import DatabaseManager, db_timezone
 from .reader import _query_cycles, get_events_with_cycles_df
 from ..analysis.critical import (
-    _parse_stopbar_sets,
     movement_phase_map,
     phase_demand,
     ring_barrier_structure,
 )
+from ..analysis.detector_roles import detector_sets, parse_detector_roles
 from ..analysis.flow import discharge_profiles, flow_rate, saturation_state
 from ..analysis.optimizer import optimize
 from ..analysis.optimizer_validation import validate_plans
@@ -197,7 +197,7 @@ class OptimizerEngine:
         )
 
         # 6. Detectors
-        all_stopbar_sets = _parse_stopbar_sets(config)
+        all_stopbar_sets = detector_sets(parse_detector_roles(config), "stop_bar")
         stopbar_dets = {
             p: sorted(all_stopbar_sets[p])
             for p in sorted(st_phases)
@@ -480,7 +480,7 @@ class OptimizerEngine:
         gap_ts = events.loc[events["event_code"] == -1, "timestamp"].to_numpy()
 
         # 5. Phases under test
-        all_stopbar_sets = _parse_stopbar_sets(config)
+        all_stopbar_sets = detector_sets(parse_detector_roles(config), "stop_bar")
         valid_phases = []
         for p in saturated:
             p_int = int(p)

@@ -43,13 +43,13 @@ Package Location: src/atspm/analysis/critical.py
 
 from __future__ import annotations
 
-import re
 from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 
 from .counts import parse_movements_from_config
 from .cycles import _parse_ring_groups
+from .detector_roles import detector_sets, parse_detector_roles
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -58,13 +58,6 @@ from .cycles import _parse_ring_groups
 # NEMA-standard dual-ring fallback used when no RB_* config is present
 _DEFAULT_R1_GROUPS: List[List[int]] = [[1, 2], [3, 4]]
 _DEFAULT_R2_GROUPS: List[List[int]] = [[5, 6], [7, 8]]
-
-# Matches both spellings produced by the config import ('P2 Stopbar' →
-# Det_P2_Stopbar, 'P2 Stop Bar' → Det_P2_Stop_Bar)
-_STOPBAR_KEY_RE = re.compile(r"^Det_P(\d+)_(?:Stopbar|Stop_Bar)$")
-
-# 'P2 Occupancy' → Det_P2_Occupancy: the presence zone at the stop line
-_OCCUPANCY_KEY_RE = re.compile(r"^Det_P(\d+)_Occupancy$")
 
 # Output schemas
 _STRUCTURE_SCHEMA = [
@@ -125,61 +118,6 @@ def _observed_ring_share(cycles_df: pd.DataFrame, column: str) -> pd.Series:
         .drop_duplicates()  # one row per (cycle row, phase)
     )
     return present[column].value_counts() / float(len(cycles_df))
-
-
-def _parse_stopbar_sets(config: Dict[str, Any]) -> Dict[int, frozenset]:
-    """Extract per-phase stop-bar detector sets from the config dict.
-
-    Args:
-        config: Active config dict (``Det_P{N}_Stopbar`` /
-            ``Det_P{N}_Stop_Bar`` keys hold comma-separated detector IDs).
-
-    Returns:
-        ``{phase: frozenset(det_ids)}`` for phases with a non-empty key.
-    """
-    return _parse_detector_sets(config, _STOPBAR_KEY_RE)
-
-
-def _parse_occupancy_sets(config: Dict[str, Any]) -> Dict[int, frozenset]:
-    """Extract per-phase presence (``Det_P{N}_Occupancy``) detector sets.
-
-    Args:
-        config: Active config dict.
-
-    Returns:
-        ``{phase: frozenset(det_ids)}`` for phases with a non-empty key.
-    """
-    return _parse_detector_sets(config, _OCCUPANCY_KEY_RE)
-
-
-def _parse_detector_sets(
-    config: Dict[str, Any], key_re: "re.Pattern[str]"
-) -> Dict[int, frozenset]:
-    """Per-phase detector sets for config keys matching *key_re*.
-
-    Args:
-        config: Active config dict; matching keys hold comma-separated
-            detector IDs.
-        key_re: Pattern whose group 1 is the phase number.
-
-    Returns:
-        ``{phase: frozenset(det_ids)}`` for phases with a non-empty key.
-    """
-    result: Dict[int, frozenset] = {}
-    for key, raw_val in config.items():
-        match = key_re.match(key)
-        if not match or not raw_val or (
-            isinstance(raw_val, float) and pd.isna(raw_val)
-        ):
-            continue
-        det_ids = frozenset(
-            int(tok.strip())
-            for tok in str(raw_val).split(",")
-            if tok.strip().isdigit()
-        )
-        if det_ids:
-            result[int(match.group(1))] = det_ids
-    return result
 
 
 # ---------------------------------------------------------------------------
@@ -317,7 +255,7 @@ def movement_phase_map(config: Dict[str, Any]) -> pd.DataFrame:
                                   (0 when unmapped)
     """
     movements = parse_movements_from_config(config)
-    stopbar_sets = _parse_stopbar_sets(config)
+    stopbar_sets = detector_sets(parse_detector_roles(config), "stop_bar")
 
     rows = []
     for label in sorted(movements):

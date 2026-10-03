@@ -56,6 +56,7 @@ from ..analysis.aog import (
     arrival_on_green as _aog_core,
     bin_arrival_on_green as _bin_aog_core,
 )
+from ..analysis.detector_roles import detector_sets, parse_detector_roles
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -408,32 +409,12 @@ class AogEngine:
             ``{phase_int: [det_id, ...]}`` for all phases with valid detector
             config.  Empty dict if nothing is configured.
         """
-        result: Dict[int, List[int]] = {}
-
-        # Collect all phases that have an Arrival config key
-        arrival_keys = {
-            k: v for k, v in config.items()
-            if k.startswith("Det_P") and k.endswith("_Arrival") and v
+        arr_sets = detector_sets(parse_detector_roles(config), "arrival")
+        result: Dict[int, List[int]] = {
+            ph: sorted(dets)
+            for ph, dets in sorted(arr_sets.items())
+            if phases is None or ph in phases
         }
-
-        for key, raw_val in arrival_keys.items():
-            # Key format: Det_P{N}_Arrival  →  extract N
-            try:
-                ph_str = key[5:key.index("_Arrival")]  # between "Det_P" and "_Arrival"
-                ph = int(ph_str)
-            except (ValueError, IndexError):
-                continue
-
-            if phases is not None and ph not in phases:
-                continue
-
-            try:
-                det_ids = [int(x.strip()) for x in str(raw_val).split(",") if x.strip()]
-            except ValueError:
-                continue
-
-            if det_ids:
-                result[ph] = det_ids
 
         # Warn about explicitly requested phases that have no config
         if phases is not None:
