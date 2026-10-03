@@ -109,7 +109,7 @@ class TestEngine:
     def test_codes_include_gap_marker_and_detector_codes(self):
         assert set(_ALL_SF_CODES) == {-1, 1, 8, 9, 10, 11, 12, 81, 82}
 
-    @pytest.mark.parametrize("aggregate", ["union", "mean"])
+    @pytest.mark.parametrize("aggregate", ["union", "mean", "any"])
     def test_reproduces_the_core(self, db, aggregate):
         res = SplitFailureEngine(db).split_failures(START, END, aggregate=aggregate)
         cyc = res["cycle"]
@@ -288,6 +288,8 @@ class TestCli:
     def test_aggregate_choices(self):
         assert self._parse("--all", "--start", DAY, "--end", DAY,
                            "--aggregate", "mean").aggregate == "mean"
+        assert self._parse("--all", "--start", DAY, "--end", DAY,
+                           "--aggregate", "any").aggregate == "any"
         with pytest.raises(SystemExit):
             self._parse("--all", "--start", DAY, "--end", DAY, "--aggregate", "max")
 

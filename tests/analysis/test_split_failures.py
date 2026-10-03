@@ -480,3 +480,87 @@ def test_single_lane_matches_spms_oracle(monkeypatch, thresh):
     assert list(o["fail"].astype(int)) == list(r["Split Fail"].astype(int))
     if thresh == 0.5:
         assert 0 < int(o["fail"].sum()) < len(o)     # the flags are exercised
+
+
+# ---------------------------------------------------------------------------
+# aggregate="any": a cycle fails when any lane fails on its own ratios; the
+# reported GOR/ROR5 are the worst lane's (S-M1 recommendation 3)
+# ---------------------------------------------------------------------------
+
+
+def test_any_fails_one_jammed_lane_and_reports_it():
+    det = {_A: _pulse(-1, 40), _B: _pulse(40, 41), _C: _pulse(40, 41)}
+    ev = _events(2, det=det)
+    cyc, _ = split_failures(ev, _PH, [_A, _B, _C], aggregate="any")
+    r = _row(cyc)
+    assert r["fail"]
+    assert int(r["worst_det"]) == _A
+    assert r["gor"] == pytest.approx(1.0) and r["ror5"] == pytest.approx(1.0)
+    assert r["gor_any"] == pytest.approx(1.0) and r["ror5_any"] == pytest.approx(1.0)
+    assert r["g_occ"] == pytest.approx(20.0) and r["r_occ"] == pytest.approx(5.0)
+    # union and mean are still reported beside it
+    assert r["gor_mean"] == pytest.approx(1 / 3)
+    assert r["gor_union"] == pytest.approx(1.0)
+
+
+def test_any_worst_lane_is_the_one_closest_to_failing():
+    # green [0,20), red-5 [24,29); g_dur 20, r_dur 5
+    det = {
+        _A: _pulse(0, 19) + _pulse(40, 41),                 # GOR .95, ROR 0   → min 0
+        _B: _pulse(0, 10) + _pulse(24, 29),                 # GOR .5,  ROR 1   → min .5
+        _C: _pulse(0, 12) + _pulse(24, 28),                 # GOR .6,  ROR .8  → min .6
+    }
+    ev = _events(2, det=det)
+    cyc, _ = split_failures(ev, _PH, [_A, _B, _C], aggregate="any")
+    r = _row(cyc)
+    assert int(r["worst_det"]) == _C
+    assert r["gor"] == pytest.approx(0.6) and r["ror5"] == pytest.approx(0.8)
+    assert not r["fail"]                                    # .6 ≤ .79
+    assert int(r["n_lanes_failed"]) == 0
+
+
+def test_any_tie_prefers_larger_sum_then_lowest_channel():
+    same = _pulse(0, 12) + _pulse(24, 28)                   # GOR .6, ROR .8
+    det = {_C: list(same), _A: list(same), _B: _pulse(0, 12) + _pulse(24, 27)}  # B: .6/.6
+    ev = _events(2, det=det)
+    cyc, _ = split_failures(ev, _PH, [_C, _A, _B], aggregate="any")
+    assert int(_row(cyc)["worst_det"]) == _A
+
+
+def test_any_on_one_lane_equals_union_and_mean():
+    ev = _events(3, det={_A: _pulse(-1, 18) + _pulse(25, 70) + _pulse(100, 101)})
+    out = {a: split_failures(ev, _PH, [_A], aggregate=a)[0] for a in ("union", "mean", "any")}
+    for col in ("gor", "ror5", "g_occ", "r_occ", "fail"):
+        assert list(out["any"][col]) == list(out["union"][col]) == list(out["mean"][col])
+    assert set(out["any"]["worst_det"]) == {_A}
+
+
+def test_any_fail_matches_n_lanes_failed():
+    det = {
+        _A: _pulse(-1, 40) + _pulse(70, 75) + _pulse(150, 151),
+        _B: _pulse(2, 5) + _pulse(59, 100) + _pulse(150, 151),
+        _C: _pulse(10, 11) + _pulse(150, 151),
+    }
+    ev = _events(3, det=det)
+    cyc, _ = split_failures(ev, _PH, [_A, _B, _C], aggregate="any")
+    assert list(cyc["fail"]) == list(cyc["n_lanes_failed"] > 0)
+    assert list(cyc["fail"]) == [True, True, False]
+
+
+def test_any_skips_unknown_lanes():
+    # B is silent for the whole segment: unknown, never the worst lane
+    det = {_A: _pulse(0, 4) + _pulse(40, 41)}
+    ev = _events(2, det=det)
+    cyc, _ = split_failures(ev, _PH, [_A, _B], aggregate="any")
+    r = _row(cyc)
+    assert int(r["worst_det"]) == _A and int(r["n_lanes"]) == 1
+
+
+def test_bin_with_any_is_time_weighted_over_worst_lanes():
+    det = {_A: _pulse(-1, 40) + _pulse(100, 101), _B: _pulse(60, 70) + _pulse(84, 86)}
+    ev = _events(3, det=det)
+    cyc, _ = split_failures(ev, _PH, [_A, _B], aggregate="any")
+    b = bin_split_failures(cyc, bin_len=60)
+    assert len(b) == 1
+    assert b["gor"].iloc[0] == pytest.approx(cyc["g_occ"].sum() / cyc["g_dur"].sum())
+    assert b["n_fail"].iloc[0] == int(cyc["fail"].sum())
