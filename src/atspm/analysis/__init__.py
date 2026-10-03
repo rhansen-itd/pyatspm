@@ -11,6 +11,7 @@ Modules:
 - counts:   Vehicle and pedestrian count aggregations
 - aog:      Arrival on Green calculations
 - detector_roles: Detector role table and per-role detector sets
+- detector_activity: Per-detector activity profile per local day/window
 - clock_marks: eos_set_time drift/set marker decoding
 """
 
@@ -85,6 +86,8 @@ from .detector_roles import (
     detector_sets,
 )
 
+from .detector_activity import detector_activity_profile
+
 __all__ = [
     # Decoders
     'DatZDecodingError',
@@ -133,6 +136,8 @@ __all__ = [
     # Detector roles
     'parse_detector_roles',
     'detector_sets',
+    # Detector activity
+    'detector_activity_profile',
     # Clock marks
     'MarkerPeds',
     'marker_peds_from_config',

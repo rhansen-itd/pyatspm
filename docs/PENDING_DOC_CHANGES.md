@@ -50,3 +50,4 @@ See CLAUDE.md "Documentation Workflow" for the rules.
 - [src/atspm/cli.py] split-failures --aggregate gains any (worst-lane)
 - [src/atspm/cli.py] new infer-detectors subcommand
 - [src/atspm/data/__init__.py] export DetectorInferenceEngine, get_detector_inference
+- [src/atspm/analysis/__init__.py] export detector_activity_profile (new analysis/detector_activity.py)
