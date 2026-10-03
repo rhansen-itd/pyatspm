@@ -15,6 +15,7 @@ from .optimizer import (
     plot_throughput_curve,
 )
 from .clock_marks import plot_clock_drift
+from .split_failures import plot_split_failures
 
 __all__ = [
     'plot_termination',
@@ -25,4 +26,5 @@ __all__ = [
     'plot_marginal_rates',
     'plot_throughput_curve',
     'plot_clock_drift',
+    'plot_split_failures',
 ]

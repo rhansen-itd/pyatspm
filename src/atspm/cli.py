@@ -10,6 +10,7 @@ Exposes subcommands from intersection configuration setup through reporting and 
     atspm counts             --targetid <id> [...]       Generate vehicle and pedestrian counts
     atspm splits             --targetid <id> [...]       Generate phase split and timing records
     atspm aog                --targetid <id> [...]       Generate Arrival on Green (AOG) tables
+    atspm split-failures     --targetid <id> [...]       Generate Purdue split-failure tables and plots
     atspm discrepancies      --targetid <id> [...]       Analyze detector discrepancies
     atspm plot-detectors     --targetid <id> [...]       Generate interactive detector comparison plots
     atspm plot-coordination  --targetid <id> [...]       Generate interactive coordination diagram plots
@@ -865,6 +866,109 @@ def handle_aog(args: argparse.Namespace) -> None:
         except Exception as exc:
             print(
                 f"\n❌ Unexpected error generating AOG for {target_name}: {exc}",
+                file=sys.stderr,
+            )
+            if getattr(args, "verbose", False):
+                traceback.print_exc()
+
+
+# ---------------------------------------------------------------------------
+# split-failures
+# ---------------------------------------------------------------------------
+
+def _split_failures_single_intersection(target_name: str, args: argparse.Namespace) -> None:
+    """Core logic to generate split failures for a single intersection.
+
+    Resolves the database path and timezone from ``metadata.json``, then
+    delegates entirely to :class:`atspm.data.split_failures.SplitFailureEngine`.
+    All I/O (event queries, CSV/HTML writing) is handled inside the engine;
+    this function is responsible only for path resolution, argument forwarding,
+    and error surfacing.
+
+    Args:
+        target_name: Exact intersection folder name
+            (e.g., ``'2068_US-95_and_SH-8'``).
+        args: Parsed CLI arguments from the ``split-failures`` subcommand.
+    """
+    from atspm.data.split_failures import SplitFailureEngine
+
+    target_dir = _get_target_dir(target_name)
+    meta = _load_metadata(target_dir)
+    db_path = _resolve_db_path(target_dir, meta)
+
+    output_dir = target_dir / "outputs"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    int_name = meta.get("intersection_name", target_name)
+    timezone = args.timezone or meta.get("timezone") or DEFAULT_TIMEZONE
+
+    if not db_path.exists():
+        _die(
+            f"Database not found: {db_path}\n"
+            f"Run 'atspm process --target {target_name}' first."
+        )
+
+    print(f"\n🚦  Generating Split Failures for {int_name}")
+    print(f"    DB:        {db_path.name}")
+    print(f"    Window:    {args.start} → {args.end}")
+    print(f"    Aggregate: {args.aggregate}")
+    print(f"    Threshold: {args.threshold}")
+    print(f"    ROR Sec:   {args.ror_seconds}s")
+    print(f"    Bins:      {args.bin_len}")
+    if args.phases:
+        print(f"    Phases:    {args.phases}")
+
+    engine = SplitFailureEngine(db_path=db_path, timezone=timezone)
+
+    try:
+        engine.split_failures(
+            start=args.start,
+            end=args.end,
+            phases=args.phases,
+            aggregate=args.aggregate,
+            threshold=args.threshold,
+            ror_seconds=args.ror_seconds,
+            include_yellow=args.include_yellow,
+            bin_len=args.bin_len,
+            exclude_missing=args.exclude_missing,
+            make_plot=not args.no_plot,
+            output_dir=output_dir,
+        )
+    except Exception as exc:
+        if args.verbose:
+            traceback.print_exc()
+        _die(f"Split failure generation failed: {exc}")
+
+
+def handle_split_failures(args: argparse.Namespace) -> None:
+    """Generate Purdue split failures for one or more intersections.
+
+    Reads stop-bar detector mappings from the active configuration
+    (``Det_P{N}_Stop_Bar`` / ``Det_P{N}_Stopbar`` keys) and writes per-cycle,
+    lane, and binned split-failure tables and scatter plots to
+    ``intersections/<target>/outputs/``.
+
+    Args:
+        args: Parsed CLI arguments from the ``split-failures`` subcommand.
+    """
+    intersections_dir = _get_intersections_dir()
+
+    if getattr(args, "all", False):
+        targets = [p.name for p in intersections_dir.iterdir() if p.is_dir()]
+        if not targets:
+            _die(f"No intersection directories found in {intersections_dir}")
+        print(f"\n🌍 Batch generating split failures for {len(targets)} intersections...")
+    else:
+        targets = [_resolve_target_name(args.target, args.targetid)]
+
+    for target_name in targets:
+        try:
+            _split_failures_single_intersection(target_name, args)
+        except SystemExit:
+            print(f"\n⏭️ Skipping {target_name} due to errors.", file=sys.stderr)
+        except Exception as exc:
+            print(
+                f"\n❌ Unexpected error generating split failures for {target_name}: {exc}",
                 file=sys.stderr,
             )
             if getattr(args, "verbose", False):
@@ -2533,6 +2637,131 @@ def _add_aog_parser(subs: argparse._SubParsersAction) -> None:
     p_aog.set_defaults(func=handle_aog)
 
 
+def _add_split_failures_parser(subs: argparse._SubParsersAction) -> None:
+    """Attach the ``split-failures`` subcommand parser."""
+    p_sf = subs.add_parser(
+        "split-failures",
+        help="Generate Purdue split-failure tables and scatter plots.",
+        description=(
+            "Calculate Purdue split failures (GOR vs ROR5) per phase split window.\n"
+            "Stop-bar detector IDs are read from the active configuration\n"
+            "(Det_P{N}_Stop_Bar / Det_P{N}_Stopbar keys in int_cfg.csv).\n\n"
+            "Outputs (CSV + interactive HTML) are saved to:\n"
+            "  intersections/<target>/outputs/"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    group_sf = p_sf.add_mutually_exclusive_group(required=True)
+    group_sf.add_argument(
+        "--target",
+        metavar="FOLDER",
+        help="Exact intersection folder name (e.g. '2068_US-95_and_SH-8').",
+    )
+    group_sf.add_argument(
+        "--targetid",
+        metavar="ID",
+        help="Intersection ID prefix (e.g. '2068').",
+    )
+    group_sf.add_argument(
+        "--all",
+        action="store_true",
+        help="Generate split failures for all intersections in the directory.",
+    )
+    p_sf.add_argument(
+        "--start",
+        required=True,
+        metavar="DATETIME",
+        help=(
+            "Period start (local time): 'YYYY-MM-DD' or 'YYYY-MM-DD HH:MM' "
+            "for sub-day peak periods."
+        ),
+    )
+    p_sf.add_argument(
+        "--end",
+        required=True,
+        metavar="DATETIME",
+        help=(
+            "Period end (local time): 'YYYY-MM-DD' (inclusive whole day) or "
+            "'YYYY-MM-DD HH:MM' (exclusive)."
+        ),
+    )
+    p_sf.add_argument(
+        "--phases",
+        nargs="+",
+        type=int,
+        metavar="N",
+        default=None,
+        help="Signal phase numbers to analyse, e.g. --phases 2 6. Omit to analyse all configured phases.",
+    )
+    p_sf.add_argument(
+        "--aggregate",
+        choices=["union", "mean"],
+        default="union",
+        help=(
+            "Lane aggregation method (default: union). "
+            "union = occupied when any lane is on (UDOT, like one multi-lane detector); "
+            "mean = average of per-lane GOR/ROR5."
+        ),
+    )
+    p_sf.add_argument(
+        "--threshold",
+        type=float,
+        default=0.79,
+        metavar="FRAC",
+        help="Occupancy threshold above which a cycle fails (default: 0.79).",
+    )
+    p_sf.add_argument(
+        "--ror-seconds",
+        type=float,
+        default=5.0,
+        metavar="SEC",
+        help="Red occupancy window length in seconds from yellow end (default: 5.0).",
+    )
+    p_sf.add_argument(
+        "--include-yellow",
+        action="store_true",
+        help="Measure GOR over green + yellow (SPMs definition) instead of green only.",
+    )
+    p_sf.add_argument(
+        "--bin-len",
+        default="60",
+        metavar="N",
+        help=(
+            "Aggregation interval in minutes, or 'cycle' for one row per "
+            "detected cycle (default: 60)."
+        ),
+    )
+    p_sf.add_argument(
+        "--exclude-missing",
+        action="store_true",
+        help=(
+            "Drop bins labeled 'partial' or 'missing' from binned output. "
+            "Full-day-missing days are always dropped regardless of this flag. "
+            "Ignored in cycle mode."
+        ),
+    )
+    p_sf.add_argument(
+        "--no-plot",
+        action="store_true",
+        dest="no_plot",
+        default=False,
+        help="Disable interactive HTML scatter plot generation.",
+    )
+    p_sf.add_argument(
+        "--timezone",
+        default=None,
+        metavar="TZ",
+        help="Override the timezone from metadata.json (e.g. 'US/Pacific').",
+    )
+    p_sf.add_argument(
+        "--verbose",
+        action="store_true",
+        default=False,
+        help="Print full tracebacks for any errors.",
+    )
+    p_sf.set_defaults(func=handle_split_failures)
+
+
 def _add_flow_parser(subs: argparse._SubParsersAction) -> None:
     """Attach the ``flow`` subcommand parser."""
     p_flow = subs.add_parser(
@@ -3375,6 +3604,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_counts_parser(subs)
     _add_splits_parser(subs)
     _add_aog_parser(subs)
+    _add_split_failures_parser(subs)
     _add_flow_parser(subs)
     _add_critical_parser(subs)
     _add_optimize_parser(subs)

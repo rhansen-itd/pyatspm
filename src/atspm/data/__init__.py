@@ -54,6 +54,11 @@ from .aog import (
     get_arrival_on_green,
 )
 
+from .split_failures import (
+    SplitFailureEngine,
+    get_split_failures,
+)
+
 from .flow import (
     FlowRateEngine,
     get_flow_rate,
@@ -122,6 +127,9 @@ __all__ = [
     #AoG
     'AogEngine',
     'get_arrival_on_green',
+    # Split Failures
+    'SplitFailureEngine',
+    'get_split_failures',
     # Flow
     'FlowRateEngine',
     'get_flow_rate',

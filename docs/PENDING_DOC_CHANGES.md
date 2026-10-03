@@ -39,3 +39,8 @@ See CLAUDE.md "Documentation Workflow" for the rules.
 - [src/atspm/data/__init__.py] export ClockMarkEngine, get_clock_marks
 - [src/atspm/plotting/__init__.py] export plot_clock_drift
 - [src/atspm/cli.py] new clock-drift subcommand
+- [src/atspm/data/split_failures.py] new SplitFailureEngine and get_split_failures
+- [src/atspm/plotting/split_failures.py] new plot_split_failures
+- [src/atspm/data/__init__.py] export SplitFailureEngine, get_split_failures
+- [src/atspm/plotting/__init__.py] export plot_split_failures
+- [src/atspm/cli.py] new split-failures subcommand
