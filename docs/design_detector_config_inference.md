@@ -144,9 +144,11 @@ accepted rows across by hand, as done for 315's presence zones.
 - S-D2: the `UnconfiguredDetector` rule and configured-but-silent.
 - S-M9: lane and movement typing.
 
-## Open questions for the owner
+## Owner decisions (2026-10-02)
 
-1. Do 37 and 53 at 315 look like advance zones for P6 and P2 (a 4th lane, or a
-   bike/upstream zone)? The inference will propose them. Field knowledge decides.
-2. For 201 channel 41, should the diff present the inference as a **proposed fix**, or
-   only flag the conflict? The default is flag only.
+1. **315 channels 37 and 53** are probably advance zones on the minor approaches, which were
+   deliberately left unconfigured (the agency doesn't provide advance detection on minor
+   approaches). The inference still proposes them, as `new`. The owner's choice not to
+   configure them stands, and the proposal doesn't override it.
+2. **Propose fixes:** every `conflict` or `new` row carries the inferred role and phase
+   ("looks like P4 occupancy"), not just a flag. Nothing is written to `int_cfg.csv`.
