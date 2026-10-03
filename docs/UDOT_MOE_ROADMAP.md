@@ -114,7 +114,41 @@ Sessions D0 → D1 → D2 run in order. D3, D4 and D5 can run in parallel after 
   - **Movement:** per-lane totals match across a chain; channels of one approach split totals by lane.
   - **Silence and drift:** configured-but-silent channels and active-but-unconfigured ones (201's 60/63/64 vs its active zones) are flagged, as is a suspect role (201 channel 41).
 
-  Output: a proposed role table with a confidence per row, diffed against the current config. Golden cases: 315's confirmed P2/P6 mapping, and its `TM_*` count loops. Depends on S-D0 (the role table it fills). Fills S-M1's `_Occupancy` (presence) keys and feeds S-D2's `UnconfiguredDetector` rule. **Scoped 2026-10-02:** design in `docs/design_detector_config_inference.md`. Read it before building S-D6. It covers 315's measured duration classes, the API, the steps (mode, then phase with concurrent-phase discrimination, then light-traffic lane chains), confidence, the diff statuses, the goldens and the calibration plan. Two owner questions are open: 315's unconfigured advance-like channels 37/53, and whether the diff should propose fixes or only flag them.
+  Output: a proposed role table with a confidence per row, diffed against the current config. Golden cases: 315's confirmed P2/P6 mapping, and its `TM_*` count loops. Depends on S-D0 (the role table it fills). Fills S-M1's `_Occupancy` (presence) keys and feeds S-D2's `UnconfiguredDetector` rule. **Scoped 2026-10-02:** design in `docs/design_detector_config_inference.md`. Read it before building S-D6. It covers 315's measured duration classes, the API, the steps (mode, then phase with concurrent-phase discrimination, then light-traffic lane chains), confidence, the diff statuses, the goldens and the calibration plan. Owner answers (2026-10-02): propose fixes (every row carries an inferred role and phase), and 37/53 are believed to be minor-approach advance zones that were deliberately left unconfigured. The data disagrees on 37/53; see below.
+
+  **Core built 2026-10-02 (branch `feat/detector-inference`).** `analysis/detector_inference.py` holds `infer_detector_roles` and `diff_detector_roles`, with 19 goldens (a synthetic intersection with queueing, plus corpus goldens on 315 and 201). The design changed during prototyping:
+  - **Green-share scores fail at concurrent phases, and so does a linear regression of pulse counts on green indicators.** The regression put P6 count loops on P1 because P1's tail overlaps P6's discharge.
+  - **What works for count loops and presence is the *onset jump*:** events in `[g, g+8 s)` against `[g−8 s, g)` at each phase's green onsets. A concurrent phase that's already green doesn't jump.
+  - **Phases whose onsets coincide on ≥ 90 % of cycles are reported as ties** (`P2|P6`), because no timing cue separates them. That covers 201's 2/6 (100 % coincident) and 313's 1/6.
+  - **A ridge regression of presence releases on onset windows**, over groups of coincident phases, is a second cue. It helps on short left-turn phases.
+  - **Lane chains:** the densest 1-s lag window in light-traffic hours (bin edges split 4.5 s lags) recovers every 315 lane, advance → presence (4.6 s) → count loop (1.1 s). Advance zones take their phase from their lane.
+  - **The shell limits candidates to the `RB_*` ring phases**, so 201's virtual P15 stops winning.
+
+  **Calibration (3 days each; configured, active channels):**
+
+  | Site | match | consistent (tie includes config) | conflict | high-confidence conflicts |
+  |---|---|---|---|---|
+  | 315 (2025-12-15) | 19 | 2 | 3: left loops 22/30 (P3/P7 run 646/168 s in 3 days), 25 (no chain) | 0 |
+  | 201 (2026-06-21) | 3 | 3 | 2: **41 → occupancy P3** (the suspected channel), 43 → tie P15/P16 | 1 (41) |
+  | 313 (latest 3 days) | 4 | 1 | 2: 36 (arrival, tie), **43 configured P1 → P8 (medium)** | 0 |
+
+  Only one high-confidence proposal disagrees with config, 201/41, which the owner already suspected. Six configured 201 channels are `silent`.
+
+  **Findings for the owner:**
+  1. 315's 37 and 53 behave as **approach-wide zones on the *major* approaches**. Every WB advance lane (38–40) reaches 37 about 1.7 s later, and every EB lane (54–56) reaches 53. They are proposed as `arrival` P6/P2 and flagged `wide`. That doesn't fit a minor-approach advance, so please check the sensor layout.
+  2. 315 has about 15 active, unconfigured presence-like zones. They're proposed as new rows:
+     - 33 → P1.
+     - 41/42/43 → P3.
+     - 44 → P8.
+     - 47/60/63 → P4.
+     - 49 → P5.
+     - 58/59 → P7.
+     - 57 → tie P2|P6.
+  3. 313/43 (configured P1 occupancy) releases at P8 green onsets.
+
+  **Shell/CLI:** `atspm infer-detectors` (Gemini, `docs/specs/detector_inference_shell.md`, tests `tests/data/test_detector_inference_engine.py`).
+
+  **Not done:** a 701 holdout run. Thresholds are the prototype values above, chosen on 315/201/313 rather than formally frozen.
 
 ## 4. Track M — Remaining measures
 
