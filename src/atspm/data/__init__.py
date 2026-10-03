@@ -85,6 +85,11 @@ from .detector_inference import (
     get_detector_inference,
 )
 
+from .detector_health import (
+    DetectorHealthEngine,
+    get_detector_health,
+)
+
 from .video import (
     ShapeConfig,
     resolve_stopbar_target,
@@ -151,6 +156,9 @@ __all__ = [
     # Detector Inference
     'DetectorInferenceEngine',
     'get_detector_inference',
+    # Detector Health
+    'DetectorHealthEngine',
+    'get_detector_health',
     # Video
     'ShapeConfig',
     'resolve_stopbar_target',

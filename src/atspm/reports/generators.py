@@ -123,6 +123,14 @@ class PlotGenerator:
         except Exception as exc:
             print(f"[{date_str}] Coordination plot FAILED: {exc}")
 
+        # ---- Detector Health summary ----
+        try:
+            self._generate_detector_health_summary(
+                date_str, date_dir, tz_str
+            )
+        except Exception as exc:
+            print(f"[{date_str}] Detector health summary FAILED: {exc}")
+
     def generate_date_range(self, start_date: str, end_date: str) -> None:
         """
         Generate reports for every local date in ``[start_date, end_date]``.
@@ -249,6 +257,39 @@ class PlotGenerator:
         out_path = date_dir / 'Coordination_Split.html'
         fig.write_html(str(out_path))
         print(f"[{date_str}] Coordination saved -> {out_path}")
+
+    def _generate_detector_health_summary(
+        self,
+        date_str: str,
+        date_dir: Path,
+        tz_str: str,
+    ) -> None:
+        """Read detector_findings for date_str, apply ignore, write summary CSV.
+
+        Does not recompute findings; reads the pre-computed findings table only.
+        """
+        from ..data.manager import DatabaseManager
+        from ..analysis.detector_health import apply_ignore, wd_ignore
+
+        with DatabaseManager(self.db_path) as m:
+            findings = m.get_findings(date_str, date_str)
+            dt_obj = datetime.strptime(date_str, "%Y-%m-%d")
+            cfg = m.get_config_at_date(dt_obj) or {}
+
+        if findings.empty:
+            print(f"[{date_str}] Detector health: no findings recorded - skipping")
+            return
+
+        ignore = wd_ignore(cfg)
+        reported = apply_ignore(findings, ignore)
+
+        if reported.empty:
+            print(f"[{date_str}] Detector health: all findings ignored - skipping")
+            return
+
+        out_path = date_dir / "Detector_Health_Summary.csv"
+        reported.to_csv(out_path, index=False)
+        print(f"[{date_str}] Detector health summary saved -> {out_path}")
 
     def _generate_detector_comparison(
         self,

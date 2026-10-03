@@ -55,3 +55,6 @@ See CLAUDE.md "Documentation Workflow" for the rules.
 - [src/atspm/analysis/detector_activity.py] detector_activity_profile gains max_silence_s (unmarked silences > 1 h read as gaps)
 - [src/atspm/data/manager.py] new detector_findings table (S-D4); clear_ingested_data clears it; new replace_findings/get_findings
 - [src/atspm/analysis/__init__.py] export wd_reboot_windows, wd_profile_windows, wd_units, wd_ignore, apply_ignore, wd_thresholds, filter_min_severity, severity_exit_code
+- [src/atspm/data/__init__.py] export DetectorHealthEngine, get_detector_health
+- [src/atspm/plotting/__init__.py] export plot_detector_health
+- [src/atspm/cli.py] new detector-health subcommand

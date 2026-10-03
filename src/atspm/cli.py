@@ -10,6 +10,7 @@ Exposes subcommands from intersection configuration setup through reporting and 
     atspm counts             --targetid <id> [...]       Generate vehicle and pedestrian counts
     atspm splits             --targetid <id> [...]       Generate phase split and timing records
     atspm aog                --targetid <id> [...]       Generate Arrival on Green (AOG) tables
+    atspm detector-health    --targetid <id> [...]       Evaluate detector health rules and generate heatmap
     atspm split-failures     --targetid <id> [...]       Generate Purdue split-failure tables and plots
     atspm infer-detectors    --targetid <id> [...]       Propose detector configuration for review
     atspm discrepancies      --targetid <id> [...]       Analyze detector discrepancies
@@ -871,6 +872,106 @@ def handle_aog(args: argparse.Namespace) -> None:
             )
             if getattr(args, "verbose", False):
                 traceback.print_exc()
+
+
+# ---------------------------------------------------------------------------
+# detector-health
+# ---------------------------------------------------------------------------
+
+def _detector_health_single_intersection(target_name: str, args: argparse.Namespace) -> int:
+    """Core logic to evaluate detector health for a single intersection.
+
+    Resolves the database path and timezone from ``metadata.json``, then
+    delegates entirely to :class:`atspm.data.detector_health.DetectorHealthEngine`.
+    All I/O (event queries, CSV and HTML heatmap writing) is handled inside the engine;
+    this function is responsible only for path resolution, argument forwarding,
+    and error surfacing.
+
+    Args:
+        target_name: Exact intersection folder name
+            (e.g., ``'2068_US-95_and_SH-8'``).
+        args: Parsed CLI arguments from the ``detector-health`` subcommand.
+
+    Returns:
+        Exit code (0 = clean, 1 = low, 2 = high).
+    """
+    from atspm.data.detector_health import DetectorHealthEngine
+
+    target_dir = _get_target_dir(target_name)
+    meta = _load_metadata(target_dir)
+    db_path = _resolve_db_path(target_dir, meta)
+
+    output_dir = target_dir / "outputs"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    int_name = meta.get("intersection_name", target_name)
+    timezone = args.timezone or meta.get("timezone") or DEFAULT_TIMEZONE
+
+    if not db_path.exists():
+        _die(
+            f"Database not found: {db_path}\n"
+            f"Run 'atspm process --target {target_name}' first."
+        )
+
+    start = args.start
+    end = args.end or args.start
+
+    print(f"\n🔍  Evaluating Detector Health for {int_name}")
+    print(f"    DB:           {db_path.name}")
+    print(f"    Window:       {start} → {end}")
+    print(f"    Filter win:   {args.window}")
+    print(f"    Min severity: {args.min_severity}")
+
+    engine = DetectorHealthEngine(db_path=db_path, timezone=timezone)
+
+    try:
+        result = engine.detector_health(
+            start=start,
+            end=end,
+            window=args.window,
+            min_severity=args.min_severity,
+            output_dir=output_dir,
+        )
+        return int(result["exit_code"])
+    except Exception as exc:
+        if args.verbose:
+            traceback.print_exc()
+        _die(f"Detector health evaluation failed: {exc}")
+
+
+def handle_detector_health(args: argparse.Namespace) -> None:
+    """Evaluate detector health for one or more intersections.
+
+    Runs deterministic detector-health rules, records findings to
+    ``detector_findings``, and writes reported CSV and HTML heatmap to
+    ``intersections/<target>/outputs/``.
+
+    Args:
+        args: Parsed CLI arguments from the ``detector-health`` subcommand.
+    """
+    intersections_dir = _get_intersections_dir()
+
+    if getattr(args, "all", False):
+        targets = [p.name for p in intersections_dir.iterdir() if p.is_dir()]
+        if not targets:
+            _die(f"No intersection directories found in {intersections_dir}")
+        print(f"\n🌍 Batch evaluating detector health for {len(targets)} intersections...")
+        for target_name in targets:
+            try:
+                _detector_health_single_intersection(target_name, args)
+            except SystemExit:
+                print(f"\n⏭️ Skipping {target_name} due to errors.", file=sys.stderr)
+            except Exception as exc:
+                print(
+                    f"\n❌ Unexpected error evaluating detector health for {target_name}: {exc}",
+                    file=sys.stderr,
+                )
+                if getattr(args, "verbose", False):
+                    traceback.print_exc()
+    else:
+        target_name = _resolve_target_name(args.target, args.targetid)
+        exit_code = _detector_health_single_intersection(target_name, args)
+        sys.exit(exit_code)
 
 
 # ---------------------------------------------------------------------------
@@ -2727,6 +2828,72 @@ def _add_aog_parser(subs: argparse._SubParsersAction) -> None:
     p_aog.set_defaults(func=handle_aog)
 
 
+def _add_detector_health_parser(subs: argparse._SubParsersAction) -> None:
+    """Attach the ``detector-health`` subcommand parser."""
+    p_dh = subs.add_parser(
+        "detector-health",
+        help="Evaluate detector health rules and generate heatmap and findings.",
+        description=(
+            "Run deterministic detector-health rules over raw events and activity profiles.\n"
+            "Records findings into the detector_findings table and exports CSV and HTML\n"
+            "heatmaps to intersections/<target>/outputs/."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    group_dh = p_dh.add_mutually_exclusive_group(required=True)
+    group_dh.add_argument(
+        "--target",
+        help="Exact intersection folder name (e.g. '2068_US-95_and_SH-8').",
+    )
+    group_dh.add_argument(
+        "--targetid",
+        metavar="ID",
+        help="Intersection ID prefix (e.g. '2068').",
+    )
+    group_dh.add_argument(
+        "--all",
+        action="store_true",
+        help="Run detector health for all intersections in the directory.",
+    )
+    p_dh.add_argument(
+        "--start",
+        required=True,
+        metavar="YYYY-MM-DD",
+        help="Query window start date (local time, inclusive).",
+    )
+    p_dh.add_argument(
+        "--end",
+        default=None,
+        metavar="YYYY-MM-DD",
+        help="Query window end date (local time, inclusive; defaults to --start).",
+    )
+    p_dh.add_argument(
+        "--window",
+        choices=["am", "pm", "day"],
+        default="day",
+        help="Window to filter and report (am, pm, day; default: day).",
+    )
+    p_dh.add_argument(
+        "--min-severity",
+        choices=["info", "low", "high"],
+        default="low",
+        help="Minimum severity threshold to report (info, low, high; default: low).",
+    )
+    p_dh.add_argument(
+        "--timezone",
+        default=None,
+        metavar="TZ",
+        help="Override the timezone from metadata.json (e.g. 'US/Pacific').",
+    )
+    p_dh.add_argument(
+        "--verbose",
+        action="store_true",
+        default=False,
+        help="Print full tracebacks for any errors.",
+    )
+    p_dh.set_defaults(func=handle_detector_health)
+
+
 def _add_split_failures_parser(subs: argparse._SubParsersAction) -> None:
     """Attach the ``split-failures`` subcommand parser."""
     p_sf = subs.add_parser(
@@ -3766,6 +3933,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_counts_parser(subs)
     _add_splits_parser(subs)
     _add_aog_parser(subs)
+    _add_detector_health_parser(subs)
     _add_split_failures_parser(subs)
     _add_infer_detectors_parser(subs)
     _add_flow_parser(subs)
