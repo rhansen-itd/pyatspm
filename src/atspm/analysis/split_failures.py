@@ -19,17 +19,22 @@ A cycle fails when **both** ratios are strictly greater than ``threshold``
 (UDOT default 0.79).
 
 Each configured presence detector is one lane.  Occupancy is measured per lane
-and then aggregated two ways, both always reported:
+and then aggregated three ways, all always reported:
 
 * ``union`` — the window is occupied while *any* lane's detector is on.  This
   is what a single multi-lane detector measures, and UDOT's method.  For
   independent lanes it rises with lane count as ``1 − Π(1 − o_i)``.
 * ``mean`` — the average of the per-lane occupied seconds (equivalently, of
   the per-lane ratios, since every lane shares the window).
+* ``any`` — the cycle fails when any lane fails on its own ratios, so the
+  threshold keeps its single-detector meaning at every lane count.  It reports
+  the *worst* lane's GOR/ROR5: the lane with the highest ``min(GOR, ROR5)``
+  (ties: higher ``GOR + ROR5``, then the lowest channel), which is the lane
+  that fails whenever any does.
 
 ``aggregate`` chooses which one drives ``gor`` / ``ror5`` / ``fail``.  The
 per-lane frame and ``n_lanes_failed`` (lanes failing on their own) are
-returned too, so an "any lane fails" rule can be derived.
+returned too.
 
 Detector state
 --------------
@@ -88,7 +93,7 @@ _CODE_GREEN = 1
 _CODE_DET_OFF = 81
 _CODE_DET_ON = 82
 
-AGGREGATES = ("union", "mean")
+AGGREGATES = ("union", "mean", "any")
 
 _CYCLE_SCHEMA = [
     "phase",
@@ -106,6 +111,11 @@ _CYCLE_SCHEMA = [
     "ror5_union",
     "gor_mean",
     "ror5_mean",
+    "g_occ_any",
+    "r_occ_any",
+    "gor_any",
+    "ror5_any",
+    "worst_det",
     "n_lanes_failed",
     "g_occ",
     "r_occ",
@@ -298,9 +308,9 @@ def split_failures(
             line, one per lane (``Det_P{N}_Occupancy``).
         threshold: A cycle fails when GOR > threshold **and**
             ROR5 > threshold.  Default ``0.79`` (UDOT).
-        aggregate: ``"union"`` or ``"mean"``; selects which lane aggregate
-            fills ``g_occ``, ``r_occ``, ``gor``, ``ror5`` and ``fail``.  Both
-            aggregates are always reported in their own columns.
+        aggregate: ``"union"``, ``"mean"`` or ``"any"``; selects which lane
+            aggregate fills ``g_occ``, ``r_occ``, ``gor``, ``ror5`` and
+            ``fail``.  All three are always reported in their own columns.
         ror_seconds: Length of the red window measured from the end of
             yellow.  Default ``5.0``.
         include_yellow: Measure GOR over green + yellow (Code 1 → end of
@@ -327,6 +337,11 @@ def split_failures(
             ror5_union      float
             gor_mean        float
             ror5_mean       float
+            g_occ_any       float  – the worst lane's on-seconds
+            r_occ_any       float
+            gor_any         float  – the worst lane's GOR
+            ror5_any        float
+            worst_det       int    – the worst lane (see module docstring)
             n_lanes_failed  int    – lanes failing on their own ratios
             g_occ, r_occ,
             gor, ror5       float  – the chosen aggregate's values
@@ -337,7 +352,7 @@ def split_failures(
             phase, green_ts, det, g_occ, r_occ, gor, ror5, fail
 
     Raises:
-        ValueError: If *aggregate* is not ``"union"`` or ``"mean"``.
+        ValueError: If *aggregate* is not in :data:`AGGREGATES`.
     """
     if aggregate not in AGGREGATES:
         raise ValueError(f"aggregate must be one of {AGGREGATES}, got {aggregate!r}")
@@ -429,6 +444,17 @@ def split_failures(
     lane_ror = lane_r / r_dur
     lane_fail = (lane_gor > threshold) & (lane_ror > threshold)
 
+    # Worst lane per window: highest min(GOR, ROR5), then GOR + ROR5, then
+    # the lowest channel.  np.lexsort's last key is primary; the last index
+    # of each row is the maximum.
+    margin = np.where(known_lanes, np.fmin(lane_gor, lane_ror), -np.inf)
+    total = np.where(known_lanes, lane_gor + lane_ror, -np.inf)
+    chan = np.broadcast_to(-np.asarray(dets, dtype=float)[:, None], margin.shape)
+    order = np.lexsort((chan.T, np.nan_to_num(total.T, nan=-np.inf),
+                        np.nan_to_num(margin.T, nan=-np.inf)))
+    worst = order[:, -1]
+    cols = np.arange(n_win)
+
     cyc = windows[["phase", "green_ts", "cycle_start", "coord_plan"]].copy()
     cyc["phase"] = int(phase)
     cyc["g_dur"] = g_dur
@@ -442,9 +468,14 @@ def split_failures(
     cyc["ror5_union"] = r_union / r_dur
     cyc["gor_mean"] = g_mean / g_dur
     cyc["ror5_mean"] = r_mean / r_dur
+    cyc["g_occ_any"] = lane_g[worst, cols]
+    cyc["r_occ_any"] = lane_r[worst, cols]
+    cyc["gor_any"] = lane_gor[worst, cols]
+    cyc["ror5_any"] = lane_ror[worst, cols]
+    cyc["worst_det"] = np.asarray(dets, dtype=int)[worst]
     cyc["n_lanes_failed"] = lane_fail.sum(axis=0).astype(int)
 
-    sfx = "union" if aggregate == "union" else "mean"
+    sfx = aggregate
     cyc["g_occ"] = cyc[f"g_occ_{sfx}"]
     cyc["r_occ"] = cyc[f"r_occ_{sfx}"]
     cyc["gor"] = cyc[f"gor_{sfx}"]

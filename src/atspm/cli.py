@@ -2696,12 +2696,13 @@ def _add_split_failures_parser(subs: argparse._SubParsersAction) -> None:
     )
     p_sf.add_argument(
         "--aggregate",
-        choices=["union", "mean"],
+        choices=["union", "mean", "any"],
         default="union",
         help=(
             "Lane aggregation method (default: union). "
             "union = occupied when any lane is on (UDOT, like one multi-lane detector); "
-            "mean = average of per-lane GOR/ROR5."
+            "mean = average of per-lane GOR/ROR5; "
+            "any = fails when any lane fails on its own, reporting the worst lane's GOR/ROR5."
         ),
     )
     p_sf.add_argument(

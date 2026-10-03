@@ -132,7 +132,9 @@ class SplitFailureEngine:
                 exclusive.
             phases: Phase numbers to analyse. When ``None``, all configured
                 phases with presence (``Det_P{N}_Occupancy``) detectors are analysed.
-            aggregate: ``"union"`` (default) or ``"mean"`` lane aggregation.
+            aggregate: ``"union"`` (default), ``"mean"`` or ``"any"`` lane
+                aggregation (``"any"``: fails when any lane fails; reports
+                the worst lane's GOR/ROR5).
             threshold: Occupancy ratio threshold (default 0.79).
             ror_seconds: Length of red occupancy window (default 5.0).
             include_yellow: Extend GOR window across yellow clearance.
@@ -148,7 +150,7 @@ class SplitFailureEngine:
             ``"binned"`` DataFrames, or ``None`` when ``output_dir`` is set.
 
         Raises:
-            ValueError: If ``aggregate`` is not ``"union"`` or ``"mean"``.
+            ValueError: If ``aggregate`` is not ``"union"``, ``"mean"`` or ``"any"``.
         """
         if aggregate not in AGGREGATES:
             raise ValueError(f"aggregate must be one of {AGGREGATES}, got {aggregate!r}")
