@@ -48,3 +48,5 @@ See CLAUDE.md "Documentation Workflow" for the rules.
 - [src/atspm/data/split_failures.py] split-failures reads Det_P{N}_Occupancy (presence), not Stop_Bar
 - [src/atspm/analysis/__init__.py] export parse_detector_roles, detector_sets
 - [src/atspm/cli.py] split-failures --aggregate gains any (worst-lane)
+- [src/atspm/cli.py] new infer-detectors subcommand
+- [src/atspm/data/__init__.py] export DetectorInferenceEngine, get_detector_inference

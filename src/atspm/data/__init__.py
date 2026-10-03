@@ -80,6 +80,11 @@ from .clock_marks import (
     get_clock_marks,
 )
 
+from .detector_inference import (
+    DetectorInferenceEngine,
+    get_detector_inference,
+)
+
 from .video import (
     ShapeConfig,
     resolve_stopbar_target,
@@ -143,6 +148,9 @@ __all__ = [
     # Clock marks
     'ClockMarkEngine',
     'get_clock_marks',
+    # Detector Inference
+    'DetectorInferenceEngine',
+    'get_detector_inference',
     # Video
     'ShapeConfig',
     'resolve_stopbar_target',

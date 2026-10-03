@@ -11,6 +11,7 @@ Exposes subcommands from intersection configuration setup through reporting and 
     atspm splits             --targetid <id> [...]       Generate phase split and timing records
     atspm aog                --targetid <id> [...]       Generate Arrival on Green (AOG) tables
     atspm split-failures     --targetid <id> [...]       Generate Purdue split-failure tables and plots
+    atspm infer-detectors    --targetid <id> [...]       Propose detector configuration for review
     atspm discrepancies      --targetid <id> [...]       Analyze detector discrepancies
     atspm plot-detectors     --targetid <id> [...]       Generate interactive detector comparison plots
     atspm plot-coordination  --targetid <id> [...]       Generate interactive coordination diagram plots
@@ -969,6 +970,94 @@ def handle_split_failures(args: argparse.Namespace) -> None:
         except Exception as exc:
             print(
                 f"\n❌ Unexpected error generating split failures for {target_name}: {exc}",
+                file=sys.stderr,
+            )
+            if getattr(args, "verbose", False):
+                traceback.print_exc()
+
+
+# ---------------------------------------------------------------------------
+# infer-detectors
+# ---------------------------------------------------------------------------
+
+def _infer_detectors_single_intersection(target_name: str, args: argparse.Namespace) -> None:
+    """Core logic to infer detector configuration for a single intersection.
+
+    Resolves the database path and timezone from ``metadata.json``, then
+    delegates entirely to :class:`atspm.data.detector_inference.DetectorInferenceEngine`.
+    All I/O (event queries, CSV writing) is handled inside the engine; this function
+    is responsible only for path resolution, argument forwarding, and error surfacing.
+
+    Args:
+        target_name: Exact intersection folder name
+            (e.g., ``'2068_US-95_and_SH-8'``).
+        args: Parsed CLI arguments from the ``infer-detectors`` subcommand.
+    """
+    from atspm.data.detector_inference import DetectorInferenceEngine
+
+    target_dir = _get_target_dir(target_name)
+    meta = _load_metadata(target_dir)
+    db_path = _resolve_db_path(target_dir, meta)
+
+    output_dir = target_dir / "outputs"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    int_name = meta.get("intersection_name", target_name)
+    timezone = getattr(args, "timezone", None) or meta.get("timezone") or DEFAULT_TIMEZONE
+
+    if not db_path.exists():
+        _die(
+            f"Database not found: {db_path}\n"
+            f"Run 'atspm process --target {target_name}' first."
+        )
+
+    print(f"\n🔍  Inferring detector configuration for {int_name}")
+    print(f"    DB:             {db_path.name}")
+    print(f"    Window:         {args.start} → {args.end}")
+    print(f"    Min actuations: {args.min_actuations}")
+    if args.all_phases:
+        print("    Candidates:     all phases (ignoring RB_* ring config)")
+
+    engine = DetectorInferenceEngine(db_path=db_path, timezone=timezone)
+
+    try:
+        engine.infer(
+            start=args.start,
+            end=args.end,
+            use_ring_config=not args.all_phases,
+            min_actuations=args.min_actuations,
+            output_dir=output_dir,
+        )
+    except Exception as exc:
+        if getattr(args, "verbose", False):
+            traceback.print_exc()
+        _die(f"Detector inference failed: {exc}")
+
+
+def handle_infer_detectors(args: argparse.Namespace) -> None:
+    """Propose a detector configuration for review and never edit int_cfg.csv.
+
+    Args:
+        args: Parsed CLI arguments from the ``infer-detectors`` subcommand.
+    """
+    intersections_dir = _get_intersections_dir()
+
+    if getattr(args, "all", False):
+        targets = [p.name for p in intersections_dir.iterdir() if p.is_dir()]
+        if not targets:
+            _die(f"No intersection directories found in {intersections_dir}")
+        print(f"\n🌍 Batch inferring detector configurations for {len(targets)} intersections...")
+    else:
+        targets = [_resolve_target_name(args.target, args.targetid)]
+
+    for target_name in targets:
+        try:
+            _infer_detectors_single_intersection(target_name, args)
+        except SystemExit:
+            print(f"\n⏭️ Skipping {target_name} due to errors.", file=sys.stderr)
+        except Exception as exc:
+            print(
+                f"\n❌ Unexpected error inferring detector configuration for {target_name}: {exc}",
                 file=sys.stderr,
             )
             if getattr(args, "verbose", False):
@@ -2765,6 +2854,75 @@ def _add_split_failures_parser(subs: argparse._SubParsersAction) -> None:
     p_sf.set_defaults(func=handle_split_failures)
 
 
+def _add_infer_detectors_parser(subs: argparse._SubParsersAction) -> None:
+    """Attach the ``infer-detectors`` subcommand parser."""
+    p_inf = subs.add_parser(
+        "infer-detectors",
+        help="Propose detector configuration for review (never edits int_cfg.csv).",
+        description=(
+            "Propose a detector configuration for review from actuation behaviour.\n"
+            "Never edits int_cfg.csv or the config table.\n\n"
+            "Outputs are saved to:\n"
+            "  intersections/<target>/outputs/"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    group_inf = p_inf.add_mutually_exclusive_group(required=True)
+    group_inf.add_argument(
+        "--target",
+        metavar="FOLDER",
+        help="Exact intersection folder name (e.g. '2068_US-95_and_SH-8').",
+    )
+    group_inf.add_argument(
+        "--targetid",
+        metavar="ID",
+        help="Intersection ID prefix (e.g. '2068').",
+    )
+    group_inf.add_argument(
+        "--all",
+        action="store_true",
+        help="Infer detector configuration for all intersections in the directory.",
+    )
+    p_inf.add_argument(
+        "--start",
+        required=True,
+        metavar="YYYY-MM-DD",
+        help="Query window start date (local time, inclusive).",
+    )
+    p_inf.add_argument(
+        "--end",
+        required=True,
+        metavar="YYYY-MM-DD",
+        help="Query window end date (local time, inclusive).",
+    )
+    p_inf.add_argument(
+        "--min-actuations",
+        type=int,
+        default=50,
+        metavar="N",
+        help="Minimum uncensored on-intervals to classify a detector (default: 50).",
+    )
+    p_inf.add_argument(
+        "--all-phases",
+        action="store_true",
+        default=False,
+        help="Do not limit candidates to the RB_* ring phases.",
+    )
+    p_inf.add_argument(
+        "--timezone",
+        default=None,
+        metavar="TZ",
+        help="Override the timezone from metadata.json (e.g. 'US/Pacific').",
+    )
+    p_inf.add_argument(
+        "--verbose",
+        action="store_true",
+        default=False,
+        help="Print full tracebacks for any errors.",
+    )
+    p_inf.set_defaults(func=handle_infer_detectors)
+
+
 def _add_flow_parser(subs: argparse._SubParsersAction) -> None:
     """Attach the ``flow`` subcommand parser."""
     p_flow = subs.add_parser(
@@ -3609,6 +3767,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_splits_parser(subs)
     _add_aog_parser(subs)
     _add_split_failures_parser(subs)
+    _add_infer_detectors_parser(subs)
     _add_flow_parser(subs)
     _add_critical_parser(subs)
     _add_optimize_parser(subs)
