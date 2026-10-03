@@ -79,7 +79,8 @@ class TestClearIngestedData:
             deleted = m.clear_ingested_data()
 
         # 3 real events + 1 gap marker
-        assert deleted == {"events": 4, "cycles": 2, "ingestion_log": 1}
+        assert deleted == {"events": 4, "cycles": 2, "ingestion_log": 1,
+                           "detector_findings": 0}
 
     def test_gap_markers_are_cleared_with_the_events(self, empty_db: Path):
         # Markers are rows in `events`; a rebuild must not leave stale ones
@@ -100,7 +101,8 @@ class TestClearIngestedData:
             m.clear_ingested_data()
             second = m.clear_ingested_data()
 
-        assert second == {"events": 0, "cycles": 0, "ingestion_log": 0}
+        assert second == {"events": 0, "cycles": 0, "ingestion_log": 0,
+                          "detector_findings": 0}
 
     def test_missing_cycles_table_is_not_an_error(self, db_path: Path):
         # cycles is created lazily by CycleProcessor, so a DB that has only

@@ -36,15 +36,21 @@ Package Location: src/atspm/analysis/detector_health.py
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import re
+from dataclasses import dataclass, field, fields as _dc_fields, replace
 from types import MappingProxyType
-from typing import Iterable, Mapping, Optional, Tuple
+from typing import Dict, Iterable, List, Mapping, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 
 from ..utils.timezone import resolve_pytz
-from .detector_activity import MAX_SILENCE_S, _build_bins, _mark_silences
+from .detector_activity import (
+    MAX_SILENCE_S,
+    UDOT_AM_WINDOW,
+    _build_bins,
+    _mark_silences,
+)
 from .detector_inference import _to_epoch, _windows_clear_of_gaps
 from .detector_roles import ROLES
 
@@ -776,3 +782,302 @@ def detector_health_findings(
         out = out[~((out["rule"] == "LowDetectorHits") & key.isin(pd.MultiIndex.from_frame(stuck)))]
     out = out.sort_values(["date", "detector", "rule", "window", "ts"], kind="stable")
     return _finish(out)
+
+
+# ---------------------------------------------------------------------------
+# int_cfg WD-key parsing (config convention -> core arguments)
+# ---------------------------------------------------------------------------
+# Pure: a config dict in, plain structures out, so the S-D4 shell reads
+# int_cfg once and hands the core already-parsed windows, units and
+# thresholds.  Convention (owner, 2026-10-03), all under the ``WD:`` row
+# category of ``int_cfg.csv`` (``_transform_config_column`` prefixes ``WD_``):
+#
+#   WD_Reboot     "23:58-24:00,00:00-00:03"               scheduled reboot windows
+#   WD_PM         "16:30-17:30"                            peak-traffic window
+#   WD_AM         "01:00-05:00"                            quiet-window override
+#   WD_Units      "evo:[17-28],[29-40]; currux:[17-20]"    failure units, grouped by type
+#   WD_Ignore     "52:StuckOn,60:ConfiguredSilent"         findings to suppress in reports
+#   WD_Thresholds "low_hits_min=10,stuck_on_s.arrival=600" HealthThresholds overrides
+#
+# Malformed input raises ``ValueError`` (the shell surfaces it per
+# intersection); it never prints, so the core stays side-effect free.
+
+_DAY_WINDOW: Tuple[str, str] = ("00:00", "24:00")
+_HHMM_RANGE_RE = re.compile(r"^(\d{1,2}:\d{2})-(\d{1,2}:\d{2})$")
+_CHANNEL_GROUP_RE = re.compile(r"\[([^\]]*)\]")
+_SEVERITY_RANK: Mapping[str, int] = MappingProxyType(
+    {s: i for i, s in enumerate(SEVERITIES)}
+)
+
+
+def _is_blank(raw) -> bool:
+    return raw is None or (isinstance(raw, float) and pd.isna(raw)) or not str(raw).strip()
+
+
+def _parse_window_ranges(raw) -> List[Tuple[str, str]]:
+    """Comma-separated ``HH:MM-HH:MM`` local ranges -> list of ``(start, end)``."""
+    out: List[Tuple[str, str]] = []
+    if _is_blank(raw):
+        return out
+    for tok in str(raw).split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        m = _HHMM_RANGE_RE.match(tok)
+        if not m:
+            raise ValueError(f"bad time range {tok!r} (want HH:MM-HH:MM)")
+        out.append((m.group(1), m.group(2)))
+    return out
+
+
+def wd_reboot_windows(config: Optional[Mapping]) -> Optional[Dict[str, Tuple[str, str]]]:
+    """Parse ``WD_Reboot`` into named failsafe reboot windows.
+
+    Args:
+        config: Active config dict (keys as stored, e.g. ``WD_Reboot``).
+
+    Returns:
+        ``{"reboot_0": (start, end), ...}``, or ``None`` when the key is
+        absent or blank (no scheduled windows).
+    """
+    ranges = _parse_window_ranges((config or {}).get("WD_Reboot"))
+    if not ranges:
+        return None
+    return {f"reboot_{i}": r for i, r in enumerate(ranges)}
+
+
+def wd_profile_windows(config: Optional[Mapping]) -> Dict[str, Tuple[str, str]]:
+    """Windows to profile: ``day`` always; ``am`` (``WD_AM`` or 01:00-05:00);
+    ``pm`` only when ``WD_PM`` is set.
+
+    Args:
+        config: Active config dict.
+
+    Returns:
+        ``{name: ("HH:MM", "HH:MM")}`` for :func:`detector_activity_profile`.
+    """
+    config = config or {}
+    windows: Dict[str, Tuple[str, str]] = {"day": _DAY_WINDOW}
+    am = _parse_window_ranges(config.get("WD_AM"))
+    windows["am"] = am[0] if am else UDOT_AM_WINDOW
+    pm = _parse_window_ranges(config.get("WD_PM"))
+    if pm:
+        windows["pm"] = pm[0]
+    return windows
+
+
+def _parse_channel_list(body: str) -> List[int]:
+    """``"17-20,25"`` -> ``[17, 18, 19, 20, 25]``."""
+    chans: List[int] = []
+    for tok in body.split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        if "-" in tok:
+            lo, hi = tok.split("-", 1)
+            chans.extend(range(int(lo), int(hi) + 1))
+        else:
+            chans.append(int(tok))
+    return chans
+
+
+def wd_units(
+    config: Optional[Mapping],
+) -> Tuple[Optional[Dict[str, List[int]]], Dict[str, str]]:
+    """Parse ``WD_Units`` into failure-unit channel groups and their types.
+
+    Format ``"evo:[17-28],[29-40]; currux:[17-20],[21-24]"``: ``;`` splits
+    unit *types*, each ``[...]`` is one physical device (an EVO sensor, a
+    Currux/Thunder camera) — the unit that fails together in a failsafe
+    block-on burst.  Channels inside a group are comma-separated ints or
+    ``lo-hi`` ranges.
+
+    Args:
+        config: Active config dict.
+
+    Returns:
+        ``(units, types)``.  ``units`` maps a unit name to its channels
+        (``{"evo_0": [17..28], "currux_0": [...]}``) for
+        :func:`failsafe_findings`; ``types`` maps each unit name to its type.
+        ``units`` is ``None`` when the key is absent — failsafe then treats the
+        whole intersection as one unit.
+    """
+    raw = (config or {}).get("WD_Units")
+    if _is_blank(raw):
+        return None, {}
+    units: Dict[str, List[int]] = {}
+    types: Dict[str, str] = {}
+    counts: Dict[str, int] = {}
+    for seg in str(raw).split(";"):
+        seg = seg.strip()
+        if not seg:
+            continue
+        if ":" not in seg:
+            raise ValueError(f"bad WD_Units segment {seg!r} (want 'type:[...],[...]')")
+        utype, rest = (s.strip() for s in seg.split(":", 1))
+        groups = _CHANNEL_GROUP_RE.findall(rest)
+        if not groups:
+            raise ValueError(f"no [channel] groups in WD_Units segment {seg!r}")
+        for body in groups:
+            idx = counts.get(utype, 0)
+            counts[utype] = idx + 1
+            name = f"{utype}_{idx}"
+            units[name] = _parse_channel_list(body)
+            types[name] = utype
+    return units, types
+
+
+def wd_ignore(config: Optional[Mapping]) -> List[Tuple[int, str]]:
+    """Parse ``WD_Ignore`` = ``"52:StuckOn,60:ConfiguredSilent"``.
+
+    Args:
+        config: Active config dict.
+
+    Returns:
+        ``[(detector, rule), ...]`` (detector ``-1`` matches phase-level
+        findings).  Empty when the key is absent.
+    """
+    raw = (config or {}).get("WD_Ignore")
+    out: List[Tuple[int, str]] = []
+    if _is_blank(raw):
+        return out
+    for tok in str(raw).split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        if ":" not in tok:
+            raise ValueError(f"bad WD_Ignore entry {tok!r} (want 'det:rule')")
+        det, rule = (s.strip() for s in tok.split(":", 1))
+        out.append((int(det), rule))
+    return out
+
+
+def apply_ignore(
+    findings: pd.DataFrame, ignore: Iterable[Tuple[int, str]]
+) -> pd.DataFrame:
+    """Drop findings whose ``(detector, rule)`` is in *ignore*.
+
+    Rule match is case-insensitive.  This is applied at read/report time, not
+    at write time, so an ignored detector's findings are still recorded in the
+    ``detector_findings`` table.
+
+    Args:
+        findings: Findings frame (:data:`FINDINGS_SCHEMA`).
+        ignore: ``(detector, rule)`` pairs, e.g. from :func:`wd_ignore`.
+
+    Returns:
+        A filtered copy (the input when *ignore* is empty).
+    """
+    keys = {(int(d), str(r).lower()) for d, r in ignore}
+    if findings is None or findings.empty or not keys:
+        return findings
+    pairs = pd.Series(
+        list(zip(findings["detector"].astype("int64"),
+                 findings["rule"].astype(str).str.lower())),
+        index=findings.index,
+    )
+    return findings.loc[~pairs.isin(keys)].reset_index(drop=True)
+
+
+def wd_thresholds(
+    config: Optional[Mapping], base: HealthThresholds = DEFAULT_THRESHOLDS
+) -> HealthThresholds:
+    """Apply ``WD_Thresholds`` overrides onto *base*.
+
+    Format ``"low_hits_min=10,chatter_peer_ratio=2,stuck_on_s.arrival=600"``:
+    comma-separated ``field=value`` using :class:`HealthThresholds` field names
+    verbatim.  A dotted ``mapping_field.key=value`` updates one entry of a
+    mapping field (only ``stuck_on_s`` today).  Values are coerced to the
+    field's type.
+
+    Args:
+        config: Active config dict.
+        base: Thresholds to override (defaults to the corpus calibration).
+
+    Returns:
+        A new :class:`HealthThresholds` (``base`` unchanged when the key is
+        absent).
+
+    Raises:
+        ValueError: An entry is malformed, names an unknown field, or dots a
+            non-mapping field.
+    """
+    raw = (config or {}).get("WD_Thresholds")
+    if _is_blank(raw):
+        return base
+    valid = {f.name for f in _dc_fields(base)}
+    scalar: Dict[str, object] = {}
+    mapping: Dict[str, Dict[str, float]] = {}
+    for tok in str(raw).split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        if "=" not in tok:
+            raise ValueError(f"bad WD_Thresholds entry {tok!r} (want field=value)")
+        key, val = (s.strip() for s in tok.split("=", 1))
+        if "." in key:
+            fld, subkey = key.split(".", 1)
+            if fld not in valid or not isinstance(getattr(base, fld), Mapping):
+                raise ValueError(f"WD_Thresholds: {fld!r} is not a mapping field")
+            mapping.setdefault(fld, {})[subkey] = float(val)
+        elif key in valid:
+            current = getattr(base, key)
+            if isinstance(current, bool):
+                scalar[key] = val.lower() in ("1", "true", "yes")
+            elif isinstance(current, int):
+                scalar[key] = int(float(val))
+            else:
+                scalar[key] = float(val)
+        else:
+            raise ValueError(f"WD_Thresholds: unknown field {key!r}")
+    for fld, sub in mapping.items():
+        merged = dict(getattr(base, fld))
+        merged.update(sub)
+        scalar[fld] = merged
+    return replace(base, **scalar) if scalar else base
+
+
+def filter_min_severity(
+    findings: pd.DataFrame, min_severity: str = "low"
+) -> pd.DataFrame:
+    """Keep findings at or above *min_severity* (the report/CSV view).
+
+    The ``detector_findings`` table always keeps every severity; this only
+    shapes what a report shows.
+
+    Args:
+        findings: Findings frame (:data:`FINDINGS_SCHEMA`).
+        min_severity: One of :data:`SEVERITIES`.
+
+    Returns:
+        A filtered copy.
+    """
+    if findings is None or findings.empty:
+        return findings
+    floor = _SEVERITY_RANK.get(min_severity, _SEVERITY_RANK["low"])
+    ranks = findings["severity"].map(_SEVERITY_RANK)
+    return findings.loc[ranks >= floor].reset_index(drop=True)
+
+
+def severity_exit_code(
+    findings: pd.DataFrame, min_severity: str = "low"
+) -> int:
+    """Process exit code from the highest reported severity.
+
+    *findings* should already be ignore-filtered.  Only findings at or above
+    *min_severity* count.
+
+    Args:
+        findings: Findings frame (:data:`FINDINGS_SCHEMA`).
+        min_severity: Severity floor.
+
+    Returns:
+        ``0`` nothing reported, ``1`` highest is ``low``, ``2`` highest is
+        ``high``.  ``info`` never raises it above ``0``.
+    """
+    floor = _SEVERITY_RANK.get(min_severity, _SEVERITY_RANK["low"])
+    if findings is None or findings.empty:
+        return 0
+    ranks = findings["severity"].map(_SEVERITY_RANK).dropna()
+    ranks = ranks[ranks >= floor]
+    return int(ranks.max()) if not ranks.empty else 0

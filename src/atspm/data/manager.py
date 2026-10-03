@@ -185,6 +185,35 @@ class DatabaseManager:
             ON ingestion_log (span_end)
         """)
 
+        # Derived detector-health findings (S-D4).  One row per finding, keyed
+        # so a re-run over a date range can delete-then-replace it idempotently.
+        # NULLs are distinct in a SQLite UNIQUE index, so NA phase/ts/role are
+        # stored as sentinels (phase/ts = -1, role = '') to make the key total:
+        # one day can hold several Failsafe episodes (distinct ``ts``) and
+        # several units failing at the same instant (distinct ``role``).
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS detector_findings (
+                date        TEXT    NOT NULL,
+                window      TEXT    NOT NULL,
+                detector    INTEGER NOT NULL,
+                phase       INTEGER NOT NULL,
+                role        TEXT    NOT NULL DEFAULT '',
+                rule        TEXT    NOT NULL,
+                severity    TEXT    NOT NULL,
+                value       REAL,
+                threshold   REAL,
+                message     TEXT,
+                ts          REAL    NOT NULL,
+                computed_at TEXT    NOT NULL,
+                UNIQUE(date, window, detector, phase, role, rule, ts)
+                    ON CONFLICT REPLACE
+            )
+        """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_findings_date
+            ON detector_findings (date)
+        """)
+
         self.conn.commit()
         print(f"Database initialised at {self.db_path}")
 
@@ -758,6 +787,142 @@ class DatabaseManager:
         )
 
     # ------------------------------------------------------------------
+    # Detector-health findings (S-D4, derived)
+    # ------------------------------------------------------------------
+
+    #: Column order persisted in ``detector_findings`` (``ts`` and
+    #: ``computed_at`` follow the analysis ``FINDINGS_SCHEMA``).
+    _FINDINGS_COLUMNS = (
+        "date", "window", "detector", "phase", "role", "rule", "severity",
+        "value", "threshold", "message", "ts", "computed_at",
+    )
+
+    def replace_findings(
+        self,
+        findings: pd.DataFrame,
+        date_start: str,
+        date_end: str,
+        computed_at: Optional[str] = None,
+    ) -> int:
+        """Idempotently replace detector-health findings for a date range.
+
+        Deletes every row with ``date`` in the inclusive range
+        ``[date_start, date_end]`` and inserts *findings* in one transaction,
+        so re-running a range (e.g. a nightly scheduler) leaves the table in
+        the same state regardless of what was there before.
+
+        NA sentinels make the UNIQUE key total: ``phase`` and ``ts`` NA become
+        ``-1`` and NA ``role`` becomes ``''``.  Thus one day can hold several
+        Failsafe episodes (distinct ``ts``) and several units failing at the
+        same instant (distinct ``role``) without colliding.
+
+        Args:
+            findings: Rows with the analysis ``FINDINGS_SCHEMA`` columns
+                (``date, window, ts, detector, phase, role, rule, severity,
+                value, threshold, message``).  ``date`` may be a
+                ``datetime.date`` or an ``YYYY-MM-DD`` string.  Extra columns
+                are ignored; an empty frame only clears the range.
+            date_start: Inclusive local start date, ``YYYY-MM-DD``.
+            date_end: Inclusive local end date, ``YYYY-MM-DD``.
+            computed_at: ISO timestamp stamped on every inserted row.  Defaults
+                to ``datetime.now().isoformat(timespec="seconds")``.
+
+        Returns:
+            Number of rows inserted.
+
+        Raises:
+            RuntimeError: If no active connection or the write fails.
+        """
+        if not self.conn:
+            raise RuntimeError("No active connection.")
+        stamp = computed_at or datetime.now().isoformat(timespec="seconds")
+        records = self._findings_records(findings, stamp)
+
+        cur = self.conn.cursor()
+        try:
+            cur.execute(
+                "DELETE FROM detector_findings WHERE date BETWEEN ? AND ?",
+                (date_start, date_end),
+            )
+            if records:
+                placeholders = ", ".join("?" * len(self._FINDINGS_COLUMNS))
+                cur.executemany(
+                    f"INSERT INTO detector_findings "
+                    f"({', '.join(self._FINDINGS_COLUMNS)}) "
+                    f"VALUES ({placeholders})",
+                    records,
+                )
+            self.conn.commit()
+        except sqlite3.Error as exc:
+            self.conn.rollback()
+            raise RuntimeError(f"Database error saving findings: {exc}")
+        return len(records)
+
+    def _findings_records(self, findings: pd.DataFrame, stamp: str) -> list:
+        """Coerce a findings frame to insertable tuples with NA sentinels."""
+        if findings is None or findings.empty:
+            return []
+        df = findings.copy()
+        df["date"] = df["date"].astype(str)
+        df["phase"] = df["phase"].fillna(-1).astype("int64")
+        df["detector"] = df["detector"].astype("int64")
+        df["ts"] = df["ts"].fillna(-1.0).astype("float64")
+        df["role"] = df["role"].fillna("").astype(str)
+        df["computed_at"] = stamp
+        for col in ("value", "threshold"):
+            df[col] = df[col].astype("float64")
+        records = []
+        for col in ("severity", "rule", "window", "message"):
+            df[col] = df[col].where(df[col].notna(), None)
+        for row in df[list(self._FINDINGS_COLUMNS)].itertuples(index=False):
+            # value/threshold may be NaN -> store as NULL for faithful round-trip.
+            vals = list(row)
+            for i, c in enumerate(self._FINDINGS_COLUMNS):
+                v = vals[i]
+                if c in ("value", "threshold") and isinstance(v, float) and pd.isna(v):
+                    vals[i] = None
+            records.append(tuple(vals))
+        return records
+
+    def get_findings(
+        self,
+        date_start: str,
+        date_end: str,
+        window: Optional[str] = None,
+    ) -> pd.DataFrame:
+        """Read findings for an inclusive date range, sentinels mapped back.
+
+        Args:
+            date_start: Inclusive local start date, ``YYYY-MM-DD``.
+            date_end: Inclusive local end date, ``YYYY-MM-DD``.
+            window: Optional window filter (``'day'`` / ``'am'`` / ``'pm'``).
+
+        Returns:
+            DataFrame with the analysis ``FINDINGS_SCHEMA`` columns plus
+            ``computed_at``.  Stored sentinels are restored to the analysis
+            schema: ``phase = -1`` → NA (Int64), ``ts = -1`` → NaN, so the
+            frame matches what the rules emit.  Sorted by date, detector, rule.
+        """
+        if not self.conn:
+            raise RuntimeError("No active connection.")
+        sql = (
+            "SELECT date, window, ts, detector, phase, role, rule, severity, "
+            "value, threshold, message, computed_at FROM detector_findings "
+            "WHERE date BETWEEN ? AND ?"
+        )
+        params: List[Any] = [date_start, date_end]
+        if window is not None:
+            sql += " AND window = ?"
+            params.append(window)
+        sql += " ORDER BY date, detector, rule, window, ts"
+        df = pd.read_sql_query(sql, self.conn, params=params)
+        if df.empty:
+            return df
+        df["phase"] = df["phase"].where(df["phase"] != -1, other=pd.NA).astype("Int64")
+        df.loc[df["ts"] == -1, "ts"] = float("nan")
+        return df
+
+    # ------------------------------------------------------------------
     # Metadata
     # ------------------------------------------------------------------
 
@@ -855,11 +1020,12 @@ class DatabaseManager:
     def clear_ingested_data(self) -> Dict[str, int]:
         """Delete every derived and ingested row, leaving configuration intact.
 
-        Clears ``events``, ``cycles`` and ``ingestion_log`` so the next
-        ingestion run rebuilds them from ``raw_data/`` on the current decoder
-        basis.  ``config`` and ``metadata`` are deliberately untouched — they
-        come from ``int_cfg.csv`` and ``metadata.json``, not from ``.datZ``
-        files, and re-importing them is the caller's separate concern.
+        Clears ``events``, ``cycles``, ``ingestion_log`` and
+        ``detector_findings`` so the next ingestion run rebuilds them from
+        ``raw_data/`` on the current decoder basis.  ``config`` and
+        ``metadata`` are deliberately untouched — they come from
+        ``int_cfg.csv`` and ``metadata.json``, not from ``.datZ`` files, and
+        re-importing them is the caller's separate concern.
 
         Tables that do not exist yet are skipped (``cycles`` is created lazily
         by ``CycleProcessor``), so this is safe on a freshly initialised DB.
@@ -875,7 +1041,7 @@ class DatabaseManager:
 
         cur = self.conn.cursor()
         deleted: Dict[str, int] = {}
-        for table in ("events", "cycles", "ingestion_log"):
+        for table in ("events", "cycles", "ingestion_log", "detector_findings"):
             cur.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
                 (table,),

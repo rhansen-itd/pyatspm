@@ -90,8 +90,16 @@ from .detector_roles import (
 from .detector_activity import detector_activity_profile
 from .detector_health import (
     HealthThresholds,
+    apply_ignore,
     detector_health_findings,
+    filter_min_severity,
     onset_bursts,
+    severity_exit_code,
+    wd_ignore,
+    wd_profile_windows,
+    wd_reboot_windows,
+    wd_thresholds,
+    wd_units,
 )
 
 __all__ = [
@@ -147,6 +155,14 @@ __all__ = [
     'HealthThresholds',
     'detector_health_findings',
     'onset_bursts',
+    'apply_ignore',
+    'filter_min_severity',
+    'severity_exit_code',
+    'wd_ignore',
+    'wd_profile_windows',
+    'wd_reboot_windows',
+    'wd_thresholds',
+    'wd_units',
     # Clock marks
     'MarkerPeds',
     'marker_peds_from_config',
