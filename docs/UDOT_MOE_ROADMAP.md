@@ -136,19 +136,22 @@ Sessions D0 → D1 → D2 run in order. D3, D4 and D5 can run in parallel after 
 
   **Findings for the owner:**
   1. 315's 37 and 53 behave as **approach-wide zones on the *major* approaches**. Every WB advance lane (38–40) reaches 37 about 1.7 s later, and every EB lane (54–56) reaches 53. They are proposed as `arrival` P6/P2 and flagged `wide`. That doesn't fit a minor-approach advance, so please check the sensor layout.
-  2. 315 has about 15 active, unconfigured presence-like zones. They're proposed as new rows:
-     - 33 → P1.
-     - 41/42/43 → P3.
-     - 44 → P8.
-     - 47/60/63 → P4.
-     - 49 → P5.
-     - 58/59 → P7.
-     - 57 → tie P2|P6.
+  2. 315 has about 15 active, unconfigured presence-like zones. `atspm infer-detectors` (2025-12-15 → 17) proposes them as new rows:
+     - 33 → P1, 41 → P3, 49 → P5, 57 → P2 and 58/59 → P7 (all medium).
+     - 42/43 → tie P3|P4|P8.
+     - 44/60/63 → tie P4|P8, because P4 and P8 start together on 100 % of cycles. No timing cue can separate them, so the owner assigns these.
+     - 47 → tie P2|P6.
   3. 313/43 (configured P1 occupancy) releases at P8 green onsets.
 
   **Shell/CLI:** `atspm infer-detectors` (Gemini, `docs/specs/detector_inference_shell.md`, tests `tests/data/test_detector_inference_engine.py`).
 
-  **Not done:** a 701 holdout run. Thresholds are the prototype values above, chosen on 315/201/313 rather than formally frozen.
+  **701 holdout (2026-10-02):** 0 of 4 configured `Arrival` channels match. 53 (configured P8 Arrival) is proposed as a P3 count loop, at high confidence.
+  - **Owner, 2026-10-02:** 701 is split-phased. The original setup numbered one approach 3 and the opposing one 4, so the P3 approach has no P8. Its advance detector is keyed to P8, the through phase it would be under conventional phasing, and there's no P3 Arrival key.
+  - So P3 is the phase that physically serves 53, and the conflict reflects the numbering convention, not a fault. The diff will always flag such rows.
+  - **Follow-up to check:** `aog` for P8 at 701 looks for P8 greens and there are none, so that approach gets no AoG. Fixing it would need an approach → served-phase mapping (a design question).
+  - The holdout doesn't tell us much about accuracy until split-phase numbering is accounted for.
+
+  **Not done:** formal threshold freeze. Thresholds are the prototype values above, chosen on 315/201/313 rather than formally frozen.
 
 ## 4. Track M — Remaining measures
 
