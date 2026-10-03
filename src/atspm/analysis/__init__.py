@@ -67,6 +67,7 @@ from .critical import (
     critical_movement_analysis,
 )
 
+from .split_failures import split_failures, bin_split_failures
 from .optimizer import optimize
 from .optimizer_validation import validate_plans
 from .clock_marks import (
@@ -117,6 +118,9 @@ __all__ = [
     'movement_phase_map',
     'phase_demand',
     'critical_movement_analysis',
+    # Split failures
+    'split_failures',
+    'bin_split_failures',
     # Optimizer
     'optimize',
     'validate_plans',

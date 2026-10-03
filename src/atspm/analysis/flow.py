@@ -154,13 +154,16 @@ def _build_split_windows(
             green_dur     float              (seconds)
             clear_dur     float              (seconds)
             split_dur     float              (seconds, green + clearance)
+            yellow_ts     float | Timestamp  (Code 8 onset)
+            yellow_end_ts float | Timestamp  (Code 9, else Code 10)
 
         One row per valid, gap-isolated split window.  Returns an empty
         DataFrame with the correct schema when no valid windows exist.
     """
     _EMPTY = pd.DataFrame(
         columns=["phase", "cycle_start", "coord_plan", "green_ts",
-                 "clear_end_ts", "green_dur", "clear_dur", "split_dur"]
+                 "clear_end_ts", "green_dur", "clear_dur", "split_dur",
+                 "yellow_ts", "yellow_end_ts"]
     )
 
     if events_df.empty:
@@ -215,7 +218,8 @@ def _build_split_windows(
     return (
         intervals[
             ["phase", "cycle_start", "coord_plan", "green_ts",
-             "clear_end_ts", "green_dur", "clear_dur", "split_dur"]
+             "clear_end_ts", "green_dur", "clear_dur", "split_dur",
+             "yellow_ts", "yellow_end_ts"]
         ]
         .sort_values("green_ts")
         .reset_index(drop=True)
