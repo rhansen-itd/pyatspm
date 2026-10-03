@@ -289,7 +289,9 @@ def arrival_on_green(
     3. Use two ``np.searchsorted`` calls for O(n log m) vectorised interval
        containment — identical in spirit to the pattern in
        ``atspm.analysis.detectors``.
-    4. Group by ``cycle_start`` to aggregate per-cycle counts and durations.
+    4. Aggregate per green.  One row per green: a phase served twice in one
+       detected cycle gives two rows sharing that ``cycle_start``, and the
+       cycle's arrivals are split between them at the earlier green's yellow.
 
     Gap Marker Rule
     ~~~~~~~~~~~~~~~
@@ -318,8 +320,9 @@ def arrival_on_green(
 
             phase           int     – echoed phase number
             coord_plan      float   – coordination plan active at cycle start
-            green_dur       float   – seconds of green in this cycle
-            cycle_len       float   – cycle length in seconds (NaN for last)
+            green_dur       float   – seconds of this green
+            cycle_len       float   – length of the detected cycle holding
+                                      this green (NaN for the last cycle)
             green_pct       float   – green_dur / cycle_len  (NaN when cycle_len is NaN)
             total_arrivals  int     – Code-82 actuations in the full cycle window
             aog             int     – Code-82 actuations in [green_ts, yellow_ts)
@@ -344,18 +347,32 @@ def arrival_on_green(
     # --- 2. Detector events (shifted copy) -------------------------------------
     det = _shift_detector_timestamps(events_df, detector_ids, arrival_offset_sec)
 
+    # Greens of one phase never overlap; order them so searchsorted applies.
+    windows = windows.sort_values("green_ts", kind="stable").reset_index(drop=True)
+
     # Convert timestamps to float for searchsorted regardless of input dtype
     green_starts_f = _ts_to_float(windows["green_ts"])
     yellow_starts_f = _ts_to_float(windows["yellow_ts"])
     cycle_starts_f = _ts_to_float(windows["cycle_start"])
 
-    # Cycle end = next cycle's start (use yellow_ts as a safe upper bound for
-    # the final cycle).  We only need this to count *total* arrivals per cycle.
-    # For the last cycle we use yellow_ts + a generous buffer (3600 s) so that
-    # late-arriving detections are still captured.
-    cycle_ends_f = np.empty(len(cycle_starts_f), dtype=np.float64)
-    cycle_ends_f[:-1] = cycle_starts_f[1:]
-    cycle_ends_f[-1] = yellow_starts_f[-1] + 3600.0
+    # Each green owns a span for counting *total* arrivals.  The span opens at
+    # its cycle_start, or — when the phase was already served earlier in the
+    # same detected cycle — at the previous green's yellow onset, so a phase
+    # served twice per cycle splits the cycle between its greens.  The span
+    # closes at the next green's span start; the final span uses yellow_ts +
+    # 3600 s so late-arriving detections are still captured.
+    span_starts_f = cycle_starts_f.copy()
+    if len(span_starts_f) > 1:
+        same_cycle = cycle_starts_f[1:] == cycle_starts_f[:-1]
+        span_starts_f[1:] = np.where(
+            same_cycle,
+            np.maximum(cycle_starts_f[1:], yellow_starts_f[:-1]),
+            cycle_starts_f[1:],
+        )
+    span_starts_f = np.maximum.accumulate(span_starts_f)
+    span_ends_f = np.empty(len(span_starts_f), dtype=np.float64)
+    span_ends_f[:-1] = span_starts_f[1:]
+    span_ends_f[-1] = yellow_starts_f[-1] + 3600.0
 
     # --- 3. Vectorised interval containment (searchsorted) ---------------------
     if det.empty:
@@ -366,32 +383,22 @@ def arrival_on_green(
         result["aog"] = 0
     else:
         det_ts_f = _ts_to_float(det["timestamp"])
+        n_win = len(windows)
 
-        # For each actuation find which cycle it belongs to
-        # (backward-fill: last cycle_start <= det_ts)
-        cycle_idx = np.searchsorted(cycle_starts_f, det_ts_f, side="right") - 1
+        # On green: inside the green that contains the arrival (last
+        # green_ts <= t, and t < its yellow_ts) — never only the last green
+        # sharing the arrival's cycle_start.
+        green_idx = np.searchsorted(green_starts_f, det_ts_f, side="right") - 1
+        safe_g = np.clip(green_idx, 0, n_win - 1)
+        on_green = (green_idx >= 0) & (det_ts_f < yellow_starts_f[safe_g])
 
-        # For each actuation test whether it falls in [green_ts, yellow_ts)
-        # using the cycle index resolved above.
-        valid_cycle = (cycle_idx >= 0) & (cycle_idx < len(windows))
+        # Every other arrival is counted in the span that holds it.
+        span_idx = np.searchsorted(span_starts_f, det_ts_f, side="right") - 1
+        safe_s = np.clip(span_idx, 0, n_win - 1)
+        in_span = (span_idx >= 0) & (det_ts_f < span_ends_f[safe_s])
 
-        # Default both flags to False
-        on_green = np.zeros(len(det_ts_f), dtype=bool)
-        in_cycle = np.zeros(len(det_ts_f), dtype=bool)
-
-        if valid_cycle.any():
-            vc_idx = cycle_idx[valid_cycle]
-            vc_ts = det_ts_f[valid_cycle]
-
-            # in_cycle: det_ts < cycle_end  (already know det_ts >= cycle_start
-            # by construction of cycle_idx)
-            in_cycle[valid_cycle] = vc_ts < cycle_ends_f[vc_idx]
-
-            # on_green: green_ts <= det_ts < yellow_ts
-            on_green[valid_cycle] = (
-                (vc_ts >= green_starts_f[vc_idx])
-                & (vc_ts < yellow_starts_f[vc_idx])
-            )
+        cycle_idx = np.where(on_green, green_idx, span_idx)
+        in_cycle = on_green | in_span
 
         # Aggregate per cycle
         det_frame = pd.DataFrame({
@@ -419,9 +426,11 @@ def arrival_on_green(
         result["aog"] = agg["aog"].values
 
     # --- 4. Derived columns -----------------------------------------------------
+    # Cycle length = next *distinct* cycle_start − cycle_start, so every green
+    # of a phase served twice in one cycle reports that cycle's length.
     cs_f = _ts_to_float(result["cycle_start"])
-    cl = _cycle_lengths(cs_f)
-    result["cycle_len"] = cl
+    uniq_cs = np.unique(cs_f)
+    result["cycle_len"] = _cycle_lengths(uniq_cs)[np.searchsorted(uniq_cs, cs_f)]
 
     result["green_pct"] = np.where(
         np.isnan(result["cycle_len"].values),
@@ -430,11 +439,12 @@ def arrival_on_green(
     )
 
     total = result["total_arrivals"].values.astype(float)
-    result["aog_pct"] = np.where(
-        total == 0,
-        0.0,
-        result["aog"].values / total,
-    )
+    with np.errstate(invalid="ignore", divide="ignore"):
+        result["aog_pct"] = np.where(
+            total == 0,
+            0.0,
+            result["aog"].values / total,
+        )
 
     # --- 5. Final shape ---------------------------------------------------------
     result = result.set_index("cycle_start")
@@ -517,7 +527,8 @@ def bin_arrival_on_green(
 
     # Recompute aog_pct from summed totals (not from mean of cycle-level rates)
     total = agg["total_arrivals"].values.astype(float)
-    agg["aog_pct"] = np.where(total == 0, 0.0, agg["aog"].values / total)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        agg["aog_pct"] = np.where(total == 0, 0.0, agg["aog"].values / total)
 
     agg = agg.rename(columns={"_bin": "time"})
     agg = agg.loc[agg["n_cycles"] > 0].copy()
