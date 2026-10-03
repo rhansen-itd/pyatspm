@@ -126,6 +126,70 @@ Sessions D0 → D1 → D2 run in order. D3, D4 and D5 can run in parallel after 
     - **Broader statistical anomaly detection** through `traffic_anomaly` (decompose/anomaly/changepoint, as in Inrix and volume_explorer). It supersedes the hand-built BaselineDrift and PeerRatio rules; the physical-state rules stay. It needs a 15-min grid mode in S-D1, an optional `ibis[duckdb]` extra, and a longer continuous pull to calibrate.
     - **`min_observed_share` = 0.9.** Severity is proposed as info/low/high (§5.2), pending the owner.
     - **History:** most sites have long history on the owner's external SSD. A future session pulls it onto this machine for the 15-min anomaly calibration.
+
+  **Rule core built and calibrated 2026-10-03 (branch `feat/detector-health`).** `analysis/detector_health.py` is exported from `atspm.analysis` as `HealthThresholds`, `detector_health_findings` and `onset_bursts`. It has 39 goldens in `tests/analysis/test_detector_health.py`, plus 2 for the silence rule in S-D1's tests.
+  - **Findings schema:** `date, window, ts, detector, phase, role, rule, severity, value, threshold, message`.
+    - `ts` is new: the UTC start of an event-level finding (Failsafe, WatchdogCall, ControllerFault), NaN for bin-level ones.
+    - `role` joins a detector's roles (e.g. `stop_bar+tm`), and `phase` is set only when they agree.
+    - Failsafe rows use `detector = -1` and `role = unit:{unit}`. Several episodes can fall on one day, so **S-D4's UNIQUE key needs `ts`** (or an aggregation).
+  - **Rules:**
+    - ConfiguredSilent (high).
+    - LowDetectorHits (low). Dropped on a detector-date that has StuckOn.
+    - UnconfiguredDetector (info).
+    - StuckOn (high): a duration over the per-role limit (the longest among a detector's roles), or a judgeable window with occupancy ≥ 0.99.
+    - Chatter (low): peer-relative. Peers are the same `TM_*` movement, or the same phase and role, compared against the most lenient group.
+    - Failsafe (info/low/high) and WatchdogCall (low).
+    - ControllerFault (83 info; 84–88 and 91 high).
+  - **Judgeable gate:** only the absence rules (silent, low hits, held occupancy) require `observed_s / bin_s ≥ 0.9`. Present evidence (a long measured on, actuations on an unconfigured channel, short pulses) is judged on partial days too.
+  - **Two calibration findings changed the design:**
+    - **Unmarked log holes.** 201's 98-day hole (2026-06-24 23:59:58 → 10-01 11:00:04) has no gap marker. The other corpus holes are marked. S-D1 counted it as logged time and paired the 06-24 23:59 reboot onsets with offs 98 days later: 3,170 phantom StuckOn and 2,350 phantom ConfiguredSilent flags. `detector_activity_profile(max_silence_s=3600)` and `onset_bursts` now insert a marker 0.1 s after the last event before any unmarked silence over 1 h, the ingestion convention. The longest natural silence in the corpus is 24 min (201, rural, overnight). *Open: why ingestion left that hole unmarked.*
+    - **Round-hour "dumps" are re-assertions, not file-boundary artifacts.** Every channel in 701's `HH:00:00/01` bursts, and in 201's 00:00:01 bursts, logged an off 0.2–1.0 s before. They re-assert state for channels that were already on. `onset_bursts` marks a burst `reasserted` when more than half its channels turned off within `reassert_s` = 1 s with no gap between, and Failsafe skips it. This removed 47 of the 100 bursts of ≥ 6 channels. `ingestion_log` spans are merged ranges (2–4 per DB), so a file-boundary test wasn't possible.
+  - **Calibrated defaults** (`HealthThresholds`). Reproduce with `docs/calibration/sweep_detector_health.py`. The review lists are in `docs/calibration/detector_health_*.csv`, and the flags at the defaults are in `detector_health_defaults.csv`.
+
+    | Threshold | Default | Corpus evidence |
+    |---|---|---|
+    | `min_observed_share` | 0.9 | 0.8/0.9/0.95 change only 313 (117/108/108) |
+    | `low_hits_min` | 20 | k = 10 or 20 flags only 701 tm 57/58 (1–4 per day, 8 rows); k = 50 adds 201 #36 and #45 |
+    | `unconfigured_min_act` | 20 | 315 flags exactly S-D6's 14 zones (33, 41–44, 47, 49, 57–60, 63, 37, 53) |
+    | `stuck_on_s` | arrival, stop_bar, tm 15 min; occupancy, pairs and unconfigured 30 min | Healthy maxima: arrival ≤ 4.5 min, occupancy ≤ 11.8, pairs ≤ 19.3 (701), tm ≤ 11.1. A role-free 5 min gives 94 flags |
+    | `chatter_peer_ratio` | 3 | ×2 → 18, ×3 → 9, ×5 → 0 (all at 315) |
+    | `burst_min_channels` | 12 | 6/8/12/16 give 48/42/25/21 episodes |
+    | `reboot_max_release_s` | 240 s | In-window releases measured 40–171 s (not the 10–40 s guessed) |
+
+  - **Flags at the defaults:**
+
+    | Rule | 201 | 313 | 315 | 701 |
+    |---|---|---|---|---|
+    | ConfiguredSilent (high) | 38: #41 in March; 49, 51, 53, 60, 61, 63, 64 in June | 108: nine `pairs`/`tm` channels (49, 50, 52–54, 61–64), every day | 0 | 40: ten `pairs` channels on 4 days |
+    | StuckOn (high) | unconfigured #52 (31 min), #28 (179 and 229 min) | 0 | #31 `stop_bar+tm` 24.4 min on 01-11 | 0 |
+    | LowDetectorHits (low) | 0 | 0 | 0 | tm 57/58, 06-13 → 16 |
+    | Chatter (low) | 0 | 0 | arrival #40 (every day, ~7 % vs 1.5 %), #56 (2 days) | 0 |
+    | Failsafe high / low / info | 2 / 1 / 11 | 0 | 5 / 0 / 0 | 1 / 1 / 4 |
+
+  - **Failsafe verdicts** use candidate reboot windows 23:58–24:00, 00:00–00:03 and 01:54–01:58, from the measured burst times 23:59:05–08, 00:00:01 and 01:55:12–16.
+    - **The labelled positive is found:** 201 2026-03-19 01:55:12 is one 30-channel episode of 2 bursts, released in 73.7 s, with phases 2 and 6 maxing out. **But it falls on the recurring 01:55 burst time** (also 201 06-20, 701 06-14). So the LS 96–99 firing was this nightly event, not a random fault. Under the reboot window it's `info`.
+    - **High (unscheduled):**
+      - 201 2026-06-20 20:10:08 and 06-23 10:18:31: 16 channels, released 70–77 s, with max-outs.
+      - 315's four 42-channel bursts (01-10 02:15, 03:00 and 04:13; 01-11 03:05) and 12-15 08:10 (12 channels).
+      - 701 02-28 12:17:55: 12 channels, released 231 s, phases 1–6 maxed out.
+    - **Low:** an in-window burst whose release crossed a log hole (201 06-24, 701 06-16).
+    - **Below 12 channels, not flagged and up for review:** 701's February cluster of exactly 10 channels released in ~6.3 s (16 bursts, at irregular times), and 313's 7–8-channel bursts on 08-05.
+    - **WatchdogCall:** no watchdog zone actuates in the corpus, so there's nothing to calibrate. The goldens cover it.
+  - **Owner review needed (2026-10-03):**
+    1. Is 201's 01:55 event a scheduled reboot (`info`), given LS 96–99 fired on it?
+    2. Are the 201 daytime 16-channel bursts and the 315 42-channel bursts real failsafes?
+    3. 701's 10-channel/6.3 s cluster: one unit cycling? If it's a failure mode, `burst_min_channels` should drop to 8.
+    4. Configured-silent channels: 313's nine and 701's ten `pairs` channels look like config listing channels that don't exist.
+    5. 701 tm 57/58 (1–4 actuations a day since June).
+    6. 315 #40's steady chatter.
+    7. 315 #31's 24-minute hold on 01-11, during the burst nights.
+
+    FP rates are recorded after this review.
+  - **Not done:**
+    - New `Det_P{N}_{Role}` roles: the names are the owner's.
+    - The `WD:` key format for reboot windows and unit rows (S-D4, with the EVO-zone item). `units` is a plain `{unit: channels}` argument, and the default is all channels. Note: with units of fewer than 12 channels, `burst_min_channels` needs a per-unit-type value.
+    - RecordCount parity (`check_data_quality`) belongs in S-D4's shell, since `utils/quality.py` needs `ingestion_log` spans.
+    - The statistical layer (§6) waits for the long pull.
 - **S-D3: phase-level Watchdog checks.** *Gemini-eligible against a D2-style spec.* Add `MaxOutThreshold` and `ForceOffThreshold` (the AM window, reusing termination events), `StuckPed` (from 89/90 when present, else 45), and `UnconfiguredApproach` (a phase served with no `Det_P{N}_*` / `TM_*` mapping). These use the same findings schema as D2, and the thresholds come from D2's calibration pass, not from the Gemini run.
 - **S-D4: engine, CLI and report.** *Gemini-eligible, with the plot tests Opus-written.* Build a `DetectorHealthEngine` in `data/` that mirrors `AogEngine`/`DetectorEngine` exactly. Add `atspm detector-health` with `--target/--targetid/--all`, date or date-range, `--window am|pm|day`, and `--min-severity`. **Findings persist in the DB (owner, 2026-09-30).** Add a new `detector_findings` table: `date, window, detector, phase, role, rule, severity, value, threshold, message, computed_at`, with UNIQUE `(date, window, detector, phase, rule)`. Phase-level findings from D3 use `detector = -1`. A re-run over a date range deletes and replaces that range's rows in one transaction, so the run is idempotent and safe for a future scheduler to repeat. It's derived data, so `clear_ingested_data()` (`--rebuild`) should clear it alongside `events`/`cycles`/`ingestion_log`. Add the table in `DatabaseManager` schema setup. It's a schema change, so log it in `PENDING_DOC_CHANGES.md`. Keep the ignore list in `int_cfg` (config's source of truth), applied at read and report time rather than at write time, so ignored findings are still recorded. The command also writes a findings CSV and an HTML **detector × day heatmap** (count normalized to baseline, with findings overlaid) from a new `plotting/detector_health.py`. Also add an ignore list: `WD:` keys such as `WD_Ignore` = `det:rule[,…]`, the analogue of UDOT's `WatchDogIgnoreEvent`. Hook into `atspm report` so the daily report includes a findings summary. Log it in `PENDING_DOC_CHANGES.md` (new CLI subcommand, new public exports).
 - **S-D5: Timing and Actuation plot.** *Opus for the trace layout, then Gemini for the CLI wiring.* This is UDOT's visual detector check: per-phase rows with green/yellow/red bars, plus detector on-intervals grouped under their phase by role (from D0), plus ped, call (43/44) and preempt rows. Reuse `_build_phase_intervals` and `_reconstruct_intervals`, with vectorized `[start, end, None]` segments and no row iteration. Add CLI `plot-timing-actuation`, and link to it from each D4 finding (the window around a stuck-on or chatter event).

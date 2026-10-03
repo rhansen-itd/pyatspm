@@ -51,3 +51,5 @@ See CLAUDE.md "Documentation Workflow" for the rules.
 - [src/atspm/cli.py] new infer-detectors subcommand
 - [src/atspm/data/__init__.py] export DetectorInferenceEngine, get_detector_inference
 - [src/atspm/analysis/__init__.py] export detector_activity_profile (new analysis/detector_activity.py)
+- [src/atspm/analysis/__init__.py] export HealthThresholds, detector_health_findings, onset_bursts (new analysis/detector_health.py)
+- [src/atspm/analysis/detector_activity.py] detector_activity_profile gains max_silence_s (unmarked silences > 1 h read as gaps)

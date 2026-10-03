@@ -35,7 +35,9 @@ the first event or after the last.  So ``occupancy = on_time_s /
 observed_s``, and a bin with no observed time has ``occupancy`` NaN and
 ``on_at_start`` / ``on_at_end`` NA.  An off-gap is the time from a measured
 off to the same detector's next on.  It is dropped if a gap marker lies
-between them.
+between them.  A silence longer than :data:`MAX_SILENCE_S` with no marker
+gets one (0.1 s after its last event, as ingestion does), because ingestion
+doesn't mark every hole.
 
 Interval statistics (``n_act``, ``n_censored``, ``max_on_s``, ``p95_on_s``,
 ``n_short``, ``open_on_s``, ``min_off_gap_s``) belong to the bin holding the
@@ -70,6 +72,12 @@ DEFAULT_WINDOWS: Mapping[str, Tuple[str, str]] = {"day": ("00:00", "24:00")}
 
 # Timestamps are logged in tenths; absorb float noise when comparing to 0.1 s.
 _SHORT_EPS = 1e-3
+
+#: A silence longer than this with no gap marker is treated as a gap.  A
+#: running controller logs every few minutes at most (corpus maximum 24 min,
+#: at rural 201 overnight); 201 also holds a 98-day hole that ingestion left
+#: unmarked (2026-06-24 → 10-01).
+MAX_SILENCE_S = 3600.0
 
 ACTIVITY_SCHEMA = [
     "date", "window", "bin_start", "bin_end", "bin_s", "observed_s",
@@ -131,6 +139,25 @@ def _observed_spans(t_ev: np.ndarray, gaps: np.ndarray) -> Tuple[np.ndarray, np.
     return starts[keep], ends[keep]
 
 
+def _mark_silences(ev: pd.DataFrame, max_silence_s: Optional[float]) -> pd.DataFrame:
+    """Add a gap marker 0.1 s after the last event before each unmarked silence.
+
+    *ev* is sorted by ``timestamp`` (epoch seconds).  The marker follows the
+    ingestion convention, so a silence reads exactly like a marked gap.
+    """
+    if max_silence_s is None or len(ev) < 2:
+        return ev
+    t = ev["timestamp"].to_numpy(float)
+    code = ev["event_code"].to_numpy()
+    long_ = np.flatnonzero(np.diff(t) > max_silence_s)
+    long_ = long_[(code[long_] != _GAP_CODE) & (code[long_ + 1] != _GAP_CODE)]
+    if not len(long_):
+        return ev
+    marks = pd.DataFrame({"timestamp": t[long_] + 0.1, "event_code": _GAP_CODE, "parameter": 0})
+    return pd.concat([ev, marks], ignore_index=True).sort_values(
+        "timestamp", kind="stable").reset_index(drop=True)
+
+
 def _parse_clock(s: str) -> pd.Timedelta:
     hh, mm = s.split(":")
     return pd.Timedelta(hours=int(hh), minutes=int(mm))
@@ -188,6 +215,7 @@ def detector_activity_profile(
     start_date: Optional[_dt.date] = None,
     end_date: Optional[_dt.date] = None,
     short_pulse_s: float = 0.1,
+    max_silence_s: Optional[float] = MAX_SILENCE_S,
 ) -> pd.DataFrame:
     """Per-detector activity statistics per local day and sub-day window.
 
@@ -211,6 +239,9 @@ def detector_activity_profile(
             dates of the first and last logged event.
         short_pulse_s: Measured on-durations at or below this count in
             ``n_short`` (chatter evidence).
+        max_silence_s: A silence between events longer than this, with no
+            gap marker, is treated as a gap (see :data:`MAX_SILENCE_S`).
+            None trusts the markers alone.
 
     Returns:
         DataFrame with :data:`ACTIVITY_SCHEMA` columns, one row per
@@ -254,6 +285,7 @@ def detector_activity_profile(
             "event_code": events_df["event_code"].to_numpy(),
             "parameter": events_df["parameter"].to_numpy(),
         }).sort_values("timestamp", kind="stable").reset_index(drop=True)
+        ev = _mark_silences(ev, max_silence_s)
 
     t = ev["timestamp"].to_numpy(float)
     code = ev["event_code"].to_numpy()

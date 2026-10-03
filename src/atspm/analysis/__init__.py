@@ -12,6 +12,7 @@ Modules:
 - aog:      Arrival on Green calculations
 - detector_roles: Detector role table and per-role detector sets
 - detector_activity: Per-detector activity profile per local day/window
+- detector_health: Deterministic detector-health rules and onset bursts
 - clock_marks: eos_set_time drift/set marker decoding
 """
 
@@ -87,6 +88,11 @@ from .detector_roles import (
 )
 
 from .detector_activity import detector_activity_profile
+from .detector_health import (
+    HealthThresholds,
+    detector_health_findings,
+    onset_bursts,
+)
 
 __all__ = [
     # Decoders
@@ -138,6 +144,9 @@ __all__ = [
     'detector_sets',
     # Detector activity
     'detector_activity_profile',
+    'HealthThresholds',
+    'detector_health_findings',
+    'onset_bursts',
     # Clock marks
     'MarkerPeds',
     'marker_peds_from_config',

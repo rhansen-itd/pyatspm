@@ -236,3 +236,29 @@ class TestInputs:
         with pytest.raises(ValueError):
             detector_activity_profile(ev(heartbeat("2026-06-10 00:00", "2026-06-10 01:00")),
                                       TZ, windows={"w": win})
+
+
+class TestUnmarkedSilence:
+    """A hole with no gap marker (201, 2026-06-24 → 10-01) reads as a gap."""
+
+    @pytest.fixture
+    def rows(self):
+        rows = heartbeat("2026-06-10 00:00", "2026-06-10 12:00")
+        rows += [(loc("2026-06-10 11:00"), 82, 5)]                 # on before the hole
+        rows += heartbeat("2026-06-12 06:00", "2026-06-12 23:50")
+        rows += [(loc("2026-06-12 07:00"), 81, 5)]                 # off after it
+        return rows
+
+    def test_hole_is_unobserved_and_interval_censored(self, rows):
+        df = detector_activity_profile(ev(rows), TZ, start_date=D10, end_date=D12)
+        assert row(df, 99, D11)["observed_s"] == 0
+        r = row(df, 5, D10)
+        assert r["n_censored"] == 1 and np.isnan(r["max_on_s"])
+        # Last event before the hole: heartbeat off at 12:00:00.2; marker 0.1 s later.
+        assert r["open_on_s"] == pytest.approx(3600.3)
+        assert row(df, 99, D12)["observed_s"] == pytest.approx(loc("2026-06-12 23:50:00.2") - loc("2026-06-12 06:00"))
+
+    def test_markers_only_when_disabled(self, rows):
+        df = detector_activity_profile(ev(rows), TZ, start_date=D10, end_date=D12, max_silence_s=None)
+        assert row(df, 99, D11)["observed_s"] == 86400
+        assert row(df, 5, D10)["max_on_s"] == pytest.approx(44 * H)
