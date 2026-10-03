@@ -89,12 +89,25 @@ the choice of default and the verdict stay with Opus.
      `int_cfg.csv` rows).
    - Until a site has unit rows, failsafe falls back to all channels at the
      intersection.
-2. **Severity scale:** not answered yet.
-3. **PM window: derive it per intersection from historical data**, e.g. the
-   peak 60-minute volume window on weekdays, as a pure function over a
-   15-minute series (§6). The same derivation can replace UDOT's fixed AM
-   01:00–05:00 low-volume window. A `WD:` key overrides either.
-4. **`min_observed_share`:** not answered yet. Default 0.9.
+2. **Severity:** each finding carries a label so reports can filter
+   (S-D4's `--min-severity`). Proposed default, pending owner confirmation:
+   `info` = expected or known (scheduled reboot, ignored zone); `low` =
+   suspicious, worth a look (suspected false watchdog call, a statistical
+   anomaly); `high` = the detector is probably failed and affecting
+   operation (stuck-on, configured-silent, confirmed failsafe).
+3. **Windows: two different purposes, derived differently.**
+   - **The PM window** is a *peak-traffic* period. Derive it per
+     intersection from history, e.g. the weekday peak 60 minutes of volume,
+     as a pure function over a 15-minute series (§6).
+   - **The AM window (UDOT's 01:00–05:00)** is the opposite: a period with
+     *essentially no traffic*. A detector held on, or a phase maxing out,
+     there is suspicious because nothing should be calling it. If it's
+     derived at all, it's the *quietest* sustained window from history,
+     a separate function, never the peak derivation. The 01:00–05:00
+     default stays until history says otherwise, and it must not overlap the
+     nightly reboot window (§3 Failsafe).
+   - A `WD:` key overrides either.
+4. **`min_observed_share` = 0.9** (owner, 2026-10-03).
 5. **Add configuration roles.** Every intersection has loops that aren't
    stop bar, occupancy or advance (315's 37/53 dilemma-zone loops, its
    P9 count-only loops), and they need handling, not suppressing. New roles
