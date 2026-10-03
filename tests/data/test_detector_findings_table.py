@@ -156,6 +156,31 @@ class TestIdempotencyAndKey:
         assert n == 0 and _count(empty_db) == 0
 
 
+class TestLazyCreateOnLegacyDb:
+    """Databases created before S-D4 have no detector_findings table; the write
+    path must create it lazily (mirroring CycleProcessor's cycles table)."""
+
+    def _drop_table(self, db_path: Path):
+        with sqlite3.connect(db_path) as c:
+            c.execute("DROP TABLE IF EXISTS detector_findings")
+
+    def test_replace_findings_creates_missing_table(self, empty_db: Path):
+        self._drop_table(empty_db)
+        df = _findings([
+            ("2026-01-10", "day", float("nan"), 52, pd.NA, "stop_bar",
+             "StuckOn", "high", 1.0, 0.0, "m"),
+        ])
+        with DatabaseManager(empty_db) as m:
+            m.replace_findings(df, "2026-01-10", "2026-01-10")
+        assert _count(empty_db) == 1
+
+    def test_get_findings_missing_table_is_empty(self, empty_db: Path):
+        self._drop_table(empty_db)
+        with DatabaseManager(empty_db) as m:
+            got = m.get_findings("2026-01-10", "2026-01-10")
+        assert got.empty
+
+
 class TestClear:
     def test_clear_ingested_data_removes_findings(self, empty_db: Path):
         df = _findings([

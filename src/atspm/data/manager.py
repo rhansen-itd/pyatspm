@@ -185,34 +185,8 @@ class DatabaseManager:
             ON ingestion_log (span_end)
         """)
 
-        # Derived detector-health findings (S-D4).  One row per finding, keyed
-        # so a re-run over a date range can delete-then-replace it idempotently.
-        # NULLs are distinct in a SQLite UNIQUE index, so NA phase/ts/role are
-        # stored as sentinels (phase/ts = -1, role = '') to make the key total:
-        # one day can hold several Failsafe episodes (distinct ``ts``) and
-        # several units failing at the same instant (distinct ``role``).
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS detector_findings (
-                date        TEXT    NOT NULL,
-                window      TEXT    NOT NULL,
-                detector    INTEGER NOT NULL,
-                phase       INTEGER NOT NULL,
-                role        TEXT    NOT NULL DEFAULT '',
-                rule        TEXT    NOT NULL,
-                severity    TEXT    NOT NULL,
-                value       REAL,
-                threshold   REAL,
-                message     TEXT,
-                ts          REAL    NOT NULL,
-                computed_at TEXT    NOT NULL,
-                UNIQUE(date, window, detector, phase, role, rule, ts)
-                    ON CONFLICT REPLACE
-            )
-        """)
-        cur.execute("""
-            CREATE INDEX IF NOT EXISTS idx_findings_date
-            ON detector_findings (date)
-        """)
+        # Derived detector-health findings (S-D4).
+        self._ensure_findings_table(cur)
 
         self.conn.commit()
         print(f"Database initialised at {self.db_path}")
@@ -797,6 +771,44 @@ class DatabaseManager:
         "value", "threshold", "message", "ts", "computed_at",
     )
 
+    @staticmethod
+    def _ensure_findings_table(cur: "sqlite3.Cursor") -> None:
+        """Create ``detector_findings`` and its index if they don't exist.
+
+        Called by :meth:`init_db` and, so the feature works against databases
+        created before this table existed, lazily by :meth:`replace_findings`
+        (mirroring the lazy ``cycles`` creation in ``CycleProcessor``).
+
+        One row per finding, keyed so a re-run over a date range can
+        delete-then-replace it idempotently.  NULLs are distinct in a SQLite
+        UNIQUE index, so NA ``phase``/``ts``/``role`` are stored as sentinels
+        (``phase``/``ts`` = -1, ``role`` = '') to make the key total: one day
+        can hold several Failsafe episodes (distinct ``ts``) and several units
+        failing at the same instant (distinct ``role``).
+        """
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS detector_findings (
+                date        TEXT    NOT NULL,
+                window      TEXT    NOT NULL,
+                detector    INTEGER NOT NULL,
+                phase       INTEGER NOT NULL,
+                role        TEXT    NOT NULL DEFAULT '',
+                rule        TEXT    NOT NULL,
+                severity    TEXT    NOT NULL,
+                value       REAL,
+                threshold   REAL,
+                message     TEXT,
+                ts          REAL    NOT NULL,
+                computed_at TEXT    NOT NULL,
+                UNIQUE(date, window, detector, phase, role, rule, ts)
+                    ON CONFLICT REPLACE
+            )
+        """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_findings_date
+            ON detector_findings (date)
+        """)
+
     def replace_findings(
         self,
         findings: pd.DataFrame,
@@ -840,6 +852,7 @@ class DatabaseManager:
 
         cur = self.conn.cursor()
         try:
+            self._ensure_findings_table(cur)
             cur.execute(
                 "DELETE FROM detector_findings WHERE date BETWEEN ? AND ?",
                 (date_start, date_end),
@@ -915,6 +928,17 @@ class DatabaseManager:
             sql += " AND window = ?"
             params.append(window)
         sql += " ORDER BY date, detector, rule, window, ts"
+        cur = self.conn.cursor()
+        if cur.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name='detector_findings'"
+        ).fetchone() is None:
+            # Database predates the table and nothing has been written yet.
+            return pd.DataFrame(
+                columns=["date", "window", "ts", "detector", "phase", "role",
+                         "rule", "severity", "value", "threshold", "message",
+                         "computed_at"]
+            )
         df = pd.read_sql_query(sql, self.conn, params=params)
         if df.empty:
             return df
