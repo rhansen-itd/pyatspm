@@ -90,6 +90,11 @@ from .detector_health import (
     get_detector_health,
 )
 
+from .timing_actuation import (
+    TimingActuationEngine,
+    get_timing_actuation,
+)
+
 from .video import (
     ShapeConfig,
     resolve_stopbar_target,
@@ -159,6 +164,9 @@ __all__ = [
     # Detector Health
     'DetectorHealthEngine',
     'get_detector_health',
+    # Timing Actuation
+    'TimingActuationEngine',
+    'get_timing_actuation',
     # Video
     'ShapeConfig',
     'resolve_stopbar_target',

@@ -60,3 +60,6 @@ See CLAUDE.md "Documentation Workflow" for the rules.
 - [src/atspm/cli.py] new detector-health subcommand
 - [src/atspm/analysis/__init__.py] export TIMING_CODES, timing_actuation_intervals, timing_actuation_rows, ring_phase_order, finding_plot_windows (new analysis/timing_actuation.py)
 - [src/atspm/plotting/__init__.py] export plot_timing_actuation
+- [src/atspm/cli.py] new plot-timing-actuation subcommand
+- [src/atspm/data/__init__.py] export TimingActuationEngine, get_timing_actuation
+- [src/atspm/data/detector_health.py] reported findings / CSV gain timing_plot command column

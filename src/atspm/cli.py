@@ -2052,6 +2052,89 @@ def handle_plot_detectors(args: argparse.Namespace) -> None:
 
 
 # ---------------------------------------------------------------------------
+# plot-timing-actuation
+# ---------------------------------------------------------------------------
+
+def _plot_timing_actuation_single_intersection(
+    target_name: str,
+    args: argparse.Namespace,
+) -> None:
+    """Core logic to generate a timing and actuation plot for one intersection.
+
+    Args:
+        target_name: Exact intersection folder name.
+        args: Parsed CLI arguments from the ``plot-timing-actuation`` subcommand.
+    """
+    from atspm.data.timing_actuation import TimingActuationEngine
+
+    target_dir = _get_target_dir(target_name)
+    meta = _load_metadata(target_dir)
+    db_path = _resolve_db_path(target_dir, meta)
+
+    if not db_path.exists():
+        _die(
+            f"Database not found: {db_path}\n"
+            f"Run 'atspm process --target {target_name}' first."
+        )
+
+    output_dir = target_dir / "outputs"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    int_name = meta.get("intersection_name", target_name)
+    tz_str = args.timezone or meta.get("timezone") or DEFAULT_TIMEZONE
+
+    print(f"\n📈  Generating timing and actuation plot for {int_name}")
+    print(f"    Window: {args.start} → {args.end}")
+    if args.phases:
+        print(f"    Phases: {args.phases}")
+    if args.detectors:
+        print(f"    Detectors: {args.detectors}")
+
+    try:
+        engine = TimingActuationEngine(db_path, timezone=tz_str)
+        engine.plot(
+            start=args.start,
+            end=args.end,
+            phases=args.phases,
+            detectors=args.detectors,
+            output_dir=output_dir,
+        )
+    except ValueError as exc:
+        _die(str(exc))
+    except Exception as exc:
+        if getattr(args, "verbose", False):
+            traceback.print_exc()
+        _die(f"Plot generation failed: {exc}")
+
+
+def handle_plot_timing_actuation(args: argparse.Namespace) -> None:
+    """Generate interactive timing and actuation plots.
+
+    Args:
+        args: Parsed CLI arguments.
+    """
+    intersections_dir = _get_intersections_dir()
+
+    if getattr(args, "all", False):
+        targets = [p.name for p in intersections_dir.iterdir() if p.is_dir()]
+        if not targets:
+            _die(f"No intersection directories found in {intersections_dir}")
+        print(f"\n🌍 Batch generating timing and actuation plots for {len(targets)} intersections...")
+    else:
+        targets = [_resolve_target_name(args.target, args.targetid)]
+
+    for target_name in targets:
+        try:
+            _plot_timing_actuation_single_intersection(target_name, args)
+        except SystemExit:
+            print(f"\n⏭️ Skipping {target_name} due to errors.", file=sys.stderr)
+        except Exception as exc:
+            print(f"\n❌ Unexpected error processing {target_name}: {exc}", file=sys.stderr)
+            if getattr(args, "verbose", False):
+                traceback.print_exc()
+
+
+# ---------------------------------------------------------------------------
 # video-calibrate-shapes / video-overlay
 #
 # Both are single-target only -- no --all.  video-calibrate-shapes is an
@@ -3787,6 +3870,80 @@ def _add_plot_detectors_parser(subs: argparse._SubParsersAction) -> None:
     p_det.set_defaults(func=handle_plot_detectors)
 
 
+def _add_plot_timing_actuation_parser(subs: argparse._SubParsersAction) -> None:
+    """Attach the ``plot-timing-actuation`` subcommand parser."""
+    p_ta = subs.add_parser(
+        "plot-timing-actuation",
+        help="Generate interactive timing and actuation plots (window capped at 4 h, or 24 h with --phases or --detectors).",
+        description=(
+            "Visualise per-phase timing intervals (green, yellow, red), calls, "
+            "pedestrian service, and detector actuations grouped by role.\n"
+            "Window is capped at 4 h, or at 24 h with --phases or --detectors."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    group_ta = p_ta.add_mutually_exclusive_group(required=True)
+    group_ta.add_argument(
+        "--target",
+        metavar="FOLDER",
+        help="Exact intersection folder name.",
+    )
+    group_ta.add_argument(
+        "--targetid",
+        metavar="ID",
+        help="Intersection ID prefix (e.g. '2068').",
+    )
+    group_ta.add_argument(
+        "--all",
+        action="store_true",
+        help="Generate plots for all intersections in the directory.",
+    )
+    p_ta.add_argument(
+        "--start",
+        required=True,
+        metavar="ISO8601",
+        help=(
+            "Window start (local time, ISO-8601). "
+            "E.g. '2024-06-01T06:00:00'."
+        ),
+    )
+    p_ta.add_argument(
+        "--end",
+        required=True,
+        metavar="ISO8601",
+        help="Window end, exclusive (local time, ISO-8601).",
+    )
+    p_ta.add_argument(
+        "--phases",
+        nargs="+",
+        type=int,
+        metavar="N",
+        default=None,
+        help="Filter to specific signal phases, e.g. --phases 2 6.",
+    )
+    p_ta.add_argument(
+        "--detectors",
+        nargs="+",
+        type=int,
+        metavar="N",
+        default=None,
+        help="Filter to specific detector channels, e.g. --detectors 21 53.",
+    )
+    p_ta.add_argument(
+        "--timezone",
+        default=None,
+        metavar="TZ",
+        help="Override the timezone from metadata.json.",
+    )
+    p_ta.add_argument(
+        "--verbose",
+        action="store_true",
+        default=False,
+        help="Print full tracebacks for any errors.",
+    )
+    p_ta.set_defaults(func=handle_plot_timing_actuation)
+
+
 def _add_video_calibrate_shapes_parser(subs: argparse._SubParsersAction) -> None:
     """Attach the ``video-calibrate-shapes`` subcommand parser.
 
@@ -3944,6 +4101,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_plot_termination_parser(subs)
     _add_discrepancies_parser(subs)
     _add_plot_detectors_parser(subs)
+    _add_plot_timing_actuation_parser(subs)
     _add_video_calibrate_shapes_parser(subs)
     _add_video_overlay_parser(subs)
     _add_video_locate_phase_change_parser(subs)

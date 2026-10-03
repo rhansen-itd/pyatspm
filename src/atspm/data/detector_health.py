@@ -36,6 +36,7 @@ from ..analysis.detector_health import (
     wd_units,
 )
 from ..analysis.detector_roles import parse_detector_roles
+from ..analysis.timing_actuation import finding_plot_windows
 from ..plotting.detector_health import plot_detector_health
 from ..utils.timezone import resolve_pytz
 
@@ -335,6 +336,44 @@ class DetectorHealthEngine:
             )
         reported = filter_min_severity(reported, min_severity)
         exit_code = severity_exit_code(reported, min_severity)
+
+        # Build timing_plot link column on reported findings
+        with DatabaseManager(self.db_path) as m:
+            metadata = m.get_metadata() or {}
+        int_id = metadata.get("intersection_id")
+        target_arg = f"--targetid {int_id}" if int_id else f"--target {self.db_path.parent.name}"
+
+        if not reported.empty:
+            links = finding_plot_windows(reported, events_df, self.timezone)
+            zone = resolve_pytz(self.timezone)
+            valid_mask = links["plot_start"].notna()
+
+            start_s = pd.Series("", index=links.index, dtype=str)
+            end_s = pd.Series("", index=links.index, dtype=str)
+
+            if valid_mask.any():
+                s_dt = pd.to_datetime(
+                    links.loc[valid_mask, "plot_start"], unit="s", utc=True
+                ).dt.tz_convert(zone)
+                e_dt = pd.to_datetime(
+                    links.loc[valid_mask, "plot_end"], unit="s", utc=True
+                ).dt.tz_convert(zone)
+                start_s.loc[valid_mask] = s_dt.dt.strftime("%Y-%m-%dT%H:%M:%S")
+                end_s.loc[valid_mask] = e_dt.dt.strftime("%Y-%m-%dT%H:%M:%S")
+
+            base_cmd = f"atspm plot-timing-actuation {target_arg} --start " + start_s + " --end " + end_s
+
+            has_phase = links["plot_phase"].notna()
+            has_det = (~has_phase) & links["plot_detector"].notna()
+
+            suffix = pd.Series("", index=links.index, dtype=str)
+            suffix.loc[has_phase] = " --phases " + links.loc[has_phase, "plot_phase"].astype(str)
+            suffix.loc[has_det] = " --detectors " + links.loc[has_det, "plot_detector"].astype(str)
+
+            full_cmd = base_cmd + suffix
+            reported["timing_plot"] = full_cmd.where(valid_mask, "")
+        else:
+            reported["timing_plot"] = pd.Series([], dtype=str)
 
         # 7. Write outputs if output_dir provided
         if output_dir is not None:
