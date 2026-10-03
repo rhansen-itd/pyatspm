@@ -32,6 +32,7 @@ from typing import List, Optional
 
 import pytz
 
+from ..analysis.clock_marks import drop_marker_events, marker_peds_from_config
 from ..data import reader
 from ..utils.timezone import DEFAULT_TIMEZONE
 from ..plotting.termination import plot_termination
@@ -175,6 +176,18 @@ class PlotGenerator:
             event_codes=_TERM_CODES,
             timezone=tz_str,
         )
+
+        # Clock marks are ped calls on unused ped phases; keep them out of
+        # the ped rows explicitly rather than relying on no walk following.
+        try:
+            peds = marker_peds_from_config(
+                reader.get_config_dict(self.db_path, start_dt)
+            )
+        except ValueError as exc:
+            print(f"[{date_str}] Termination: ignoring Clk config ({exc})")
+            peds = None
+        if peds is not None:
+            df_events = drop_marker_events(df_events, peds)
 
         if df_events.empty:
             print(f"[{date_str}] Termination: no events - skipping")

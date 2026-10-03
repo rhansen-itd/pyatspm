@@ -79,6 +79,7 @@ import pandas as pd
 import pytz
 
 from .manager import DatabaseManager, db_timezone
+from ..analysis.decoders import CLOCK_STEP_FENCE_PARAM
 from ..analysis.cycles import (
     CycleDetectionError,
     assign_ring_phases,
@@ -506,6 +507,10 @@ class CycleProcessor:
         IngestionEngine already evaluated whether a real discontinuity exists
         at those seams and its decision must not be overridden here.
 
+        Backward-clock-step fences (``parameter = CLOCK_STEP_FENCE_PARAM``)
+        are never scrubbed: they come from the filled files' own content, not
+        from the gap.
+
         Args:
             t_start: UTC epoch of the newly filled gap's start.
             t_end:   UTC epoch of the newly filled gap's end.
@@ -516,9 +521,10 @@ class CycleProcessor:
                 cur.execute(
                     "DELETE FROM events "
                     "WHERE event_code = -1 "
+                    "  AND parameter != ? "
                     "  AND timestamp > ? "
                     "  AND timestamp < ?",
-                    (t_start, t_end),
+                    (CLOCK_STEP_FENCE_PARAM, t_start, t_end),
                 )
                 m.conn.commit()
             except sqlite3.Error as exc:

@@ -43,6 +43,7 @@ import pandas as pd
 import pytz
 
 from .manager import DatabaseManager, db_timezone
+from ..analysis.decoders import CLOCK_STEP_FENCE_PARAM
 from ..utils.timezone import to_epoch
 
 # ---------------------------------------------------------------------------
@@ -424,6 +425,8 @@ def check_data_quality(
 
     Returns:
         Dict of event/gap/cycle counts and a completeness percentage.
+        ``gap_count`` counts comms-gap markers only; backward-clock-step
+        fences are in ``clock_step_count``.
     """
     start_epoch, end_epoch = _bounds_to_epoch(db_path, start, end, timezone)
 
@@ -437,12 +440,15 @@ def check_data_quality(
         )
         event_count = cursor.fetchone()[0]
 
+        # Backward-clock-step fences are hard resets but not lost data, so
+        # they are reported apart from gaps and don't cost completeness.
         cursor.execute(
-            "SELECT COUNT(*) FROM events "
+            "SELECT COALESCE(SUM(parameter != ?), 0), "
+            "       COALESCE(SUM(parameter = ?), 0) FROM events "
             "WHERE timestamp >= ? AND timestamp < ? AND event_code = -1",
-            (start_epoch, end_epoch),
+            (CLOCK_STEP_FENCE_PARAM, CLOCK_STEP_FENCE_PARAM, start_epoch, end_epoch),
         )
-        gap_count = cursor.fetchone()[0]
+        gap_count, clock_step_count = cursor.fetchone()
 
         cursor.execute(
             "SELECT COUNT(*) FROM cycles "
@@ -459,6 +465,7 @@ def check_data_quality(
     return {
         'event_count':      event_count,
         'gap_count':        gap_count,
+        'clock_step_count': clock_step_count,
         'cycle_count':      cycle_count,
         'has_cycles':       cycle_count > 0,
         'completeness_pct': round(completeness, 2),

@@ -602,7 +602,9 @@ class IngestionEngine:
         )
         for post_step_ts, _ in steps:
             df = decoders.insert_gap_marker(
-                df, post_step_ts - _CLOCK_STEP_MARKER_LEAD
+                df,
+                post_step_ts - _CLOCK_STEP_MARKER_LEAD,
+                parameter=decoders.CLOCK_STEP_FENCE_PARAM,
             )
         return df
 

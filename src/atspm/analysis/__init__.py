@@ -10,6 +10,7 @@ Modules:
 - cycles:   Cycle detection and barrier logic
 - counts:   Vehicle and pedestrian count aggregations
 - aog:      Arrival on Green calculations
+- clock_marks: eos_set_time drift/set marker decoding
 """
 
 from .decoders import (
@@ -68,6 +69,14 @@ from .critical import (
 
 from .optimizer import optimize
 from .optimizer_validation import validate_plans
+from .clock_marks import (
+    MarkerPeds,
+    marker_peds_from_config,
+    drop_marker_events,
+    send_log_pulses,
+    pair_marker_pulses,
+    decode_clock_marks,
+)
 
 __all__ = [
     # Decoders
@@ -111,4 +120,11 @@ __all__ = [
     # Optimizer
     'optimize',
     'validate_plans',
+    # Clock marks
+    'MarkerPeds',
+    'marker_peds_from_config',
+    'drop_marker_events',
+    'send_log_pulses',
+    'pair_marker_pulses',
+    'decode_clock_marks',
 ]

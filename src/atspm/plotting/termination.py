@@ -362,7 +362,13 @@ def _classify_ped_service(
     df_p = df_p.dropna(subset=['parameter'])
     df_p['parameter'] = df_p['parameter'].astype(int)
 
-    df_p = df_p.sort_values(['_seg', 'parameter', 'timestamp']).reset_index(drop=True)
+    # A call (45) logged in the same decisecond as the walk (21) it brought
+    # up belongs to that service; 0.1 s resolution can't order them.
+    df_p = (
+        df_p.assign(_svc_last=(df_p['event_code'] == 21).astype(np.int8))
+        .sort_values(['_seg', 'parameter', 'timestamp', '_svc_last'], kind='stable')
+        .reset_index(drop=True)
+    )
 
     df_p['_is_21'] = (df_p['event_code'] == 21).astype(np.int8)
     df_p['_is_45'] = (df_p['event_code'] == 45).astype(np.int8)
@@ -370,10 +376,10 @@ def _classify_ped_service(
     df_p['_call_cum'] = df_p.groupby(['_seg', 'parameter'])['_is_45'].cumsum()
 
     df_p['_svc_grp'] = (
-        df_p.groupby(['_seg', 'parameter'])['_is_21']
-        .cumsum()
-        .shift(1)
-        .fillna(0)
+        # Exclusive running count of services within each (segment, phase):
+        # a service closes its own group.
+        df_p.groupby(['_seg', 'parameter'])['_is_21'].cumsum()
+        - df_p['_is_21']
     )
 
     df_p['_has_call'] = (

@@ -9,6 +9,7 @@ from typing import List, Tuple
 
 import pytest
 
+from atspm.analysis.decoders import CLOCK_STEP_FENCE_PARAM, COMMS_GAP_PARAM
 from atspm.data.manager import DatabaseManager
 from atspm.data.processing import CycleProcessor
 
@@ -192,3 +193,21 @@ class TestBackfillNoOps:
         seed_events(empty_db, [(BASE + 5, 1, 2)])
 
         assert CycleProcessor(empty_db).backfill_ring_phases() == 0
+
+
+class TestScrubGapMarkers:
+    """A filled gap's comms-gap markers go; clock-step fences inside it stay."""
+
+    def test_scrub_keeps_clock_step_fences(self, empty_db: Path):
+        seed_events(
+            empty_db,
+            [(BASE + 1.0, -1, COMMS_GAP_PARAM),
+             (BASE + 2.0, -1, CLOCK_STEP_FENCE_PARAM),
+             (BASE + 3.0, 1, 2)],
+        )
+        CycleProcessor(empty_db)._scrub_gap_markers(BASE, BASE + 10.0)
+
+        with DatabaseManager(empty_db) as m:
+            cur = m.conn.cursor()
+            cur.execute("SELECT timestamp, parameter FROM events WHERE event_code = -1")
+            assert cur.fetchall() == [(BASE + 2.0, CLOCK_STEP_FENCE_PARAM)]
