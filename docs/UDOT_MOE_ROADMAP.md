@@ -54,7 +54,7 @@ Measured 2026-09-30 on the 201, 313, 315 and 701 DBs:
 - **Available at some sites only:** 21–23 and 45 (ped walk and call; 315 and 701 only), 89/90 (ped detector on/off; 315 and 701), and 102–111 (preempt; 315 only, 24 events). 150–152 (coord state and yield point) appear at 315 only.
 - **Absent everywhere:** 112–119 (TSP) and 1xxx (ramp).
 - **Detector roles are per-channel, not shared.** At 201, P2 uses channel 49 for arrival, 60 for stop bar, 46 for occupancy and 63 for count (`TM_EBT`), so each radar zone is its own virtual channel. The existing `Det_P{N}_{Arrival,Stop_Bar,Occupancy,Pairs}` + `TM_*` families already give UDOT's "detection type" split: Arrival ≈ Advanced Count, Stop_Bar ≈ Stop Bar Presence, TM_* ≈ Lane-by-lane Count. **No new config category is needed** for the measures in track M, except lane/movement typing for the left-turn items.
-- **Config-key drift, a live bug:** every corpus `int_cfg` uses `Det_P{N}_Stop_Bar`. `critical.py` accepts both spellings (`_STOPBAR_KEY_RE`), but `FlowRateEngine._resolve_stopbar_detectors` (`data/flow.py:355`) matches only `_Stopbar`, so `flow` finds no stop-bar detectors on real config. `Det_P{N}_Occupancy` is read only by the coordination plot's marker legend. S-D0 fixes the drift.
+- **Config-key drift, a live bug:** every corpus `int_cfg` uses `Det_P{N}_Stop_Bar`. `critical.py` accepts both spellings (`_STOPBAR_KEY_RE`), but `FlowRateEngine._resolve_stopbar_detectors` (`data/flow.py:355`) matches only `_Stopbar`, so `flow` finds no stop-bar detectors on real config. `Det_P{N}_Occupancy` is read only by the coordination plot's marker legend. S-D0 fixes the drift. *(Corrected 2026-10-02: the flow drift had already been fixed by `9317f4e`, which routed flow through `_parse_stopbar_sets`. S-D0 then replaced every per-module parser with the role table; see S-D0.)*
 - **`WD_Sensor*` are watchdog zones (owner, 2026-09-30).** These are detection zones drawn where no vehicle can ever call them, so a call means the sensor unit is in failsafe. Logic statements (153/154) then switched the controller to an alternate detection plan. **They proved unreliable in the field.** Sometimes a watchdog zone stayed called while the unit was healthy and the other zones were calling normally; other times it worked as intended. So a watchdog-zone call is *evidence*, not a verdict (see the S-D2 rule). At 201 they are channels 56/57/58, configured only in the period starting 2020-01-01 and blank from 2026-06-01. They never actuate in 201's corpus window. **Logic statements 96–99 at 201 were the failsafe logic** (owner). They were disabled after the owner saw them misbehave, and their last event in the corpus is 2026-03-21. So controller-side failsafe corroboration exists only as history, for that 4-day window.
 - **That window is labeled failsafe data, and it reveals the signature.** At 2026-03-19 07:55:12, detector channels 1–16 all switch on in the same decisecond, together with LS 96/97 true. At 07:55:15, channels 17–32 do the same, together with LS 98/99. Each statement pair appears to watch one 16-channel block. Simultaneous phase 2/6 max-outs start at 07:55:03. The watchdog channels 56–58 log nothing, even though the logic fired.
 - **Corpus scan for that signature** (≥ 6 distinct channels turning on at one identical timestamp):
@@ -70,6 +70,24 @@ Measured 2026-09-30 on the 201, 313, 315 and 701 DBs:
 Sessions D0 → D1 → D2 run in order. D3, D4 and D5 can run in parallel after D2 (D5 needs only D0).
 
 - **S-D0: one detector-role parser, and the flow key fix.** *Gemini-eligible (Opus writes the tests).* Add a pure `parse_detector_roles(config) -> DataFrame[detector, phase, role, movement]` in `analysis/` covering `Det_P{N}_{Arrival, Stopbar|Stop_Bar, Occupancy, Pairs}` and `TM_*`. Point `data/aog.py`, `data/flow.py` and `analysis/critical.py`'s `_parse_stopbar_sets` at it, which fixes the `Stop_Bar` bug. Golden test: 201's real config row gives the expected role table, and `flow` on 201 is no longer empty. Small.
+
+  **Built 2026-10-02 (branch `feat/detector-roles`).**
+  - **Core (Opus):** `analysis/detector_roles.py`, with 34 golden tests on 201's and 315's real config rows.
+    - `parse_detector_roles(config)` returns `detector, phase, role, movement, partner, key`, with roles `arrival`, `stop_bar` (both spellings, merged), `occupancy`, `pairs` (one row per member, the other in `partner`), `tm` and `watchdog` (`WD_Sensor*` only, so later `WD_` settings keys aren't mistaken for zones).
+    - `movement` is the single `TM_*` label holding the detector. It is NaN when none or several hold it.
+    - No inference.
+  - **`detector_sets(roles, role)`:** returns `{phase: frozenset}`.
+  - **Call-site migration (Gemini, `delegate`, 884 s, check green on the first run):**
+    - `aog`, `flow`, `split_failures`, `optimizer` and `critical.movement_phase_map` now use the role table.
+    - `reader.get_det_config` (the coordination plot) builds `"P{N} Arrival|Stop Bar|Occupancy"` from it, so the two spellings no longer give two traces and `Pairs` keys no longer leak in.
+    - `critical`'s private parsers are deleted.
+    - Pinned by `tests/data/test_detector_role_callsites.py`. That file includes a source scan that fails if `Det_P` key matching reappears outside `detector_roles.py`. `manager._parse_detector_pairs` is the exception: it keeps pair order.
+  - **Verified on the 315 DB via the CLI:**
+    - `flow` P2/P6 written.
+    - `split-failures` lanes are exactly 34–36 and 50–52.
+    - `plot-coordination` has one Ar/Oc/St trace per configured phase.
+  - **The "flow is empty" premise was stale:** `flow` on 201 and 315 already found detectors on `main`. It's now a regression test.
+  - **Not done:** 201's config is unchanged (the owner decides on channel 41 and 60/63/64).
 - **S-D1: per-detector activity profile (functional core).** *Opus.* A pure function over events, returning per `(detector, bin)`: actuation count, total on-time and occupancy, max and p95 on-duration, count of on-pulses ≤ 0.1 s, min off-gap, whether it was on at the bin end, and whether it's configured (joined from S-D0). Reuse `_reconstruct_intervals` (`analysis/detectors.py:22`) rather than re-pairing, and vectorize it if it isn't already. Gap markers are strict: an on-interval with a `-1` between on and off is **censored** (reported as open, never measured), which also covers clock-step markers. Bin by local day plus a configurable sub-day window (UDOT's AM 1–5 and PM peak). Goldens: synthetic events for stuck-on, chatter, silence, an interval censored across a gap, and a DST-day bin.
 - **S-D2: health rules plus threshold calibration.** *Opus: a design decision and a verdict.* Rules to evaluate against the D1 profile:
   - Parity with the UDOT Watchdog: `LowDetectorHits`, `UnconfiguredDetector`, `RecordCount` (reuse `check_data_quality` / `utils/quality.py`), and **configured-but-silent**.
@@ -96,7 +114,7 @@ Sessions D0 → D1 → D2 run in order. D3, D4 and D5 can run in parallel after 
   - **Movement:** per-lane totals match across a chain; channels of one approach split totals by lane.
   - **Silence and drift:** configured-but-silent channels and active-but-unconfigured ones (201's 60/63/64 vs its active zones) are flagged, as is a suspect role (201 channel 41).
 
-  Output: a proposed role table with a confidence per row, diffed against the current config. Golden cases: 315's confirmed P2/P6 mapping, and its `TM_*` count loops. Depends on S-D0 (the role table it fills). Fills S-M1's `_Occupancy` (presence) keys and feeds S-D2's `UnconfiguredDetector` rule.
+  Output: a proposed role table with a confidence per row, diffed against the current config. Golden cases: 315's confirmed P2/P6 mapping, and its `TM_*` count loops. Depends on S-D0 (the role table it fills). Fills S-M1's `_Occupancy` (presence) keys and feeds S-D2's `UnconfiguredDetector` rule. **Scoped 2026-10-02:** design in `docs/design_detector_config_inference.md`. Read it before building S-D6. It covers 315's measured duration classes, the API, the steps (mode, then phase with concurrent-phase discrimination, then light-traffic lane chains), confidence, the diff statuses, the goldens and the calibration plan. Two owner questions are open: 315's unconfigured advance-like channels 37/53, and whether the diff should propose fixes or only flag them.
 
 ## 4. Track M — Remaining measures
 
