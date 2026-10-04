@@ -57,6 +57,7 @@ from .aog import (
     arrival_on_green,
     bin_arrival_on_green,
 )
+from .approach_delay import approach_delay, bin_approach_delay
 
 from .flow import (
     discharge_profiles,
@@ -87,6 +88,7 @@ from .clock_marks import (
 from .detector_roles import (
     parse_detector_roles,
     detector_sets,
+    arrival_travel_times,
 )
 
 from .detector_activity import detector_activity_profile
@@ -164,6 +166,10 @@ __all__ = [
     # Detector roles
     'parse_detector_roles',
     'detector_sets',
+    'arrival_travel_times',
+    # Approach delay
+    'approach_delay',
+    'bin_approach_delay',
     # Detector activity
     'detector_activity_profile',
     'HealthThresholds',

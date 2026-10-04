@@ -66,3 +66,5 @@ See CLAUDE.md "Documentation Workflow" for the rules.
 - [src/atspm/analysis/__init__.py] export PREEMPT_CODES, preempt_episodes, preempt_summary (new analysis/preempt.py)
 - [src/atspm/cli.py] new preempt subcommand
 - [src/atspm/data/__init__.py] export PreemptEngine, get_preempt
+- [src/atspm/analysis/__init__.py] export approach_delay, bin_approach_delay (new analysis/approach_delay.py), arrival_travel_times
+- [int_cfg.csv / config] new optional Det: P{N} Arrival Travel key (seconds) → Det_P{N}_Arrival_Travel

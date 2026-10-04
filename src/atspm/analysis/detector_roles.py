@@ -15,6 +15,13 @@ import turns ``int_cfg.csv`` rows into config columns::
     TM:  {label}          →  TM_{label}           role 'tm'
     WD:  Sensor{K}        →  WD_Sensor{K}         role 'watchdog'
 
+One non-role key rides with the arrival role (read by
+:func:`arrival_travel_times`, never turned into role rows)::
+
+    Det: P{N} Arrival Travel  →  Det_P{N}_Arrival_Travel  seconds, advance
+                                 detector → stop line ("5.4", or one value
+                                 per Det_P{N}_Arrival detector, in order)
+
 Role meanings (owner, 2026-10-02):
 
 - ``arrival`` — advance detection, upstream of the stop line (AoG, PCD).
@@ -36,6 +43,7 @@ import json
 import re
 from typing import Any, Dict, List
 
+import numpy as np
 import pandas as pd
 
 # Role names, in output sort order.
@@ -57,6 +65,7 @@ _SUFFIX_TO_ROLE = {
     "Pairs": "pairs",
 }
 _WATCHDOG_KEY_RE = re.compile(r"^WD_Sensor\d+$")
+_TRAVEL_KEY_RE = re.compile(r"^Det_P(\d+)_Arrival_Travel$")
 _TM_EXCLUDED_KEYS = frozenset({"TM_Exclusions"})
 
 _DTYPES = {
@@ -208,3 +217,49 @@ def detector_sets(roles: pd.DataFrame, role: str) -> Dict[int, frozenset]:
         int(phase): frozenset(int(d) for d in grp)
         for phase, grp in sub.groupby("phase")["detector"]
     }
+
+
+def arrival_travel_times(config: Dict[str, Any]) -> Dict[int, Dict[int, float]]:
+    """Per-detector travel times from the ``Det_P{N}_Arrival_Travel`` keys.
+
+    The value is seconds from the advance detector to the stop line: one
+    number applying to every ``Det_P{N}_Arrival`` detector of the phase, or a
+    comma list aligned with the ``Det_P{N}_Arrival`` list in its listed
+    order.  Phases without the key are absent (callers fall back to a
+    global offset).
+
+    Args:
+        config: Active config dict, e.g. from
+            ``DatabaseManager.get_config_at_date``.
+
+    Returns:
+        ``{phase: {detector: seconds}}``.
+
+    Raises:
+        ValueError: A travel value is not a non-negative number, its phase
+            has no ``Det_P{N}_Arrival`` detectors, or the list length is
+            neither 1 nor the number of arrival detectors.
+    """
+    out: Dict[int, Dict[int, float]] = {}
+    for key, raw in config.items():
+        match = _TRAVEL_KEY_RE.match(str(key))
+        if not match or _is_blank(raw):
+            continue
+        phase = int(match.group(1))
+        try:
+            secs = [float(tok) for tok in str(raw).split(",") if tok.strip()]
+        except ValueError:
+            raise ValueError(f"{key}: not a number list: {raw!r}") from None
+        if not secs or any(not np.isfinite(v) or v < 0 for v in secs):
+            raise ValueError(f"{key}: travel times must be non-negative seconds: {raw!r}")
+        dets = list(dict.fromkeys(_parse_id_list(config.get(f"Det_P{phase}_Arrival"))))
+        if not dets:
+            raise ValueError(f"{key} is set but Det_P{phase}_Arrival lists no detectors")
+        if len(secs) == 1:
+            secs = secs * len(dets)
+        elif len(secs) != len(dets):
+            raise ValueError(
+                f"{key} has {len(secs)} values for {len(dets)} arrival detectors {dets}"
+            )
+        out[phase] = dict(zip(dets, secs))
+    return out

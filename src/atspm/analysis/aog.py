@@ -44,7 +44,7 @@ Package Location: src/atspm/analysis/aog.py
 
 from __future__ import annotations
 
-from typing import List, Optional, Union
+from typing import List, Mapping, Optional, Union
 
 import numpy as np
 import pandas as pd
@@ -120,13 +120,17 @@ def _build_green_windows(
             green_ts      float | Timestamp  (Code 1 onset)
             yellow_ts     float | Timestamp  (Code 8 onset — exclusive bound)
             green_dur     float              (seconds)
+            yellow_end_ts float | Timestamp  (Code 9, else Code 10 — start of red)
+            seg           int                (gap-free segment id; consecutive
+                                              rows with equal ``seg`` have no
+                                              gap marker between them)
 
         One row per valid, gap-isolated green interval.  Returns an empty
         DataFrame with the correct schema when no valid intervals exist.
     """
     _EMPTY = pd.DataFrame(
         columns=["phase", "cycle_start", "coord_plan",
-                 "green_ts", "yellow_ts", "green_dur"]
+                 "green_ts", "yellow_ts", "green_dur", "yellow_end_ts", "seg"]
     )
 
     if events_df.empty:
@@ -187,14 +191,15 @@ def _build_green_windows(
     )
 
     return intervals[
-        ["phase", "cycle_start", "coord_plan", "green_ts", "yellow_ts", "green_dur"]
+        ["phase", "cycle_start", "coord_plan", "green_ts", "yellow_ts",
+         "green_dur", "yellow_end_ts", "seg"]
     ].reset_index(drop=True)
 
 
 def _shift_detector_timestamps(
     events_df: pd.DataFrame,
     detector_ids: List[int],
-    arrival_offset_sec: float,
+    arrival_offset_sec: Union[float, Mapping[int, float]],
 ) -> pd.DataFrame:
     """Return a copy of Code-82 rows with timestamps shifted by *arrival_offset_sec*.
 
@@ -204,9 +209,11 @@ def _shift_detector_timestamps(
     Args:
         events_df: Flat events DataFrame.
         detector_ids: ``parameter`` values identifying the advance detectors.
-        arrival_offset_sec: Seconds to add to each detector timestamp.
-            Positive values move arrivals forward in time (accounting for
-            travel time from an advance detector to the stop bar).
+        arrival_offset_sec: Seconds to add to each detector timestamp, or a
+            ``{detector: seconds}`` mapping for per-detector travel times
+            (detectors absent from the mapping are not shifted).  Positive
+            values move arrivals forward in time (accounting for travel time
+            from an advance detector to the stop bar).
 
     Returns:
         DataFrame of Code-82 rows with shifted ``timestamp`` values, sorted
@@ -222,16 +229,21 @@ def _shift_detector_timestamps(
     if det.empty:
         return det
 
-    if arrival_offset_sec != 0.0:
-        sample_ts = det["timestamp"].iloc[0]
-        if hasattr(sample_ts, "timestamp"):
-            # tz-aware Timestamp path — use pd.Timedelta
-            det["timestamp"] = (
-                det["timestamp"] + pd.Timedelta(seconds=arrival_offset_sec)
-            )
+    if isinstance(arrival_offset_sec, Mapping):
+        offsets = (
+            det["parameter"].map(dict(arrival_offset_sec)).fillna(0.0)
+            .astype(float).to_numpy()
+        )
+    else:
+        offsets = np.full(len(det), float(arrival_offset_sec))
+
+    if np.any(offsets != 0.0):
+        if pd.api.types.is_datetime64_any_dtype(det["timestamp"]):
+            # Timestamp path — add a Timedelta per row
+            det["timestamp"] = det["timestamp"] + pd.to_timedelta(offsets, unit="s")
         else:
             # epoch float path — plain addition
-            det["timestamp"] = det["timestamp"] + arrival_offset_sec
+            det["timestamp"] = det["timestamp"] + offsets
 
     return det.sort_values("timestamp").reset_index(drop=True)
 
