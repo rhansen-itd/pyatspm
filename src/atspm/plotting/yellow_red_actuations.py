@@ -94,7 +94,7 @@ def plot_yellow_red(
                     custom = np.column_stack([
                         sub["detector"].astype(str),
                         sub["state"].astype(str),
-                        sub["t_red"].map(lambda v: f"{v:.2f}" if pd.notna(v) else ""),
+                        sub["t_red"].astype(float).round(2).astype(str),
                     ])
 
                     fig.add_trace(

@@ -36,7 +36,6 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
-import numpy as np
 import pandas as pd
 
 from .critical import CriticalMovementEngine
@@ -48,6 +47,7 @@ from ..analysis.detector_roles import (
     parse_detector_roles,
     phase_overlaps,
 )
+from ..analysis.detector_inference import _to_epoch
 from ..analysis.yellow_red_actuations import (
     ACTUATION_SCHEMA,
     CYCLE_SCHEMA,
@@ -65,19 +65,6 @@ from ..utils.timezone import to_epoch
 _ALL_YRA_CODES: List[int] = [-1, 1, 8, 9, 10, 11, 12, 61, 63, 64, 65, 82]
 FETCH_MARGIN_S: float = 1800.0
 ROLES: Tuple[str, ...] = ("stop_bar", "occupancy")
-
-
-def _to_epoch(ts: pd.Series) -> np.ndarray:
-    """Convert a timestamp Series (tz-aware datetime or epoch float) to UTC epoch float."""
-    if pd.api.types.is_datetime64_any_dtype(ts):
-        if getattr(ts.dt, "tz", None) is None:
-            ts = ts.dt.tz_localize("UTC")
-        return (
-            (ts.dt.tz_convert("UTC") - pd.Timestamp("1970-01-01", tz="UTC"))
-            .dt.total_seconds()
-            .to_numpy()
-        )
-    return ts.to_numpy(dtype=float)
 
 
 # ---------------------------------------------------------------------------
