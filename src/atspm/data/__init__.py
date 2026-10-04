@@ -80,6 +80,11 @@ from .clock_marks import (
     get_clock_marks,
 )
 
+from .preempt import (
+    PreemptEngine,
+    get_preempt,
+)
+
 from .detector_inference import (
     DetectorInferenceEngine,
     get_detector_inference,
@@ -158,6 +163,9 @@ __all__ = [
     # Clock marks
     'ClockMarkEngine',
     'get_clock_marks',
+    # Preemption
+    'PreemptEngine',
+    'get_preempt',
     # Detector Inference
     'DetectorInferenceEngine',
     'get_detector_inference',

@@ -23,6 +23,7 @@ Exposes subcommands from intersection configuration setup through reporting and 
     atspm video-sync         --targetid <id> [...]       Find corrected --start from signal lamps
     atspm optimize           --targetid <id> [...]       Optimize cycle length and splits for saturated throughput
     atspm clock-drift        --targetid <id> [...]       Decode clock marks and plot controller clock drift
+    atspm preempt            --targetid <id> [...]       Analyze preemption episodes and write CSV tables
 
 The package must be installed (``pip install -e .``) for the ``atspm`` entry
 point to be available.  All logic uses clean absolute imports from the
@@ -1585,6 +1586,109 @@ def handle_clock_drift(args: argparse.Namespace) -> None:
             print(
                 f"\n❌ Unexpected error in clock drift analysis for "
                 f"{target_name}: {exc}",
+                file=sys.stderr,
+            )
+            if getattr(args, "verbose", False):
+                traceback.print_exc()
+
+
+# ---------------------------------------------------------------------------
+# preempt
+# ---------------------------------------------------------------------------
+
+def _preempt_single_intersection(target_name: str, args: argparse.Namespace) -> None:
+    """Core logic to analyze preemption episodes for one intersection.
+
+    Resolves the database path and timezone from ``metadata.json``, then
+    delegates to :class:`atspm.data.preempt.PreemptEngine`. All I/O
+    (SQL queries, CSV writing) is handled inside the engine.
+
+    Args:
+        target_name: Exact intersection folder name
+            (e.g., ``'2068_US-95_and_SH-8'``).
+        args: Parsed CLI arguments from the ``preempt`` subcommand.
+    """
+    from atspm.data.preempt import PreemptEngine
+
+    target_dir = _get_target_dir(target_name)
+    meta = _load_metadata(target_dir)
+    db_path = _resolve_db_path(target_dir, meta)
+
+    output_dir = target_dir / "outputs"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    int_name = meta.get("intersection_name", target_name)
+    timezone = args.timezone or meta.get("timezone") or DEFAULT_TIMEZONE
+
+    if not db_path.exists():
+        _die(
+            f"Database not found: {db_path}\n"
+            f"Run 'atspm process --target {target_name}' first."
+        )
+
+    print(f"\n🚨  Preemption analysis for {int_name}")
+    print(f"    DB:     {db_path.name}")
+    print(f"    Window: {args.start} → {args.end}")
+
+    engine = PreemptEngine(db_path=db_path, timezone=timezone)
+
+    try:
+        res = engine.preempt(
+            start=args.start,
+            end=args.end,
+            output_dir=output_dir,
+        )
+    except Exception as exc:
+        if args.verbose:
+            traceback.print_exc()
+        _die(f"Preemption analysis failed: {exc}")
+
+    episodes = res.get("episodes")
+    if episodes is None or episodes.empty:
+        print("  No preemption requests found.")
+        return
+
+    import pandas as pd
+    for p, group in episodes.groupby("preempt", sort=True):
+        reqs = len(group)
+        served = int(group["served"].sum())
+        unserved = int((~group["served"] & ~group["censored"]).sum())
+        censored = int(group["censored"].sum())
+        max_pres = int(group["max_presence"].sum())
+        dwell = group.loc[group["served"] & ~group["censored"], "dwell_s"].dropna()
+        mean_dwell = f"{dwell.mean():.1f}s" if not dwell.empty else "N/A"
+        max_dwell = f"{dwell.max():.1f}s" if not dwell.empty else "N/A"
+        print(
+            f"  Preempt {p}: {reqs} requests, {served} served, {unserved} unserved, "
+            f"{censored} censored, {max_pres} max-presence hits, "
+            f"dwell: {mean_dwell} mean / {max_dwell} max"
+        )
+
+
+def handle_preempt(args: argparse.Namespace) -> None:
+    """Analyze preemption episodes for one or more intersections.
+
+    Args:
+        args: Parsed CLI arguments from the ``preempt`` subcommand.
+    """
+    intersections_dir = _get_intersections_dir()
+
+    if getattr(args, "all", False):
+        targets = [p.name for p in intersections_dir.iterdir() if p.is_dir()]
+        if not targets:
+            _die(f"No intersection directories found in {intersections_dir}")
+        print(f"\n🌍 Batch preemption analysis for {len(targets)} intersections...")
+    else:
+        targets = [_resolve_target_name(args.target, args.targetid)]
+
+    for target_name in targets:
+        try:
+            _preempt_single_intersection(target_name, args)
+        except SystemExit:
+            print(f"\n⏭️ Skipping {target_name} due to errors.", file=sys.stderr)
+        except Exception as exc:
+            print(
+                f"\n❌ Unexpected error in preemption analysis for {target_name}: {exc}",
                 file=sys.stderr,
             )
             if getattr(args, "verbose", False):
@@ -3698,6 +3802,68 @@ def _add_clock_drift_parser(subs: argparse._SubParsersAction) -> None:
     p_clk.set_defaults(func=handle_clock_drift)
 
 
+def _add_preempt_parser(subs: argparse._SubParsersAction) -> None:
+    """Attach the ``preempt`` subcommand parser."""
+    p_preempt = subs.add_parser(
+        "preempt",
+        help="Analyze preemption episodes and write episode and summary tables.",
+        description=(
+            "Analyze preemption episodes from controller events and write\n"
+            "episode and summary CSV tables.\n\n"
+            "Outputs are saved to:\n"
+            "  intersections/<target>/outputs/"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    group = p_preempt.add_mutually_exclusive_group(required=True)
+    group.add_argument(
+        "--target",
+        metavar="FOLDER",
+        help="Exact intersection folder name (e.g. '2068_US-95_and_SH-8').",
+    )
+    group.add_argument(
+        "--targetid",
+        metavar="ID",
+        help="Intersection ID prefix (e.g. '2068').",
+    )
+    group.add_argument(
+        "--all",
+        action="store_true",
+        help="Run the analysis for all intersections in the directory.",
+    )
+    p_preempt.add_argument(
+        "--start",
+        required=True,
+        metavar="DATETIME",
+        help=(
+            "Period start (local time): 'YYYY-MM-DD' or 'YYYY-MM-DD HH:MM' "
+            "for sub-day peak periods."
+        ),
+    )
+    p_preempt.add_argument(
+        "--end",
+        required=True,
+        metavar="DATETIME",
+        help=(
+            "Period end (local time): 'YYYY-MM-DD' (inclusive whole day) or "
+            "'YYYY-MM-DD HH:MM' (exclusive)."
+        ),
+    )
+    p_preempt.add_argument(
+        "--timezone",
+        default=None,
+        metavar="TZ",
+        help="Override the timezone from metadata.json (e.g. 'US/Pacific').",
+    )
+    p_preempt.add_argument(
+        "--verbose",
+        action="store_true",
+        default=False,
+        help="Print full tracebacks for any errors.",
+    )
+    p_preempt.set_defaults(func=handle_preempt)
+
+
 def _add_plot_coordination_parser(subs: argparse._SubParsersAction) -> None:
     """Attach the ``plot-coordination`` subcommand parser."""
     p_coord = subs.add_parser(
@@ -4097,6 +4263,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_critical_parser(subs)
     _add_optimize_parser(subs)
     _add_clock_drift_parser(subs)
+    _add_preempt_parser(subs)
     _add_plot_coordination_parser(subs)
     _add_plot_termination_parser(subs)
     _add_discrepancies_parser(subs)
