@@ -18,6 +18,7 @@ Modules:
 from .manager import DatabaseManager, init_db, import_config
 from .retrieval import RetrievalEngine, run_retrieval
 from .ingestion import IngestionEngine, run_ingestion
+from .achd_ingestion import AchdIngestionEngine, run_achd_ingestion
 from .processing import CycleProcessor, run_cycle_processing
 from .reader import (
     get_events_with_cycles_df,
@@ -161,6 +162,9 @@ __all__ = [
     # Ingestion
     'IngestionEngine',
     'run_ingestion',
+    # ACHD ingestion
+    'AchdIngestionEngine',
+    'run_achd_ingestion',
     # Processing
     'CycleProcessor',
     'run_cycle_processing',

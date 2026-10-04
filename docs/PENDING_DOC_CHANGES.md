@@ -95,3 +95,10 @@ See CLAUDE.md "Documentation Workflow" for the rules.
 - [src/atspm/data/sync.py] new project-agnostic sync engine (SyncItem, SyncResult, ItemState, sync_item, item_state, copy_verify_file, copy_verify_dir, human_bytes)
 - [src/atspm/data/__init__.py] export SyncItem, SyncResult, ItemState, sync_item, item_state, copy_verify_file, copy_verify_dir, human_bytes
 - [src/atspm/cli.py] new sync subcommand (status/pull/push, --release, --archive-root/--save, --components, --quick, --checksum, --dry-run); archive root via flag/env ATSPM_SYNC_ARCHIVE_ROOT/.atspm_sync.json
+
+
+- [src/atspm/analysis/achd.py] new ACHD event-CSV parser (functional core): parse_achd_header, achd_events_from_frame
+- [src/atspm/analysis/__init__.py] export AchdDecodingError, AchdHeader, achd_events_from_frame, parse_achd_header
+- [src/atspm/data/achd_ingestion.py] new AchdIngestionEngine, run_achd_ingestion (ACHD CSV → events/ingestion_log/metadata; comms-gap fencing; intersections/achd/<id>/)
+- [src/atspm/data/__init__.py] export AchdIngestionEngine, run_achd_ingestion
+- [src/atspm/cli.py] new ingest-achd subcommand (--targetid/--all, --source, --timezone, --rebuild); also imports intersections/achd/<id>/int_cfg.csv into the DB config table when present (non-fatal), mirroring process
