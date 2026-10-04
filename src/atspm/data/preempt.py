@@ -177,9 +177,11 @@ class PreemptEngine:
             episodes_csv["timing_plot"] = pd.Series(dtype="object")
         else:
             tz = resolve_pytz(self.timezone)
+            # Round to the logger's decisecond first: 159.6 is stored as
+            # 159.5999..., which truncating %f would print as .5.
             dt_call_on = pd.to_datetime(
                 episodes_csv["call_on"], unit="s", utc=True
-            ).dt.tz_convert(tz)
+            ).dt.round("100ms").dt.tz_convert(tz)
             episodes_csv["call_on_local"] = (
                 dt_call_on.dt.strftime("%Y-%m-%dT%H:%M:%S.%f").str[:-5]
             )

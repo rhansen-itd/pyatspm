@@ -38,7 +38,7 @@ def seeded_db(empty_db: Path) -> Path:
         (t + 36.3, 116, 5), (t + 41.4, 111, 5),
         (t + 600, 102, 4), (t + 604, 104, 4),                    # unserved
         (u, 102, 4), (u, 105, 4), (u + 5, 107, 4), (u + 30, 104, 4), (u + 35, 111, 4),
-        (_loc("2026-01-12 09:00"), 102, 3), (_loc("2026-01-12 09:00"), 105, 3),
+        (_loc("2026-01-12 09:00:00.6"), 102, 3), (_loc("2026-01-12 09:00:00.6"), 105, 3),
         (_loc("2026-01-12 09:00:05"), 107, 3), (_loc("2026-01-12 09:00:30"), 104, 3),
         (_loc("2026-01-12 09:00:35"), 111, 3),
     ]
@@ -79,6 +79,8 @@ class TestEngine:
         ep = pd.read_csv(out / names[0])
         # local wall-clock companion of call_on, ISO seconds
         assert ep["call_on_local"].iloc[0] == "2026-01-10T08:00:00.5"
+        # 0.6 isn't exact in binary: must still print .6, not .5
+        assert ep["call_on_local"].iloc[3] == "2026-01-12T09:00:00.6"
         cmd = shlex.split(ep["timing_plot"].iloc[0])
         assert cmd[:2] == ["atspm", "plot-timing-actuation"]
         assert cmd[cmd.index("--targetid") + 1] == "315"
