@@ -157,6 +157,17 @@ def test_phase_fya_code12_mid_green_continues():
     assert ("phase", 2, "G", 10.0, 40.0, False, False) in _rel(iv)
 
 
+def test_phase_repeated_begin_green_leaves_lost_span_blank():
+    """315 2025-12-15 08:44: P4 green, a 55 s unlogged hole, P4 green again.
+
+    The first green's end was never logged; the second is the real one.
+    """
+    ev = _ev([(0, 1, 4), (88, 1, 4), (110, 8, 4), (114, 9, 4)])
+    rel = _rel(_iv(ev, w=(-10, 120), d=(-10, 120))["intervals"])
+    assert ("phase", 4, "G", 88.0, 110.0, False, False) in rel
+    assert not any(r[2] == "G" and r[3] < 88 for r in rel)
+
+
 def test_phase_dummy_green_ends_at_code12():
     ev = _ev([(10, 1, 9), (20, 12, 9), (50, 1, 9), (60, 12, 9)])
     iv = _iv(ev, w=(0, 70))["intervals"]
@@ -223,16 +234,9 @@ def _assert_parity(ev, w0, w1):
     pe["_seg"] = _segment_id(pe)
     pe = pe.loc[pe["event_code"] != -1]
     bp = _build_phase_intervals(pe)
-    # Each reference interval lies inside one of ours with the same end.  The
-    # start can be earlier: 315's P4 logs a second Code 1 mid-green, which
-    # _build_phase_intervals treats as a fresh green and the plot doesn't.
     for state, a, b in (("G", "green_ts", "yellow_ts"), ("Y", "yellow_ts", "yellow_end_ts")):
         got = iv.loc[(iv["kind"] == "phase") & (iv["state"] == state)]
-        m = pd.merge_asof(
-            bp.sort_values(a), got.sort_values("start_ts"),
-            left_on=a, right_on="start_ts", left_by="phase", right_by="param",
-            direction="backward",
-        )
+        m = bp.merge(got, left_on=["phase", a], right_on=["param", "start_ts"], how="left")
         assert m["end_ts"].notna().all(), state
         np.testing.assert_allclose(m["end_ts"], m[b])
 

@@ -216,7 +216,11 @@ Sessions D0 → D1 → D2 run in order. D3, D4 and D5 can run in parallel after 
   - **Reuse note:** `_build_phase_intervals` / `_reconstruct_intervals` drop states that aren't complete within the fetched data, but a timing plot must draw a detector stuck on across the whole window. So the core draws event to event, infers the leading state from the first code (never after a gap marker), and flags `open_start`/`open_end`. A golden checks it against both helpers (synthetic, 201, 315).
   - **Findings while building:**
     - 201 logs Code 11 and the next Code 1 in the same decisecond, so at one instant the end-of-cycle codes sort before Code 1.
-    - **315's P4 logs a second Code 1 about 88 s into an unbroken green.** `_build_phase_intervals` restarts the green there, so splits and AoG at 315 likely under-count that green. *Open: not yet investigated.*
+    - **A Begin Green while already green means a lost green end, not a re-service** (investigated 2026-10-03, branch `fix/phase-double-green`). There are 2 cases across the corpus, in about 68k greens:
+      - 315 2025-12-15 08:44:04 (P4/P8): a 55 s hole with no events at all, the signature of a forward clock set.
+      - 313 2026-08-05 15:36 (P6/P8): a logged Code 181 *Controller Clock Updated*, param 128.
+
+      Both times the second green is genuine and the first one's yellow/clearance was never logged. So `_build_phase_intervals`' restart (drop the unended green, keep the real one) is **correct, and splits/AoG are unaffected**. The timing plot had merged the two into one fictitious green; it now leaves the span blank, and parity is exact again.
     - The S-D4 shell's `astype(int64)/1e9` epoch conversion broke on whole-second fetches (`datetime64[s]` → 1969); now fixed with the core's `_to_epoch`. Gemini's stop-and-ask caught it.
   - **Verified (`/verify`).** Scratch DB: the cap holds; filters and suffixes are in the file names; a stuck-on detector fills the window and is cut at a hard reset; CSV links run as written. Corpus **201** (on a copy): the Failsafe link is centred on 01:55:12, where the plot shows 16 channels on in one decisecond with a median 73.7 s release, matching the S-D4 record. June's ConfiguredSilent links (49, 51, 53, 60, 61, 63, 64) open plots where 60/63 are empty rows beside active peers; TM-only 61 links by `--detectors`.
   - **Known gap:** with a single target, a capped window prints the error but exits 0, because the handler swallows `SystemExit` as `plot-detectors` does.

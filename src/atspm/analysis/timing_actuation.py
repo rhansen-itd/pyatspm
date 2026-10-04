@@ -200,6 +200,16 @@ def _kind_intervals(
 
     state = ev["code"].map(enter).to_numpy(dtype=object)
 
+    if kind == "phase":
+        # A Begin Green while already green means the green's end was never
+        # logged (a silent hole, or a clock update: 315 2025-12-15 08:44,
+        # 313 2026-08-05 15:36).  The second green is the real one; the span
+        # before it is unknown, so it stays blank rather than merging into a
+        # green that never ran.  _build_phase_intervals drops it the same way.
+        c = ev["code"].to_numpy()
+        lost_end = (c == 1) & same_next & (np.append(c[1:], -999) == 1)
+        state[lost_end] = None
+
     end = np.minimum(np.minimum(next_t, next_gap), data_end)
     # End not logged: cut by a gap marker, or the last event of the param.
     open_end = (next_gap < next_t) | ~same_next
