@@ -15,6 +15,7 @@ Modules:
 - detector_health: Deterministic detector-health rules and onset bursts
 - clock_marks: eos_set_time drift/set marker decoding
 - timing_actuation: Timing-and-actuation intervals, row layout, finding links
+- preempt: Preemption request/service episodes and daily summary
 """
 
 from .decoders import (
@@ -109,6 +110,11 @@ from .timing_actuation import (
     timing_actuation_intervals,
     timing_actuation_rows,
 )
+from .preempt import (
+    PREEMPT_CODES,
+    preempt_episodes,
+    preempt_summary,
+)
 
 __all__ = [
     # Decoders
@@ -184,4 +190,8 @@ __all__ = [
     'ring_phase_order',
     'timing_actuation_intervals',
     'timing_actuation_rows',
+    # Preemption
+    'PREEMPT_CODES',
+    'preempt_episodes',
+    'preempt_summary',
 ]

@@ -63,3 +63,4 @@ See CLAUDE.md "Documentation Workflow" for the rules.
 - [src/atspm/cli.py] new plot-timing-actuation subcommand
 - [src/atspm/data/__init__.py] export TimingActuationEngine, get_timing_actuation
 - [src/atspm/data/detector_health.py] reported findings / CSV gain timing_plot command column
+- [src/atspm/analysis/__init__.py] export PREEMPT_CODES, preempt_episodes, preempt_summary (new analysis/preempt.py)
