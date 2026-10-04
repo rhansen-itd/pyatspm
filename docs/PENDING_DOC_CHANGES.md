@@ -77,3 +77,6 @@ See CLAUDE.md "Documentation Workflow" for the rules.
 - [src/atspm/plotting/__init__.py] export plot_split_monitor
 - [src/atspm/analysis/__init__.py] export yellow_red_actuations, summarize_yellow_red, phase_overlaps
 - [int_cfg.csv / config] new optional Det: P{N} Overlap key (overlap number or letter) → Det_P{N}_Overlap
+- [src/atspm/cli.py] new yellow-red subcommand
+- [src/atspm/data/__init__.py] export YellowRedEngine, get_yellow_red
+- [src/atspm/plotting/__init__.py] export plot_yellow_red

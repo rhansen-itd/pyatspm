@@ -59,6 +59,11 @@ from .approach_delay import (
     get_approach_delay,
 )
 
+from .yellow_red_actuations import (
+    YellowRedEngine,
+    get_yellow_red,
+)
+
 from .split_monitor import (
     SplitMonitorEngine,
     get_split_monitor,
@@ -160,6 +165,9 @@ __all__ = [
     # Approach Delay
     'ApproachDelayEngine',
     'get_approach_delay',
+    # Yellow and Red Actuations
+    'YellowRedEngine',
+    'get_yellow_red',
     # Split Monitor
     'SplitMonitorEngine',
     'get_split_monitor',

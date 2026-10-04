@@ -17,6 +17,7 @@ from .optimizer import (
 from .clock_marks import plot_clock_drift
 from .split_failures import plot_split_failures
 from .approach_delay import plot_approach_delay
+from .yellow_red_actuations import plot_yellow_red
 from .split_monitor import plot_split_monitor
 from .detector_health import plot_detector_health
 from .timing_actuation import plot_timing_actuation
@@ -32,6 +33,7 @@ __all__ = [
     'plot_clock_drift',
     'plot_split_failures',
     'plot_approach_delay',
+    'plot_yellow_red',
     'plot_split_monitor',
     'plot_detector_health',
     'plot_timing_actuation',
