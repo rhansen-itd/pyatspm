@@ -148,7 +148,7 @@ def approach_volume(
         pair and direction.  ``n_bins`` is the bin count of the local day
         (92/96/100 at 15 min), ``n_complete`` its complete bins;
         ``peak_start`` is NaT and the peak columns NA when no hour of
-        complete bins exists; ``pair_peak_volume`` is the combined volume
+        complete bins exists or every such hour is empty; ``pair_peak_volume`` is the combined volume
         in this row's peak hour; ``k_factor`` needs ``complete_day``;
         ``d_factor`` is NA for the combined row.
 
@@ -250,8 +250,9 @@ def _day_rows(idx, complete, series, names, both, pair, bin_len, k):
                 "peak_bin_volume": pd.NA, "phf": np.nan,
                 "pair_peak_volume": pd.NA, "k_factor": np.nan, "d_factor": np.nan,
             }
-            if full.any():
-                win = _window_sum(g, k)
+            win = _window_sum(g, k) if full.any() else full
+            # No peak without traffic: an all-zero day ties every hour at 0.
+            if full.any() and win[full].max() > 0:
                 cand = np.where(full, win, -1)
                 i = int(np.argmax(cand))  # first maximum = earliest hour
                 peak = int(win[i])

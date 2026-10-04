@@ -209,6 +209,20 @@ def test_no_complete_hour_gives_no_peak():
     assert n_["total_volume"] == 15 and n_["n_complete"] == 3
 
 
+def test_empty_direction_has_no_peak():
+    # 313: EB/WB channels never log; an all-zero day has no peak hour.
+    n = 96
+    _, days = approach_volume(_counts({1: np.ones(n), 3: np.zeros(n)}), {"NBT": [1], "SBT": [3]})
+    s_ = _row(days, "SB")
+    assert s_["total_volume"] == 0 and s_["complete_day"]
+    assert pd.isna(s_["peak_start"]) and pd.isna(s_["peak_volume"])
+    assert pd.isna(s_["d_factor"]) and pd.isna(s_["k_factor"])
+    n_ = _row(days, "NB")
+    assert n_["d_factor"] == pytest.approx(1.0)   # opposing configured, empty
+    _, days = approach_volume(_counts({4: np.zeros(n)}), {"EBT": [4], "WBT": [5]})
+    assert days["peak_start"].isna().all() and days["k_factor"].isna().all()
+
+
 def test_partial_window_has_peak_but_no_k():
     idx = _grid(n=8)                       # 00:00 .. 02:00
     v = [1, 2, 3, 4, 5, 6, 7, 8]
