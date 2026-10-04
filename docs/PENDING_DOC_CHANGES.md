@@ -92,3 +92,6 @@ See CLAUDE.md "Documentation Workflow" for the rules.
 - [src/atspm/cli.py] new approach-volume subcommand
 - [src/atspm/data/__init__.py] export ApproachVolumeEngine, get_approach_volume
 - [src/atspm/plotting/__init__.py] export plot_approach_volume
+- [src/atspm/data/sync.py] new project-agnostic sync engine (SyncItem, SyncResult, ItemState, sync_item, item_state, copy_verify_file, copy_verify_dir, human_bytes)
+- [src/atspm/data/__init__.py] export SyncItem, SyncResult, ItemState, sync_item, item_state, copy_verify_file, copy_verify_dir, human_bytes
+- [src/atspm/cli.py] new sync subcommand (status/pull/push, --release, --archive-root/--save, --components, --quick, --checksum, --dry-run); archive root via flag/env ATSPM_SYNC_ARCHIVE_ROOT/.atspm_sync.json

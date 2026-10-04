@@ -7,6 +7,9 @@ env/
 .env
 .ipynb_checkpoints/
 
+# --- Per-host sync config (archive drive path differs per machine) ---
+.atspm_sync.json
+
 # --- IDE Settings ---
 .vscode/
 .idea/

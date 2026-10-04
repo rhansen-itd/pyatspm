@@ -4,6 +4,7 @@ ATSPM Unified Command-Line Interface
 Exposes subcommands from intersection configuration setup through reporting and visualization:
 
     atspm setup              --targetid <id>             Create a new intersection environment
+    atspm sync               {status,pull,push} [...]    Move intersection data between local and archive drives
     atspm retrieve           --targetid <id> [...]       Pull new .datZ files from configured devices via SCP
     atspm process            --targetid <id> [...]       Ingest data and compute cycles
     atspm report             --targetid <id> [...]       Generate ATSPM performance reports
@@ -43,6 +44,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 import traceback
@@ -3498,6 +3500,382 @@ def _reprocess_date(processor, date_str: str, timezone: Optional[str] = None) ->
     processor.process_span(t_start, t_end, fill_gaps=True)
 
 
+# ---------------------------------------------------------------------------
+# sync
+# ---------------------------------------------------------------------------
+#
+# Moves bulky intersection data between the local working drive and an archive
+# drive (external SSD).  The engine in ``atspm.data.sync`` is project-agnostic;
+# everything below is the pyATSPM adapter — it maps an intersection directory
+# to sync units and resolves the per-host archive root.  SQLite/DuckDB can't be
+# queried over the 9p removable-media share, so the workflow is: pull a DB to
+# local, work on it, push results back, and (on the space-constrained dev box)
+# release the local copy.  The same command runs on the production machine to
+# push freshly pulled data to the SSD.
+
+_SYNC_CONFIG_FILENAME = ".atspm_sync.json"
+_SYNC_ARCHIVE_ENV = "ATSPM_SYNC_ARCHIVE_ROOT"
+_SYNC_GROUPS = ("db", "raw", "outputs", "video", "config", "other")
+
+
+def _sync_config_path() -> Path:
+    """Return the path to the per-project sync config file (may not exist)."""
+    return _find_project_root() / _SYNC_CONFIG_FILENAME
+
+
+def _load_sync_config() -> dict:
+    """Read ``.atspm_sync.json`` from the project root, or ``{}`` if absent."""
+    path = _sync_config_path()
+    if not path.exists():
+        return {}
+    try:
+        with path.open() as fh:
+            return json.load(fh)
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def _save_sync_config(cfg: dict) -> None:
+    """Write ``cfg`` to ``.atspm_sync.json`` in the project root."""
+    with _sync_config_path().open("w") as fh:
+        json.dump(cfg, fh, indent=4)
+
+
+def _get_archive_root(args: argparse.Namespace, *, must_exist: bool) -> Path:
+    """Resolve the archive-drive root (the mirror of ``intersections/``).
+
+    Precedence: ``--archive-root`` flag > ``ATSPM_SYNC_ARCHIVE_ROOT`` env var
+    > the ``archive_root`` key in ``.atspm_sync.json``.  ``~`` and ``$VARS``
+    are expanded.  With ``--save`` the resolved path is persisted to the config
+    file so each machine sets its own archive root once.
+
+    Args:
+        args:       Parsed CLI arguments (reads ``archive_root`` and ``save``).
+        must_exist: Exit with an error if the resolved root does not exist.
+
+    Returns:
+        Absolute Path to the archive root.
+
+    Raises:
+        SystemExit: If no archive root is configured, or ``must_exist`` fails.
+    """
+    raw = getattr(args, "archive_root", None) or os.environ.get(_SYNC_ARCHIVE_ENV)
+    if not raw:
+        raw = _load_sync_config().get("archive_root")
+    if not raw:
+        _die(
+            "No archive root configured.\n"
+            "    Set it once with:\n"
+            f"      atspm sync status --all --archive-root /path/to/archive/intersections --save\n"
+            f"    or export {_SYNC_ARCHIVE_ENV}=/path/to/archive/intersections\n"
+            "    (point it at the directory that mirrors this project's "
+            "'intersections/' folder on the archive drive)."
+        )
+
+    root = Path(os.path.expanduser(os.path.expandvars(str(raw)))).resolve()
+
+    if getattr(args, "save", False):
+        _save_sync_config({**_load_sync_config(), "archive_root": str(root)})
+        print(f"💾  Saved archive root to {_sync_config_path().name}: {root}")
+
+    if must_exist and not root.exists():
+        _die(
+            f"Archive root does not exist: {root}\n"
+            "    Check that the archive drive is mounted and the path is correct."
+        )
+    return root
+
+
+def _resolve_sync_target(
+    target: Optional[str],
+    targetid: Optional[str],
+    archive_root: Path,
+) -> str:
+    """Resolve an intersection folder name, searching local then archive.
+
+    Unlike :func:`_resolve_target_name`, this also matches intersections that
+    exist only on the archive drive (so they can be pulled for the first time).
+
+    Args:
+        target:       Exact folder name, or ``None``.
+        targetid:     Intersection ID prefix, or ``None``.
+        archive_root: Archive mirror of ``intersections/``.
+
+    Returns:
+        The exact folder name.
+
+    Raises:
+        SystemExit: On no match or an ambiguous ID.
+    """
+    if target:
+        return target
+    if not targetid:
+        _die("Either --target or --targetid must be provided.")
+
+    names = set()
+    local_dir = _get_intersections_dir()
+    if local_dir.exists():
+        names |= {p.name for p in local_dir.iterdir() if p.is_dir()}
+    if archive_root.exists():
+        names |= {p.name for p in archive_root.iterdir() if p.is_dir()}
+
+    matches = sorted(n for n in names if n.split("_")[0] == str(targetid))
+    if not matches:
+        _die(f"No intersection folder found for ID '{targetid}' (local or archive).")
+    if len(matches) > 1:
+        _die(f"Multiple folders found for ID '{targetid}': {', '.join(matches)}")
+    return matches[0]
+
+
+def _intersection_sync_items(target_name: str, archive_root: Path) -> list:
+    """Build the list of sync units for one intersection.
+
+    Enumerates the union of top-level entries in the local and archive copies
+    of ``intersections/<target_name>`` and classifies each into a group
+    (``db``, ``raw``, ``outputs``, ``video``, ``config``, ``other``).  The
+    catch-all ``other`` group guarantees nothing — including per-run export
+    folders — is silently left behind when releasing local space.
+
+    Args:
+        target_name:  Exact intersection folder name.
+        archive_root: Archive mirror of ``intersections/``.
+
+    Returns:
+        A list of :class:`atspm.data.sync.SyncItem`.
+    """
+    from atspm.data.sync import SyncItem
+
+    local_target = _get_intersections_dir() / target_name
+    archive_target = archive_root / target_name
+
+    names: dict = {}
+    for base in (local_target, archive_target):
+        if base.is_dir():
+            for entry in base.iterdir():
+                names.setdefault(entry.name, (base / entry.name))
+
+    items = []
+    for name in sorted(names):
+        # Skip SQLite sidecars (carried as companions) and stale temp files.
+        if name.endswith(("-wal", "-shm", ".synctmp")):
+            continue
+
+        lp = local_target / name
+        ap = archive_target / name
+        is_dir = lp.is_dir() or ap.is_dir()
+        kind = "dir" if is_dir else "file"
+
+        if name.endswith(".db"):
+            group, companions = "db", ("-wal", "-shm")
+        elif name == "raw_data":
+            group, companions = "raw", ()
+        elif name == "outputs":
+            group, companions = "outputs", ()
+        elif name == "video":
+            group, companions = "video", ()
+        elif kind == "dir":
+            group, companions = "other", ()
+        else:
+            group, companions = "config", ()
+
+        items.append(SyncItem(
+            name=name, group=group, local=lp, archive=ap,
+            kind=kind, companions=companions,
+        ))
+    return items
+
+
+def _parse_sync_components(raw: Optional[str], default: str) -> Optional[set]:
+    """Parse a ``--components`` value into a set of groups, or ``None`` = all.
+
+    Args:
+        raw:     The ``--components`` argument (or ``None`` to use ``default``).
+        default: Fallback value when ``raw`` is ``None``.
+
+    Returns:
+        A set of group names, or ``None`` meaning "every group".
+
+    Raises:
+        SystemExit: If any requested group is not a valid sync group.
+    """
+    value = (raw if raw is not None else default).strip()
+    if value.lower() == "all":
+        return None
+    groups = {g.strip() for g in value.split(",") if g.strip()}
+    bad = groups - set(_SYNC_GROUPS)
+    if bad:
+        _die(
+            f"Unknown component(s): {', '.join(sorted(bad))}.\n"
+            f"    Valid groups: {', '.join(_SYNC_GROUPS)}, or 'all'."
+        )
+    return groups
+
+
+def _confirm_release(target_names: List[str], assume_yes: bool) -> None:
+    """Gate ``--release`` (local deletion after verified copy) behind a prompt.
+
+    Mirrors :func:`_confirm_rebuild`: asked once for the whole run, refuses on
+    non-interactive stdin unless ``--yes`` is given.
+
+    Args:
+        target_names: Intersections whose local copies may be freed.
+        assume_yes:   Skip the prompt (``--yes``).
+
+    Raises:
+        SystemExit: If the user declines, or stdin is non-interactive without
+            ``--yes``.
+    """
+    if assume_yes:
+        return
+
+    print(
+        f"\n⚠️   --release DELETES the local copy of {len(target_names)} "
+        f"intersection(s) after each file is copied to the archive and "
+        f"checksum-verified:"
+    )
+    for name in target_names:
+        print(f"      • {name}")
+    print(
+        "    Only components that verify are deleted locally; the archive copy "
+        "is never pruned.\n"
+        "    Re-fetch later with 'atspm sync pull'."
+    )
+    sys.stdout.flush()
+
+    if not sys.stdin.isatty():
+        _die(
+            "Refusing to release without confirmation on a non-interactive "
+            "stdin. Re-run with --yes to proceed."
+        )
+    if input("    Proceed? [y/N] ").strip().lower() not in ("y", "yes"):
+        _die("Release cancelled.")
+
+
+def _sync_status_single(target_name: str, archive_root: Path, args: argparse.Namespace) -> None:
+    """Print where each component of one intersection lives and whether it agrees."""
+    from atspm.data.sync import item_state, human_bytes
+
+    items = _intersection_sync_items(target_name, archive_root)
+    groups = _parse_sync_components(args.components, default="all")
+    if groups is not None:
+        items = [it for it in items if it.group in groups]
+
+    print(f"\n🔁  {target_name}")
+    if not items:
+        print("    (no components found locally or in the archive)")
+        return
+
+    for it in items:
+        st = item_state(it, checksum=args.checksum)
+        local_str = human_bytes(st.local_bytes) if st.local_exists else "—"
+        arch_str = human_bytes(st.archive_bytes) if st.archive_exists else "—"
+        print(
+            f"    {it.group:<8} {it.name:<28} "
+            f"local {local_str:>9}   archive {arch_str:>9}   {st.state}"
+        )
+
+
+def _sync_transfer_single(
+    target_name: str,
+    archive_root: Path,
+    args: argparse.Namespace,
+    *,
+    direction: str,
+) -> None:
+    """Pull or push every selected component of one intersection.
+
+    Args:
+        target_name:  Exact intersection folder name.
+        archive_root: Archive mirror of ``intersections/``.
+        args:         Parsed CLI arguments.
+        direction:    ``'pull'`` (archive→local) or ``'push'`` (local→archive).
+    """
+    from atspm.data.sync import sync_item, human_bytes
+
+    default_components = "db,config" if direction == "pull" else "all"
+    groups = _parse_sync_components(args.components, default=default_components)
+    items = _intersection_sync_items(target_name, archive_root)
+    if groups is not None:
+        items = [it for it in items if it.group in groups]
+
+    release = direction == "push" and getattr(args, "release", False)
+    checksum = True if release else (not args.quick)
+
+    verb = "Pulling" if direction == "pull" else ("Releasing" if release else "Pushing")
+    print(f"\n📦  {verb}: {target_name}")
+
+    log = print if args.verbose else (lambda _m: None)
+    total_bytes = 0
+    failures = 0
+    for it in items:
+        res = sync_item(
+            it, direction=direction, release=release,
+            checksum=checksum, dry_run=args.dry_run,
+            log=log,
+        )
+        total_bytes += res.n_bytes
+        icon = "✅" if res.ok else "❌"
+        if not res.ok:
+            failures += 1
+        size = f" ({human_bytes(res.n_bytes)})" if res.n_bytes else ""
+        print(f"    {icon}  {it.group:<8} {it.name:<28} {res.action}{size} — {res.detail}")
+
+    tag = "would transfer" if args.dry_run else "transferred"
+    print(f"    — {tag} {human_bytes(total_bytes)}"
+          + (f", {failures} failure(s)" if failures else ""))
+    if failures and not args.dry_run:
+        _die(f"{failures} component(s) failed to sync for {target_name}.")
+
+
+def handle_sync(args: argparse.Namespace) -> None:
+    """Move intersection data between the local drive and the archive drive.
+
+    Three actions:
+
+    * ``status`` — show, per component, where data lives (local/archive) and
+      whether the copies agree (size-only unless ``--checksum``).
+    * ``pull``   — copy from archive to local (default components: db + config)
+      so the DB can be queried on local disk.
+    * ``push``   — copy from local to archive (default: all components).  With
+      ``--release`` the verified local copy is then deleted to free space.
+
+    Args:
+        args: Parsed CLI arguments from the ``sync`` subcommand.
+    """
+    action = args.sync_action
+    archive_root = _get_archive_root(args, must_exist=(action == "pull"))
+
+    local_dir = _get_intersections_dir()
+    if getattr(args, "all", False):
+        names = set()
+        if local_dir.exists():
+            names |= {p.name for p in local_dir.iterdir() if p.is_dir()}
+        if action in ("status", "pull") and archive_root.exists():
+            names |= {p.name for p in archive_root.iterdir() if p.is_dir()}
+        targets = sorted(names)
+        if not targets:
+            _die("No intersections found locally or in the archive.")
+        print(f"\n🌍 Sync '{action}' for {len(targets)} intersection(s)…")
+    else:
+        targets = [_resolve_sync_target(args.target, args.targetid, archive_root)]
+
+    if action == "push" and getattr(args, "release", False) and not args.dry_run:
+        _confirm_release(targets, assume_yes=getattr(args, "yes", False))
+
+    for target_name in targets:
+        try:
+            if action == "status":
+                _sync_status_single(target_name, archive_root, args)
+            else:
+                _sync_transfer_single(target_name, archive_root, args, direction=action)
+        except SystemExit:
+            print(f"\n⏭️ Skipping {target_name} due to errors.", file=sys.stderr)
+        except Exception as exc:
+            print(f"\n❌ Unexpected error syncing {target_name}: {exc}", file=sys.stderr)
+            if getattr(args, "verbose", False):
+                traceback.print_exc()
+
+
 # ===========================================================================
 # Argument parser construction
 # ===========================================================================
@@ -5711,6 +6089,80 @@ def _add_video_sync_parser(subs: argparse._SubParsersAction) -> None:
     p_vidsync.set_defaults(func=handle_video_sync)
 
 
+def _add_sync_parser(subs: argparse._SubParsersAction) -> None:
+    """Attach the ``sync`` subcommand parser."""
+    p_sync = subs.add_parser(
+        "sync",
+        help="Move intersection data between the local drive and an archive drive (SSD).",
+        description=(
+            "Copy intersection data between this machine's local drive and an\n"
+            "archive drive (e.g. an external SSD), verifying every copy.\n\n"
+            "  status  Show where each component lives and whether copies agree.\n"
+            "  pull    Copy archive -> local (default: db,config) to work on a DB.\n"
+            "  push    Copy local -> archive (default: all). With --release the\n"
+            "          verified local copy is deleted afterward to free space.\n\n"
+            "Databases can't be queried over the 9p removable-media share, so the\n"
+            "workflow is: pull a DB to local, work, push results back. The same\n"
+            "command runs on the production machine to push pulled data to the SSD.\n\n"
+            "Set the archive root once per machine with --archive-root ... --save,\n"
+            "or export ATSPM_SYNC_ARCHIVE_ROOT. It must point at the directory that\n"
+            "mirrors this project's 'intersections/' folder on the archive drive."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p_sync.add_argument(
+        "sync_action",
+        choices=["status", "pull", "push"],
+        metavar="{status,pull,push}",
+        help="Which sync operation to perform.",
+    )
+    group_sync = p_sync.add_mutually_exclusive_group(required=True)
+    group_sync.add_argument("--target", metavar="FOLDER", help="Exact intersection folder name.")
+    group_sync.add_argument("--targetid", metavar="ID", help="Intersection ID prefix (e.g. '201').")
+    group_sync.add_argument("--all", action="store_true", help="Sync all intersections (union of local and archive for status/pull).")
+    p_sync.add_argument(
+        "--archive-root", metavar="PATH", default=None,
+        help="Archive mirror of 'intersections/' (overrides env var and config).",
+    )
+    p_sync.add_argument(
+        "--save", action="store_true",
+        help="Persist the resolved --archive-root to .atspm_sync.json for next time.",
+    )
+    p_sync.add_argument(
+        "--components", metavar="LIST", default=None,
+        help=(
+            "Comma-separated groups to sync, or 'all'. Groups: "
+            f"{', '.join(_SYNC_GROUPS)}. "
+            "Default: 'db,config' for pull, 'all' for push and status."
+        ),
+    )
+    p_sync.add_argument(
+        "--release", action="store_true",
+        help="push only: delete the local copy after a checksum-verified push (frees space).",
+    )
+    p_sync.add_argument(
+        "--quick", action="store_true",
+        help="Verify by file size only, skipping SHA-256 (faster; ignored for --release, which always checksums).",
+    )
+    p_sync.add_argument(
+        "--checksum", action="store_true",
+        help="status only: compare SHA-256 as well as size (slower, byte-exact).",
+    )
+    p_sync.add_argument(
+        "--dry-run", action="store_true",
+        help="Report what would be copied/released without changing anything.",
+    )
+    p_sync.add_argument(
+        "--yes", action="store_true",
+        help="Skip the confirmation prompt for --release.",
+    )
+    p_sync.add_argument(
+        "--verbose", action="store_true",
+        help="Print per-file progress and full tracebacks on error.",
+    )
+    p_sync.set_defaults(func=handle_sync)
+
+
 def _build_parser() -> argparse.ArgumentParser:
     """Construct and return the top-level argument parser.
 
@@ -5731,6 +6183,7 @@ def _build_parser() -> argparse.ArgumentParser:
     subs.required = True
 
     _add_setup_parser(subs)
+    _add_sync_parser(subs)
     _add_retrieve_parser(subs)
     _add_process_parser(subs)
     _add_report_parser(subs)

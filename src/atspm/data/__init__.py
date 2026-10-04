@@ -139,6 +139,17 @@ from .video import (
     MAX_PHASE_NUMBER,
 )
 
+from .sync import (
+    SyncItem,
+    SyncResult,
+    ItemState,
+    sync_item,
+    item_state,
+    copy_verify_file,
+    copy_verify_dir,
+    human_bytes,
+)
+
 __all__ = [
     # Manager
     'DatabaseManager',
@@ -231,4 +242,13 @@ __all__ = [
     'OVERLAP_LETTER_MAP',
     'MIN_PHASE_NUMBER',
     'MAX_PHASE_NUMBER',
+    # Sync
+    'SyncItem',
+    'SyncResult',
+    'ItemState',
+    'sync_item',
+    'item_state',
+    'copy_verify_file',
+    'copy_verify_dir',
+    'human_bytes',
 ]
