@@ -48,6 +48,8 @@ import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
+from ..analysis.call_service import ped_service_calls
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -330,71 +332,26 @@ def _build_title(metadata: Dict[str, Any], suffix: str = '') -> str:
     return f'{location} – {suffix}' if suffix else location
 
 
-def _segment_id(df: pd.DataFrame) -> pd.Series:
-    """
-    Return a monotonically increasing integer segment ID per row.
-    """
-    return (df['event_code'] == _GAP_CODE).cumsum().astype(np.int32)
-
-
 def _classify_ped_service(
     df_events: pd.DataFrame,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
     Split Code 21 (Ped Begin Service) rows into actuated vs recall.
     """
-    df_all = df_events.loc[
-        df_events['event_code'].isin([_GAP_CODE, 21, 45])
-    ].copy()
+    df = df_events.loc[df_events['event_code'].isin([_GAP_CODE, 21, 45]),
+                       ['timestamp', 'event_code', 'parameter']].copy()
+    df['parameter'] = pd.to_numeric(df['parameter'], errors='coerce')
+    df = df.dropna(subset=['parameter'])
+    df['parameter'] = df['parameter'].astype(int)
 
-    if df_all.empty:
+    svc = ped_service_calls(df)
+    if svc.empty:
         return pd.DataFrame(), pd.DataFrame()
 
-    df_all = df_all.sort_values('timestamp').reset_index(drop=True)
-    df_all['_seg'] = _segment_id(df_all)
-
-    df_p = df_all.loc[df_all['event_code'].isin([21, 45])].copy()
-
-    if df_p.empty:
-        return pd.DataFrame(), pd.DataFrame()
-
-    df_p['parameter'] = pd.to_numeric(df_p['parameter'], errors='coerce')
-    df_p = df_p.dropna(subset=['parameter'])
-    df_p['parameter'] = df_p['parameter'].astype(int)
-
-    # A call (45) logged in the same decisecond as the walk (21) it brought
-    # up belongs to that service; 0.1 s resolution can't order them.
-    df_p = (
-        df_p.assign(_svc_last=(df_p['event_code'] == 21).astype(np.int8))
-        .sort_values(['_seg', 'parameter', 'timestamp', '_svc_last'], kind='stable')
-        .reset_index(drop=True)
-    )
-
-    df_p['_is_21'] = (df_p['event_code'] == 21).astype(np.int8)
-    df_p['_is_45'] = (df_p['event_code'] == 45).astype(np.int8)
-
-    df_p['_call_cum'] = df_p.groupby(['_seg', 'parameter'])['_is_45'].cumsum()
-
-    df_p['_svc_grp'] = (
-        # Exclusive running count of services within each (segment, phase):
-        # a service closes its own group.
-        df_p.groupby(['_seg', 'parameter'])['_is_21'].cumsum()
-        - df_p['_is_21']
-    )
-
-    df_p['_has_call'] = (
-        df_p.groupby(['_seg', 'parameter', '_svc_grp'])['_is_45']
-        .transform('sum') > 0
-    )
-
-    svc_rows = df_p[df_p['event_code'] == 21].copy()
-
-    actuated_mask = svc_rows['_has_call']
-    recall_mask   = ~svc_rows['_has_call']
-
+    cols = ['timestamp', 'event_code', 'parameter']
     return (
-        svc_rows.loc[actuated_mask, ['timestamp', 'event_code', 'parameter']].reset_index(drop=True),
-        svc_rows.loc[recall_mask,   ['timestamp', 'event_code', 'parameter']].reset_index(drop=True),
+        svc.loc[svc['called'], cols].reset_index(drop=True),
+        svc.loc[~svc['called'], cols].reset_index(drop=True),
     )
 
 

@@ -15,10 +15,9 @@ Gap Marker Rule:
     signal-state forward-fill, pedestrian call-to-service pairing, detector
     on/off carry-forward — must treat a gap marker as a hard reset for ALL
     phases and detectors.  No state derived before a gap marker may influence
-    any calculation after it.  This is enforced here via ``_segment_id()``,
-    which assigns a monotonically increasing segment number that increments
-    at every gap marker.  All groupby operations that depend on continuity
-    include the segment as an additional grouping key.
+    any calculation after it.  Ped call-to-service pairing goes through
+    ``call_service.ped_service_calls``, whose windows never span a gap
+    marker; the exclusion helper resets its state at every gap marker.
 """
 
 from __future__ import annotations
@@ -28,6 +27,8 @@ from typing import Any, Dict, List, Optional, Union
 
 import numpy as np
 import pandas as pd
+
+from .call_service import ped_service_calls
 
 
 # ---------------------------------------------------------------------------
@@ -154,44 +155,8 @@ def ped_counts(
         for each phase with activity, plus ``"Ped Total"``.
         Returns an empty DataFrame when no relevant events are present.
     """
-    df_all = events_df.loc[events_df["event_code"].isin([_GAP_CODE, 21, 45])].copy()
-    if df_all.empty:
-        return pd.DataFrame()
-
-    df_all = df_all.sort_values("timestamp").reset_index(drop=True)
-
-    df_all["_seg"] = _segment_id(df_all)
-    df_p = df_all.loc[df_all["event_code"].isin([21, 45])].copy()
-
-    if df_p.empty:
-        return pd.DataFrame()
-
-    # A call (45) logged in the same decisecond as the walk (21) it brought
-    # up belongs to that service; 0.1 s resolution can't order them.
-    df_p = (
-        df_p.assign(_svc_last=(df_p["event_code"] == 21).astype(np.int8))
-        .sort_values(["_seg", "parameter", "timestamp", "_svc_last"], kind="stable")
-        .reset_index(drop=True)
-    )
-
-    df_p["_is_21"] = (df_p["event_code"] == 21).astype(np.int8)
-    df_p["_is_45"] = (df_p["event_code"] == 45).astype(np.int8)
-
-    df_p["_svc_grp"] = (
-        # Exclusive running count of services within each (segment, phase):
-        # a service closes its own group.
-        df_p.groupby(["_seg", "parameter"])["_is_21"].cumsum()
-        - df_p["_is_21"]
-    )
-
-    df_p["_has_call"] = (
-        df_p.groupby(["_seg", "parameter", "_svc_grp"])["_is_45"]
-        .transform("sum") > 0
-    )
-
-    legit_mask = (df_p["event_code"] == 21) & df_p["_has_call"]
-    df_legit = df_p.loc[legit_mask].copy()
-
+    svc = ped_service_calls(events_df)
+    df_legit = svc.loc[svc["called"]] if not svc.empty else svc
     if df_legit.empty:
         return pd.DataFrame()
 
@@ -279,10 +244,6 @@ _CODE_TO_STATE: Dict[int, str] = {
     for label, codes in _STATUS_CODES.items()
     for c in codes
 }
-
-
-def _segment_id(df: pd.DataFrame) -> pd.Series:
-    return (df["event_code"] == _GAP_CODE).cumsum().astype(np.int32)
 
 
 def _apply_exclusions(

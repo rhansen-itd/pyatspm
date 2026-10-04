@@ -18,6 +18,7 @@ Modules:
 - preempt: Preemption request/service episodes and daily summary
 - split_monitor: Programmed-plan timeline (131–149) and per-service split monitor
 - yellow_red_actuations: Yellow and red actuations (UDOT YRA) per green-to-green cycle
+- call_service: Call-to-service pairing; pedestrian delay and wait time (UDOT)
 """
 
 from .decoders import (
@@ -127,6 +128,12 @@ from .split_monitor import (
     split_monitor_stats,
 )
 from .yellow_red_actuations import summarize_yellow_red, yellow_red_actuations
+from .call_service import (
+    ped_delay,
+    summarize_ped_delay,
+    summarize_wait_time,
+    wait_time,
+)
 
 __all__ = [
     # Decoders
@@ -218,4 +225,9 @@ __all__ = [
     'split_monitor_stats',
     'yellow_red_actuations',
     'summarize_yellow_red',
+    # Call-to-service pairing
+    'ped_delay',
+    'summarize_ped_delay',
+    'wait_time',
+    'summarize_wait_time',
 ]
