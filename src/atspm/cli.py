@@ -15,6 +15,7 @@ Exposes subcommands from intersection configuration setup through reporting and 
     atspm approach-delay     --targetid <id> [...]       Generate approach delay and Arrival on Red tables and plots
     atspm yellow-red         --targetid <id> [...]       Generate yellow and red actuation tables and plots
     atspm green-time         --targetid <id> [...]       Generate green time utilization tables and plots
+    atspm left-turn-gap      --targetid <id> [...]       Generate left turn gap analysis tables and plots
     atspm approach-volume    --targetid <id> [...]       Generate approach volume tables and plots
     atspm ped-delay          --targetid <id> [...]       Generate pedestrian delay tables and plots
     atspm wait-time          --targetid <id> [...]       Generate vehicle wait time tables and plots
@@ -47,6 +48,7 @@ import json
 import os
 import re
 import sys
+import time
 import traceback
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -1232,6 +1234,133 @@ def handle_green_time(args: argparse.Namespace) -> None:
         except Exception as exc:
             print(
                 f"\n❌ Unexpected error generating green time utilization for {target_name}: {exc}",
+                file=sys.stderr,
+            )
+            if getattr(args, "verbose", False):
+                traceback.print_exc()
+
+
+# ---------------------------------------------------------------------------
+# left-turn-gap
+# ---------------------------------------------------------------------------
+
+def _left_turn_gap_single_intersection(target_name: str, args: argparse.Namespace) -> None:
+    """Core logic to generate left-turn gap analysis for a single intersection.
+
+    Args:
+        target_name: Exact intersection folder name (e.g., ``'2068_US-95_and_SH-8'``).
+        args: Parsed CLI arguments from the ``left-turn-gap`` subcommand.
+    """
+    import pandas as pd
+    from atspm.analysis.left_turn_gap import DEFAULT_EDGES, bin_columns, bin_labels
+    from atspm.data.critical import CriticalMovementEngine
+    from atspm.data.left_turn_gap import LeftTurnGapEngine
+
+    target_dir = _get_target_dir(target_name)
+    meta = _load_metadata(target_dir)
+    db_path = _resolve_db_path(target_dir, meta)
+
+    output_dir = target_dir / "outputs"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    int_name = meta.get("intersection_name", target_name)
+    timezone = args.timezone or meta.get("timezone") or DEFAULT_TIMEZONE
+
+    if not db_path.exists():
+        _die(
+            f"Database not found: {db_path}\n"
+            f"Run 'atspm process --target {target_name}' first."
+        )
+
+    print(f"\n🚦  Generating Left Turn Gap Analysis for {int_name}")
+    print(f"    DB:        {db_path.name}")
+    print(f"    Window:    {args.start} → {args.end}")
+    print(f"    Bin (min): {args.bin_len}min")
+    if args.left:
+        print(f"    Lefts:     {args.left}")
+
+    edges = args.edges if args.edges is not None else DEFAULT_EDGES
+    engine = LeftTurnGapEngine(db_path=db_path, timezone=timezone)
+
+    run_started = time.time()
+    try:
+        engine.left_turn_gap(
+            start=args.start,
+            end=args.end,
+            lefts=args.left,
+            bin_len=args.bin_len,
+            edges=edges,
+            trend_s=args.trend,
+            critical_s=args.critical,
+            use_exclusions=not args.no_exclusions,
+            write_gaps=args.gaps,
+            make_plot=not args.no_plot,
+            output_dir=output_dir,
+        )
+    except Exception as exc:
+        if args.verbose:
+            traceback.print_exc()
+        _die(f"Left turn gap analysis generation failed: {exc}")
+
+    # After writing, print one line per row of LTG_Summary_*.csv
+    start_dt, end_dt = CriticalMovementEngine._parse_range(args.start, args.end)
+    stamp = engine._format_stamp(start_dt, end_dt)
+    summary_file = output_dir / f"LTG_Summary_{stamp}.csv"
+    # A summary from an earlier run with the same stamp is not this run's.
+    if summary_file.exists() and summary_file.stat().st_mtime >= run_started:
+        summary_df = pd.read_csv(summary_file)
+        if not summary_df.empty:
+            cols = bin_columns(edges)
+            labels = bin_labels(edges)
+            for _, row in summary_df.iterrows():
+                left = row["left"]
+                opp_ph = int(row["opposing_phase"])
+                n_cyc = int(row["n_cycles"])
+                n_cens = int(row["n_censored"]) if pd.notna(row.get("n_censored")) else 0
+                cens_str = f" ({n_cens} censored)" if n_cens > 0 else ""
+
+                gaps_parts = [
+                    f"{lab} {int(row[c]) if pd.notna(row.get(c)) else 0}"
+                    for c, lab in zip(cols, labels)
+                ]
+                gaps_str = "gaps " + " · ".join(gaps_parts)
+
+                pct = row.get("pct_turnable")
+                pct_str = f"turnable {float(pct):.1f}%" if pd.notna(pct) else "turnable -"
+
+                crit_val = row.get("sum_ge_critical")
+                crit_str = f"≥crit {float(crit_val):.0f} s" if pd.notna(crit_val) else "≥crit -"
+
+                print(
+                    f"{left} vs Ph{opp_ph}  {n_cyc} greens{cens_str}  "
+                    f"{gaps_str}  {pct_str}  {crit_str}"
+                )
+
+
+def handle_left_turn_gap(args: argparse.Namespace) -> None:
+    """Generate left turn gap analysis tables and plots for one or more intersections.
+
+    Args:
+        args: Parsed CLI arguments from the ``left-turn-gap`` subcommand.
+    """
+    intersections_dir = _get_intersections_dir()
+
+    if getattr(args, "all", False):
+        targets = [p.name for p in intersections_dir.iterdir() if p.is_dir()]
+        if not targets:
+            _die(f"No intersection directories found in {intersections_dir}")
+        print(f"\n🌍 Batch generating left turn gap analysis for {len(targets)} intersections...")
+    else:
+        targets = [_resolve_target_name(args.target, args.targetid)]
+
+    for target_name in targets:
+        try:
+            _left_turn_gap_single_intersection(target_name, args)
+        except SystemExit:
+            print(f"\n⏭️ Skipping {target_name} due to errors.", file=sys.stderr)
+        except Exception as exc:
+            print(
+                f"\n❌ Unexpected error generating left turn gap analysis for {target_name}: {exc}",
                 file=sys.stderr,
             )
             if getattr(args, "verbose", False):
@@ -4533,6 +4662,135 @@ def _add_green_time_parser(subs: argparse._SubParsersAction) -> None:
     p_gt.set_defaults(func=handle_green_time)
 
 
+def _parse_edges(val: str) -> Tuple[float, ...]:
+    """Parse comma-separated bin edges into a tuple of floats ending with math.inf."""
+    import math
+    try:
+        parts = [float(x.strip()) for x in val.split(",") if x.strip()]
+        if not parts:
+            raise argparse.ArgumentTypeError(f"Invalid edges: {val!r}")
+        return tuple(parts) + (math.inf,)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"Invalid float in edges {val!r}: {exc}") from exc
+
+
+def _add_left_turn_gap_parser(subs: argparse._SubParsersAction) -> None:
+    """Attach the ``left-turn-gap`` subcommand parser."""
+    p_ltg = subs.add_parser(
+        "left-turn-gap",
+        help="Generate left turn gap analysis tables and plots.",
+        description=(
+            "Calculate per-green gap counts in opposing through traffic\n"
+            "(UDOT S-M9) for permissive left turns.\n\n"
+            "Outputs (CSV + interactive HTML) are saved to:\n"
+            "  intersections/<target>/outputs/"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    group_ltg = p_ltg.add_mutually_exclusive_group(required=True)
+    group_ltg.add_argument(
+        "--target",
+        metavar="FOLDER",
+        help="Exact intersection folder name (e.g. '2068_US-95_and_SH-8').",
+    )
+    group_ltg.add_argument(
+        "--targetid",
+        metavar="ID",
+        help="Intersection ID prefix (e.g. '2068').",
+    )
+    group_ltg.add_argument(
+        "--all",
+        action="store_true",
+        help="Generate left turn gap analysis for all intersections in the directory.",
+    )
+    p_ltg.add_argument(
+        "--start",
+        required=True,
+        metavar="DATETIME",
+        help=(
+            "Period start (local time): 'YYYY-MM-DD' or 'YYYY-MM-DD HH:MM' "
+            "for sub-day peak periods."
+        ),
+    )
+    p_ltg.add_argument(
+        "--end",
+        required=True,
+        metavar="DATETIME",
+        help=(
+            "Period end (local time): 'YYYY-MM-DD' (inclusive whole day) or "
+            "'YYYY-MM-DD HH:MM' (exclusive)."
+        ),
+    )
+    p_ltg.add_argument(
+        "--left",
+        nargs="+",
+        choices=["NBL", "SBL", "EBL", "WBL"],
+        default=None,
+        metavar="L",
+        help="Left-turn movements to analyse, e.g. --left EBL WBL (default: all).",
+    )
+    p_ltg.add_argument(
+        "--bin-len",
+        type=int,
+        default=15,
+        metavar="M",
+        help="Aggregation interval in minutes (default: 15, must divide 60).",
+    )
+    p_ltg.add_argument(
+        "--edges",
+        type=_parse_edges,
+        default=None,
+        metavar="LIST",
+        help="Comma-separated bin edges in seconds, e.g. 1,3.3,3.7,7.4.",
+    )
+    p_ltg.add_argument(
+        "--trend",
+        type=float,
+        default=7.4,
+        metavar="S",
+        help="Turnable gap threshold in seconds for trend line (default: 7.4).",
+    )
+    p_ltg.add_argument(
+        "--critical",
+        type=float,
+        default=None,
+        metavar="S",
+        help="Critical gap override in seconds (default: lane rule from config).",
+    )
+    p_ltg.add_argument(
+        "--gaps",
+        action="store_true",
+        default=False,
+        help="Also write individual gap event CSV (LTG_Gaps_*.csv).",
+    )
+    p_ltg.add_argument(
+        "--no-exclusions",
+        action="store_true",
+        default=False,
+        help="Ignore TM_Exclusions configured in int_cfg.csv.",
+    )
+    p_ltg.add_argument(
+        "--no-plot",
+        action="store_true",
+        dest="no_plot",
+        default=False,
+        help="Disable interactive HTML plot generation.",
+    )
+    p_ltg.add_argument(
+        "--timezone",
+        default=None,
+        metavar="TZ",
+        help="Override the timezone from metadata.json (e.g. 'US/Pacific').",
+    )
+    p_ltg.add_argument(
+        "--verbose",
+        action="store_true",
+        default=False,
+        help="Print full tracebacks for any errors.",
+    )
+    p_ltg.set_defaults(func=handle_left_turn_gap)
+
+
 def _add_approach_volume_parser(subs: argparse._SubParsersAction) -> None:
     """Attach the ``approach-volume`` subcommand parser."""
     p_av = subs.add_parser(
@@ -6194,6 +6452,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_approach_delay_parser(subs)
     _add_yellow_red_parser(subs)
     _add_green_time_parser(subs)
+    _add_left_turn_gap_parser(subs)
     _add_approach_volume_parser(subs)
     _add_ped_delay_parser(subs)
     _add_wait_time_parser(subs)
