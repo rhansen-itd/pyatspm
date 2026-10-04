@@ -81,3 +81,23 @@ class TestCode12InClearance:
         events = [(0.0, 1), (30.0, 8), (34.0, 9), (34.5, 12)]
         iv = _build_phase_intervals(_ph_df(events))
         assert iv.iloc[0]["clear_dur"] == pytest.approx(4.0)
+
+
+class TestReServiceAtEndOfRedClearance:
+    """A phase re-served the instant its red clearance ends logs Code 11 and
+    the next Code 1 in the same decisecond (201, 2026-03-18 18:17:45.6)."""
+
+    _TWO = [(0.0, 1), (8.7, 8), (13.7, 9), (13.7, 10), (15.8, 1), (15.8, 11),
+            (25.0, 8), (30.0, 9), (30.0, 10), (32.1, 11), (32.1, 12)]
+
+    def test_both_greens_are_emitted(self):
+        iv = _build_phase_intervals(_ph_df(self._TWO))
+        assert list(iv["green_ts"]) == pytest.approx([0.0, 15.8])
+        assert list(iv["clear_end_ts"]) == pytest.approx([15.8, 32.1])
+        assert list(iv["yellow_end_ts"]) == pytest.approx([13.7, 30.0])
+
+    def test_input_row_order_does_not_matter(self):
+        swapped = [(15.8, 11) if e == (15.8, 1) else (15.8, 1) if e == (15.8, 11) else e
+                   for e in self._TWO]
+        iv = _build_phase_intervals(_ph_df(swapped))
+        assert list(iv["green_ts"]) == pytest.approx([0.0, 15.8])

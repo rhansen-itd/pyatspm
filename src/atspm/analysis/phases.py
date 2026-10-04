@@ -211,12 +211,17 @@ def _build_phase_intervals(
 
     records: List[Dict[str, Any]] = []
 
+    # Same-timestamp order.  End Red Clearance sorts ahead of Begin Green: a
+    # phase re-served the instant its red clearance ends (201, free mode)
+    # logs 11 and the next 1 in one decisecond, and taking the 1 first would
+    # reset the clearance and drop the finished interval.  Code 11 acts only
+    # in a clearance state, so this order changes nothing else.
     _SORT_PRIORITY = {
+        _CODE_END_RC:    -1,
         _CODE_GREEN:      0,
         _CODE_YELLOW:     1,
         _CODE_END_YELLOW: 2,
         _CODE_BEGIN_RC:   3,
-        _CODE_END_RC:     4,   
         _CODE_INACTIVE:   5,
     }
 
