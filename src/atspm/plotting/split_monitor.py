@@ -10,7 +10,7 @@ Package Location: src/atspm/plotting/split_monitor.py
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, Optional, Set
 
 import numpy as np
 import pandas as pd

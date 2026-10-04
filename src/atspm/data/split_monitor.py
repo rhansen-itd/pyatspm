@@ -33,17 +33,14 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
+from typing import Dict, List, Optional, Sequence, Tuple, Union
 
-import numpy as np
 import pandas as pd
 
 from .manager import DatabaseManager, db_timezone
 from .reader import get_events_with_cycles_df
+from ..analysis.detector_inference import _to_epoch
 from ..analysis.split_monitor import (
-    CYCLE_SCHEMA,
-    STATS_SCHEMA,
-    TIMELINE_SCHEMA,
     plan_timeline,
     split_monitor,
     split_monitor_stats,
@@ -153,9 +150,6 @@ class SplitMonitorEngine:
             events = events.drop_duplicates(subset=["timestamp", "event_code", "parameter"])
             events = events.sort_values("timestamp", kind="stable").reset_index(drop=True)
 
-        if not events.empty and not pd.api.types.is_datetime64_any_dtype(events["timestamp"]):
-            events["timestamp"] = pd.to_datetime(events["timestamp"])
-
         if events.empty:
             print("  ⚠️  SplitMonitor: no events found for the requested window.")
             return {} if output_dir is None else None
@@ -169,12 +163,12 @@ class SplitMonitorEngine:
         w1 = to_epoch(end_dt, self.timezone)
 
         if not cycle.empty:
-            g_epoch = np.array([t.timestamp() for t in cycle["green_ts"]])
+            g_epoch = _to_epoch(cycle["green_ts"])
             cycle = cycle.loc[(g_epoch >= w0) & (g_epoch < w1)].reset_index(drop=True)
 
         if not timeline.empty:
-            tl_start_epoch = np.array([t.timestamp() for t in timeline["start"]])
-            tl_end_epoch = np.array([t.timestamp() for t in timeline["end"]])
+            tl_start_epoch = _to_epoch(timeline["start"])
+            tl_end_epoch = _to_epoch(timeline["end"])
             tl_mask = (tl_end_epoch > w0) & (tl_start_epoch < w1)
             timeline = timeline.loc[tl_mask].reset_index(drop=True)
 
