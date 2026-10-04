@@ -20,6 +20,25 @@ from plotly.subplots import make_subplots
 from .termination import _build_title
 
 
+def _pool_plans(df: pd.DataFrame) -> pd.DataFrame:
+    """One row per (time, bin_start_s): a time bin holding a plan change has
+    one summary group per plan, so counts are summed and the ratios redone."""
+    g = df.groupby(["time", "bin_start_s"], sort=False).agg(
+        actuations=("actuations", "sum"),
+        n_reached=("n_reached", "sum"),
+        exposure_s=("exposure_s", "sum"),
+    ).reset_index()
+    # Every cycle of the time bin, also those of a plan whose greens never
+    # reached this bin (UDOT's denominator).
+    per_time = df.drop_duplicates(["time", "coord_plan"]).groupby("time")["n_cycles"].sum()
+    g["n_cycles"] = g["time"].map(per_time)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        g["act_per_cycle"] = np.where(g["n_cycles"] > 0, g["actuations"] / g["n_cycles"], np.nan)
+        g["flow_vph"] = np.where(g["exposure_s"] > 0,
+                                 g["actuations"] * 3600.0 / g["exposure_s"], np.nan)
+    return g
+
+
 def plot_green_time(
     bins_df: pd.DataFrame,
     splits_df: pd.DataFrame,
@@ -70,6 +89,7 @@ def plot_green_time(
 
         # 1. Heat map: Ph{N} Utilization
         if not df_ph.empty:
+            df_ph = _pool_plans(df_ph)
             piv = df_ph.pivot(index="bin_start_s", columns="time", values="act_per_cycle")
             piv = piv.sort_index().sort_index(axis=1)
             piv_reached = df_ph.pivot(

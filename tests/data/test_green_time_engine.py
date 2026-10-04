@@ -362,6 +362,24 @@ class TestPlot:
         hm = next(t for t in fig.data if t.name == "Ph2 Utilization")
         assert np.asarray(hm.z, dtype=float).shape[0] == 3        # bins 0, 2, 4 s
 
+    def test_plan_change_inside_a_time_bin_pools_the_plans(self):
+        # Summaries group by plan, so one 5-min bin holds two groups.  The
+        # heat map pools them: actuations over every cycle of the time bin.
+        bins, splits = _frames()
+        b = bins.copy()
+        first = b["time"] == b["time"].min()
+        extra = b.loc[first & (b["phase"] == 2)].copy()
+        extra["coord_plan"] = 2.0
+        extra = extra.loc[extra["green_bin"] < 2]          # shorter greens
+        extra["n_cycles"] = 2
+        extra["actuations"] = 0
+        fig = plot_green_time(pd.concat([b, extra], ignore_index=True), splits)
+        hm = next(t for t in fig.data if t.name == "Ph2 Utilization")
+        z = np.asarray(hm.z, dtype=float)
+        n1 = int(b.loc[first & (b["phase"] == 2), "n_cycles"].iloc[0])
+        assert z[0, 0] == pytest.approx(n1 / (n1 + 2))
+        assert z[5, 0] == 0.0
+
     def test_title_uses_metadata(self):
         bins, splits = _frames()
         meta = {"intersection_name": "X", "major_road_name": "Main St",
