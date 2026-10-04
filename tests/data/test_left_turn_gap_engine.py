@@ -55,8 +55,11 @@ STAMP = "2025_06_02_0700-2025_06_02_0900"
 #   (84.091 %), 1 opposing lane → critical 4.1: sum 42 s over 4 gaps.
 # Config: TM_EBL 25, TM_WBT 18, TM_WBR 21 and Det_P6_Stop_Bar 18 derive
 # WB = Ph6.  TM_NBL 22 / TM_SBT 31 has no Det_P key: SB is unresolved
-# unless the explicit variant adds Det_P4_Direction = SB (then NBL's window
-# is Ph4's [60, 84): one 24 s gap per green, and det 31 never logs).
+# unless the explicit variant adds Det_P4_Direction = SB, det 31 offs at +70
+# and TM_SBR 32, which never logs (NBL's window is Ph4's [60, 84): gaps 10
+# and 14).  With sb_silent det 31 never logs either, so NBL is skipped (an
+# all-silent opposing set would read as 100 % turnable); with no_sb there
+# is no SB movement at all (313's NBL).
 # 07:00–09:00 holds 60 Ph6 greens (07:00, 07:02, … 08:58), 8 or 7 per
 # 15-min bin.
 # Variants: a gap marker at 08:00:10 (censors the 08:00 green); TM_EBL
@@ -73,7 +76,8 @@ def _local(hhmm: str) -> float:
 
 
 def _build_db(root: Path, gap: bool = False, explicit: bool = False,
-              shared: bool = False, lefts: bool = True) -> Path:
+              shared: bool = False, lefts: bool = True, sb_silent: bool = False,
+              no_sb: bool = False) -> Path:
     t0 = _local("06:50")
     events = []
     for c in range(_N):
@@ -83,6 +87,8 @@ def _build_db(root: Path, gap: bool = False, explicit: bool = False,
                    (b + 86, 11, 4)]
         for t, d in [(5, 18), (7, 18), (15, 18), (30, 21)]:
             events += [(b + t - 0.3, 82, d), (b + t, 81, d)]
+        if explicit and not sb_silent:
+            events += [(b + 69.7, 82, 31), (b + 70, 81, 31)]
     if gap:
         events.append((_local("08:00") + 10.0, -1, -1))
     db = root / "ltg.db"
@@ -95,7 +101,9 @@ def _build_db(root: Path, gap: bool = False, explicit: bool = False,
         if lefts:
             cfg.update({"TM_EBL": "25,21" if shared else "25", "TM_NBL": "22"})
         if explicit:
-            cfg["Det_P4_Direction"] = "SB"
+            cfg.update({"Det_P4_Direction": "SB", "TM_SBR": "32"})
+        if no_sb:
+            del cfg["TM_SBT"]
         for col in cfg:
             m.add_config_column(col)
         m._insert_config_row({"start_date": "2000-01-01T00:00:00",
@@ -199,9 +207,21 @@ class TestEngine:
         res = LeftTurnGapEngine(_build_db(tmp_path, explicit=True)).left_turn_gap(START, END)
         cy = _left(res["cycles"], "NBL")
         assert len(cy) == _GREENS_IN_WINDOW and (cy["opposing_phase"] == 4).all()
-        assert (cy["window_s"] == 24.0).all() and (cy["bin_4"] == 1).all()
-        assert (cy["pct_turnable"] == 100.0).all()
-        assert "SB detector(s) 31 logged no actuation" in capsys.readouterr().out
+        assert (cy["window_s"] == 24.0).all() and (cy["bin_4"] == 2).all()
+        assert (cy["n_actuations"] == 1).all() and (cy["pct_turnable"] == 100.0).all()
+        assert "SB detector(s) 32 logged no actuation" in capsys.readouterr().out
+
+    def test_all_silent_opposing_detectors_skip_the_left(self, tmp_path, capsys):
+        res = LeftTurnGapEngine(_build_db(tmp_path, explicit=True, sb_silent=True)
+                                ).left_turn_gap(START, END)
+        assert set(res["cycles"]["left"]) == {"EBL"}
+        assert "NBL: every opposing SB detector (31, 32) logged no actuation" \
+            in capsys.readouterr().out
+
+    def test_no_opposing_movement_is_reported_as_such(self, tmp_path, capsys):
+        LeftTurnGapEngine(_build_db(tmp_path, no_sb=True)).left_turn_gap(START, END)
+        out = capsys.readouterr().out
+        assert "NBL: no TM_SBT/R detectors" in out and "Direction,SB" not in out
 
     def test_lefts_filter(self, tmp_path, capsys):
         eng = LeftTurnGapEngine(_build_db(tmp_path, explicit=True))

@@ -46,6 +46,7 @@ import argparse
 import json
 import re
 import sys
+import time
 import traceback
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -1279,6 +1280,7 @@ def _left_turn_gap_single_intersection(target_name: str, args: argparse.Namespac
     edges = args.edges if args.edges is not None else DEFAULT_EDGES
     engine = LeftTurnGapEngine(db_path=db_path, timezone=timezone)
 
+    run_started = time.time()
     try:
         engine.left_turn_gap(
             start=args.start,
@@ -1302,7 +1304,8 @@ def _left_turn_gap_single_intersection(target_name: str, args: argparse.Namespac
     start_dt, end_dt = CriticalMovementEngine._parse_range(args.start, args.end)
     stamp = engine._format_stamp(start_dt, end_dt)
     summary_file = output_dir / f"LTG_Summary_{stamp}.csv"
-    if summary_file.exists():
+    # A summary from an earlier run with the same stamp is not this run's.
+    if summary_file.exists() and summary_file.stat().st_mtime >= run_started:
         summary_df = pd.read_csv(summary_file)
         if not summary_df.empty:
             cols = bin_columns(edges)

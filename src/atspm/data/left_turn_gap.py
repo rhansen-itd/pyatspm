@@ -144,7 +144,9 @@ class LeftTurnGapEngine:
         thr = through_phases(config).set_index("direction")
         runnable = []
         for pair in selected_pairs.itertuples():
-            if pd.isna(pair.opposing_phase):
+            if not pair.detectors:
+                print(f"  ⚠️  LeftTurnGap: {pair.left}: no TM_{pair.opposing}T/R detectors; skipped.")
+            elif pd.isna(pair.opposing_phase):
                 cand_s = thr.at[pair.opposing, "candidates"] if pair.opposing in thr.index else ""
                 cands_fmt = (
                     f", candidates {'/'.join('P' + c for c in cand_s.split(','))}"
@@ -155,8 +157,6 @@ class LeftTurnGapEngine:
                     f"  ⚠️  LeftTurnGap: {pair.left}: no through phase for {pair.opposing} "
                     f"({pair.source}{cands_fmt}); add Det:,P{{N}} Direction,{pair.opposing} to int_cfg.csv."
                 )
-            elif not pair.detectors:
-                print(f"  ⚠️  LeftTurnGap: {pair.left}: no TM_{pair.opposing}T/R detectors; skipped.")
             else:
                 runnable.append(pair)
 
@@ -199,14 +199,26 @@ class LeftTurnGapEngine:
             ev_window.loc[ev_window["event_code"] == 81, "parameter"].dropna().astype(int)
         )
 
+        # A pair whose opposing detectors are all silent is skipped: every
+        # green would read as one gap, i.e. 100 % turnable.
+        measured = []
         for pair in runnable:
             silent = sorted([d for d in pair.detectors if d not in active_dets])
+            if len(silent) == len(pair.detectors):
+                print(
+                    f"  ⚠️  LeftTurnGap: {pair.left}: every opposing {pair.opposing} "
+                    f"detector ({', '.join(str(d) for d in silent)}) logged no actuation "
+                    f"in the window; skipped (it would read as 100 % turnable)."
+                )
+                continue
             if silent:
                 det_str = ", ".join(str(d) for d in silent)
                 print(
                     f"  ⚠️  LeftTurnGap: {pair.opposing} detector(s) {det_str} "
                     f"logged no actuation in the window."
                 )
+            measured.append(pair)
+        runnable = measured
 
         # 6. Core per runnable pair
         cycle_frames: List[pd.DataFrame] = []
