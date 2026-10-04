@@ -59,6 +59,11 @@ from .approach_delay import (
     get_approach_delay,
 )
 
+from .split_monitor import (
+    SplitMonitorEngine,
+    get_split_monitor,
+)
+
 from .split_failures import (
     SplitFailureEngine,
     get_split_failures,
@@ -155,6 +160,9 @@ __all__ = [
     # Approach Delay
     'ApproachDelayEngine',
     'get_approach_delay',
+    # Split Monitor
+    'SplitMonitorEngine',
+    'get_split_monitor',
     # Split Failures
     'SplitFailureEngine',
     'get_split_failures',

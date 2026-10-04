@@ -72,3 +72,6 @@ See CLAUDE.md "Documentation Workflow" for the rules.
 - [src/atspm/data/__init__.py] export ApproachDelayEngine, get_approach_delay
 - [src/atspm/plotting/__init__.py] export plot_approach_delay
 - [src/atspm/analysis/__init__.py] export plan_timeline, programmed_at, split_monitor, split_monitor_stats (new analysis/split_monitor.py)
+- [src/atspm/cli.py] new split-monitor subcommand
+- [src/atspm/data/__init__.py] export SplitMonitorEngine, get_split_monitor
+- [src/atspm/plotting/__init__.py] export plot_split_monitor

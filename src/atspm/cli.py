@@ -9,6 +9,7 @@ Exposes subcommands from intersection configuration setup through reporting and 
     atspm report             --targetid <id> [...]       Generate ATSPM performance reports
     atspm counts             --targetid <id> [...]       Generate vehicle and pedestrian counts
     atspm splits             --targetid <id> [...]       Generate phase split and timing records
+    atspm split-monitor      --targetid <id> [...]       Generate split monitor tables and plots
     atspm aog                --targetid <id> [...]       Generate Arrival on Green (AOG) tables
     atspm approach-delay     --targetid <id> [...]       Generate approach delay and Arrival on Red tables and plots
     atspm detector-health    --targetid <id> [...]       Evaluate detector health rules and generate heatmap
@@ -997,6 +998,118 @@ def handle_approach_delay(args: argparse.Namespace) -> None:
         except Exception as exc:
             print(
                 f"\n❌ Unexpected error generating approach delay for {target_name}: {exc}",
+                file=sys.stderr,
+            )
+            if getattr(args, "verbose", False):
+                traceback.print_exc()
+
+
+# ---------------------------------------------------------------------------
+# split-monitor
+# ---------------------------------------------------------------------------
+
+def _split_monitor_single_intersection(target_name: str, args: argparse.Namespace) -> None:
+    """Core logic to generate split monitor for a single intersection.
+
+    Args:
+        target_name: Exact intersection folder name
+            (e.g., ``'2068_US-95_and_SH-8'``).
+        args: Parsed CLI arguments from the ``split-monitor`` subcommand.
+    """
+    import numpy as np
+    import pandas as pd
+    from atspm.data.split_monitor import SplitMonitorEngine
+
+    target_dir = _get_target_dir(target_name)
+    meta = _load_metadata(target_dir)
+    db_path = _resolve_db_path(target_dir, meta)
+
+    output_dir = target_dir / "outputs"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    int_name = meta.get("intersection_name", target_name)
+    timezone = args.timezone or meta.get("timezone") or DEFAULT_TIMEZONE
+
+    if not db_path.exists():
+        _die(
+            f"Database not found: {db_path}\n"
+            f"Run 'atspm process --target {target_name}' first."
+        )
+
+    print(f"\n🚦  Generating Split Monitor for {int_name}")
+    print(f"    DB:        {db_path.name}")
+    print(f"    Window:    {args.start} → {args.end}")
+    if args.phases:
+        print(f"    Phases:    {args.phases}")
+
+    engine = SplitMonitorEngine(db_path=db_path, timezone=timezone)
+
+    try:
+        engine.split_monitor(
+            start=args.start,
+            end=args.end,
+            phases=args.phases,
+            percentiles=tuple(args.percentiles),
+            make_plot=not args.no_plot,
+            output_dir=output_dir,
+        )
+    except Exception as exc:
+        if args.verbose:
+            traceback.print_exc()
+        _die(f"Split monitor generation failed: {exc}")
+
+    # After writing, print a short summary from the stats CSV
+    start_dt, end_dt = SplitMonitorEngine._parse_range(args.start, args.end)
+    stamp = engine._format_stamp(start_dt, end_dt)
+    stats_file = output_dir / f"SM_Stats_{stamp}.csv"
+    if stats_file.exists():
+        st = pd.read_csv(stats_file)
+        if not st.empty and "phase" in st.columns:
+            pa, pb = tuple(args.percentiles)
+            na, nb = f"split_p{pa:g}", f"split_p{pb:g}"
+            for _, row in st.iterrows():
+                ph = int(row["phase"])
+                plan = row["plan"]
+                plan_str = f"Plan {int(plan)}" if pd.notna(plan) else "Plan NA"
+                n_cyc = int(row["n_cycles"])
+                prog = row["programmed_split"]
+                prog_str = f"{prog:.1f}s" if pd.notna(prog) else "NaN"
+                val_a = row[na] if na in row else np.nan
+                val_b = row[nb] if nb in row else np.nan
+                gap_pct = row["gap_out_pct"] * 100.0 if "gap_out_pct" in row else 0.0
+                max_pct = row["max_out_pct"] * 100.0 if "max_out_pct" in row else 0.0
+                fo_pct = row["force_off_pct"] * 100.0 if "force_off_pct" in row else 0.0
+                print(
+                    f"    Ph{ph} {plan_str}: {n_cyc} services, prog {prog_str}, "
+                    f"{na} {val_a:.1f}s / {nb} {val_b:.1f}s, "
+                    f"gap-out {gap_pct:.1f}% / max-out {max_pct:.1f}% / force-off {fo_pct:.1f}%"
+                )
+
+
+def handle_split_monitor(args: argparse.Namespace) -> None:
+    """Generate split monitor tables and plots for one or more intersections.
+
+    Args:
+        args: Parsed CLI arguments from the ``split-monitor`` subcommand.
+    """
+    intersections_dir = _get_intersections_dir()
+
+    if getattr(args, "all", False):
+        targets = [p.name for p in intersections_dir.iterdir() if p.is_dir()]
+        if not targets:
+            _die(f"No intersection directories found in {intersections_dir}")
+        print(f"\n🌍 Batch generating split monitor for {len(targets)} intersections...")
+    else:
+        targets = [_resolve_target_name(args.target, args.targetid)]
+
+    for target_name in targets:
+        try:
+            _split_monitor_single_intersection(target_name, args)
+        except SystemExit:
+            print(f"\n⏭️ Skipping {target_name} due to errors.", file=sys.stderr)
+        except Exception as exc:
+            print(
+                f"\n❌ Unexpected error generating split monitor for {target_name}: {exc}",
                 file=sys.stderr,
             )
             if getattr(args, "verbose", False):
@@ -3247,6 +3360,91 @@ def _add_approach_delay_parser(subs: argparse._SubParsersAction) -> None:
     p_ad.set_defaults(func=handle_approach_delay)
 
 
+def _add_split_monitor_parser(subs: argparse._SubParsersAction) -> None:
+    """Attach the ``split-monitor`` subcommand parser."""
+    p_sm = subs.add_parser(
+        "split-monitor",
+        help="Generate split monitor tables and plots.",
+        description=(
+            "Generate UDOT split monitor tables and plots (cycle services, per-plan\n"
+            "statistics, and timeline) for configured phases.\n\n"
+            "Outputs (CSV + interactive HTML) are saved to:\n"
+            "  intersections/<target>/outputs/"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    group_sm = p_sm.add_mutually_exclusive_group(required=True)
+    group_sm.add_argument(
+        "--target",
+        metavar="FOLDER",
+        help="Exact intersection folder name (e.g. '2068_US-95_and_SH-8').",
+    )
+    group_sm.add_argument(
+        "--targetid",
+        metavar="ID",
+        help="Intersection ID prefix (e.g. '2068').",
+    )
+    group_sm.add_argument(
+        "--all",
+        action="store_true",
+        help="Generate split monitor for all intersections in the directory.",
+    )
+    p_sm.add_argument(
+        "--start",
+        required=True,
+        metavar="DATETIME",
+        help=(
+            "Period start (local time): 'YYYY-MM-DD' or 'YYYY-MM-DD HH:MM' "
+            "for sub-day peak periods."
+        ),
+    )
+    p_sm.add_argument(
+        "--end",
+        required=True,
+        metavar="DATETIME",
+        help=(
+            "Period end (local time): 'YYYY-MM-DD' (inclusive whole day) or "
+            "'YYYY-MM-DD HH:MM' (exclusive)."
+        ),
+    )
+    p_sm.add_argument(
+        "--phases",
+        nargs="+",
+        type=int,
+        metavar="N",
+        default=None,
+        help="Signal phase numbers to analyse, e.g. --phases 2 6. Omit to analyse all phases.",
+    )
+    p_sm.add_argument(
+        "--percentiles",
+        nargs=2,
+        type=float,
+        default=[50.0, 85.0],
+        metavar=("A", "B"),
+        help="Two split percentiles to report in stats (default: 50.0 85.0).",
+    )
+    p_sm.add_argument(
+        "--no-plot",
+        action="store_true",
+        dest="no_plot",
+        default=False,
+        help="Disable interactive HTML plot generation.",
+    )
+    p_sm.add_argument(
+        "--timezone",
+        default=None,
+        metavar="TZ",
+        help="Override the timezone from metadata.json (e.g. 'US/Pacific').",
+    )
+    p_sm.add_argument(
+        "--verbose",
+        action="store_true",
+        default=False,
+        help="Print full tracebacks for any errors.",
+    )
+    p_sm.set_defaults(func=handle_split_monitor)
+
+
 def _add_detector_health_parser(subs: argparse._SubParsersAction) -> None:
     """Attach the ``detector-health`` subcommand parser."""
     p_dh = subs.add_parser(
@@ -4487,6 +4685,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_report_parser(subs)
     _add_counts_parser(subs)
     _add_splits_parser(subs)
+    _add_split_monitor_parser(subs)
     _add_aog_parser(subs)
     _add_approach_delay_parser(subs)
     _add_detector_health_parser(subs)
