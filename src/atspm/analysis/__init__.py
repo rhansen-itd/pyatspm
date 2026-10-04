@@ -16,6 +16,7 @@ Modules:
 - clock_marks: eos_set_time drift/set marker decoding
 - timing_actuation: Timing-and-actuation intervals, row layout, finding links
 - preempt: Preemption request/service episodes and daily summary
+- split_monitor: Programmed-plan timeline (131–149) and per-service split monitor
 """
 
 from .decoders import (
@@ -117,6 +118,12 @@ from .preempt import (
     preempt_episodes,
     preempt_summary,
 )
+from .split_monitor import (
+    plan_timeline,
+    programmed_at,
+    split_monitor,
+    split_monitor_stats,
+)
 
 __all__ = [
     # Decoders
@@ -200,4 +207,9 @@ __all__ = [
     'PREEMPT_CODES',
     'preempt_episodes',
     'preempt_summary',
+    # Split monitor
+    'plan_timeline',
+    'programmed_at',
+    'split_monitor',
+    'split_monitor_stats',
 ]
