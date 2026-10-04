@@ -84,3 +84,4 @@ See CLAUDE.md "Documentation Workflow" for the rules.
 - [src/atspm/cli.py] new ped-delay and wait-time subcommands
 - [src/atspm/data/__init__.py] export CallServiceEngine, get_ped_delay, get_wait_time
 - [src/atspm/plotting/__init__.py] export plot_ped_delay, plot_wait_time
+- [src/atspm/analysis/__init__.py] export green_time_utilization, summarize_gtu_bins, summarize_gtu_splits

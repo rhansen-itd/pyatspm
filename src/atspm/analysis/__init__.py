@@ -19,6 +19,7 @@ Modules:
 - split_monitor: Programmed-plan timeline (131–149) and per-service split monitor
 - yellow_red_actuations: Yellow and red actuations (UDOT YRA) per green-to-green cycle
 - call_service: Call-to-service pairing; pedestrian delay and wait time (UDOT)
+- green_time_utilization: Actuations per second-of-green bin (UDOT GTU)
 """
 
 from .decoders import (
@@ -134,6 +135,11 @@ from .call_service import (
     summarize_wait_time,
     wait_time,
 )
+from .green_time_utilization import (
+    green_time_utilization,
+    summarize_gtu_bins,
+    summarize_gtu_splits,
+)
 
 __all__ = [
     # Decoders
@@ -230,4 +236,8 @@ __all__ = [
     'summarize_ped_delay',
     'wait_time',
     'summarize_wait_time',
+    # Green time utilization
+    'green_time_utilization',
+    'summarize_gtu_bins',
+    'summarize_gtu_splits',
 ]
