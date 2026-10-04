@@ -89,3 +89,6 @@ See CLAUDE.md "Documentation Workflow" for the rules.
 - [src/atspm/data/__init__.py] export GreenTimeEngine, get_green_time
 - [src/atspm/plotting/__init__.py] export plot_green_time
 - [src/atspm/analysis/__init__.py] export approach_volume, direction_detectors
+- [src/atspm/cli.py] new approach-volume subcommand
+- [src/atspm/data/__init__.py] export ApproachVolumeEngine, get_approach_volume
+- [src/atspm/plotting/__init__.py] export plot_approach_volume

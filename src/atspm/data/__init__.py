@@ -59,6 +59,11 @@ from .approach_delay import (
     get_approach_delay,
 )
 
+from .approach_volume import (
+    ApproachVolumeEngine,
+    get_approach_volume,
+)
+
 from .yellow_red_actuations import (
     YellowRedEngine,
     get_yellow_red,
@@ -176,6 +181,9 @@ __all__ = [
     # Approach Delay
     'ApproachDelayEngine',
     'get_approach_delay',
+    # Approach Volume
+    'ApproachVolumeEngine',
+    'get_approach_volume',
     # Yellow and Red Actuations
     'YellowRedEngine',
     'get_yellow_red',

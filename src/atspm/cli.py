@@ -14,6 +14,7 @@ Exposes subcommands from intersection configuration setup through reporting and 
     atspm approach-delay     --targetid <id> [...]       Generate approach delay and Arrival on Red tables and plots
     atspm yellow-red         --targetid <id> [...]       Generate yellow and red actuation tables and plots
     atspm green-time         --targetid <id> [...]       Generate green time utilization tables and plots
+    atspm approach-volume    --targetid <id> [...]       Generate approach volume tables and plots
     atspm ped-delay          --targetid <id> [...]       Generate pedestrian delay tables and plots
     atspm wait-time          --targetid <id> [...]       Generate vehicle wait time tables and plots
     atspm detector-health    --targetid <id> [...]       Evaluate detector health rules and generate heatmap
@@ -1229,6 +1230,133 @@ def handle_green_time(args: argparse.Namespace) -> None:
         except Exception as exc:
             print(
                 f"\n❌ Unexpected error generating green time utilization for {target_name}: {exc}",
+                file=sys.stderr,
+            )
+            if getattr(args, "verbose", False):
+                traceback.print_exc()
+
+
+# ---------------------------------------------------------------------------
+# approach-volume
+# ---------------------------------------------------------------------------
+
+def _approach_volume_single_intersection(target_name: str, args: argparse.Namespace) -> None:
+    """Core logic to generate approach volume for a single intersection.
+
+    Args:
+        target_name: Exact intersection folder name
+            (e.g., ``'2068_US-95_and_SH-8'``).
+        args: Parsed CLI arguments from the ``approach-volume`` subcommand.
+    """
+    import pandas as pd
+    from atspm.data.critical import CriticalMovementEngine
+    from atspm.data.approach_volume import ApproachVolumeEngine
+
+    target_dir = _get_target_dir(target_name)
+    meta = _load_metadata(target_dir)
+    db_path = _resolve_db_path(target_dir, meta)
+
+    output_dir = target_dir / "outputs"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    int_name = meta.get("intersection_name", target_name)
+    timezone = args.timezone or meta.get("timezone") or DEFAULT_TIMEZONE
+
+    if not db_path.exists():
+        _die(
+            f"Database not found: {db_path}\n"
+            f"Run 'atspm process --target {target_name}' first."
+        )
+
+    print(f"\n🚦  Generating Approach Volume for {int_name}")
+    print(f"    DB:        {db_path.name}")
+    print(f"    Window:    {args.start} → {args.end}")
+    print(f"    Bin (min): {args.bin_len}min")
+
+    engine = ApproachVolumeEngine(db_path=db_path, timezone=timezone)
+
+    try:
+        engine.approach_volume(
+            start=args.start,
+            end=args.end,
+            bin_len=args.bin_len,
+            make_plot=not args.no_plot,
+            output_dir=output_dir,
+        )
+    except Exception as exc:
+        if getattr(args, "verbose", False):
+            traceback.print_exc()
+        _die(f"Approach volume generation failed: {exc}")
+
+    # After writing, print a short summary from AV_Days_*.csv
+    start_dt, end_dt = CriticalMovementEngine._parse_range(args.start, args.end)
+    stamp = engine._format_stamp(start_dt, end_dt)
+    days_file = output_dir / f"AV_Days_{stamp}.csv"
+    if days_file.exists():
+        days_df = pd.read_csv(days_file)
+        if not days_df.empty:
+            comb_df = days_df.loc[days_df["direction"] == "combined"]
+            for _, row in comb_df.iterrows():
+                dt_str = str(row["date"])
+                pair = str(row["pair"])
+
+                # Peak time: HH:MM local
+                if pd.notna(row["peak_start"]) and str(row["peak_start"]).strip():
+                    ts = pd.to_datetime(row["peak_start"], utc=True).tz_convert(timezone)
+                    peak_str = ts.strftime("%H:%M")
+                else:
+                    peak_str = "-"
+
+                vol_str = f"{int(row['peak_volume'])}" if pd.notna(row["peak_volume"]) else "-"
+                phf_str = f"{float(row['phf']):.2f}" if pd.notna(row["phf"]) else "-"
+                k_str = f"{float(row['k_factor']):.3f}" if pd.notna(row["k_factor"]) else "-"
+
+                # D values come from the pair's direction rows on that date, omitted for a one-sided pair
+                d_part = ""
+                if "/" in pair:
+                    p_name, o_name = pair.split("/", 1)
+                    dir_rows = days_df.loc[
+                        (days_df["date"] == row["date"]) & (days_df["pair"] == pair)
+                    ]
+                    p_sub = dir_rows.loc[dir_rows["direction"] == p_name]
+                    o_sub = dir_rows.loc[dir_rows["direction"] == o_name]
+                    if not p_sub.empty and not o_sub.empty:
+                        p_val = p_sub.iloc[0]["d_factor"]
+                        o_val = o_sub.iloc[0]["d_factor"]
+                        p_d_str = f"{float(p_val):.2f}" if pd.notna(p_val) else "-"
+                        o_d_str = f"{float(o_val):.2f}" if pd.notna(o_val) else "-"
+                        d_part = f"  D {p_name} {p_d_str} / {o_name} {o_d_str}"
+
+                print(
+                    f"{dt_str} {pair}  peak {peak_str} {vol_str} veh  "
+                    f"PHF {phf_str}  K {k_str}{d_part}"
+                )
+
+
+def handle_approach_volume(args: argparse.Namespace) -> None:
+    """Generate approach volume tables and plots for one or more intersections.
+
+    Args:
+        args: Parsed CLI arguments from the ``approach-volume`` subcommand.
+    """
+    intersections_dir = _get_intersections_dir()
+
+    if getattr(args, "all", False):
+        targets = [p.name for p in intersections_dir.iterdir() if p.is_dir()]
+        if not targets:
+            _die(f"No intersection directories found in {intersections_dir}")
+        print(f"\n🌍 Batch generating approach volume for {len(targets)} intersections...")
+    else:
+        targets = [_resolve_target_name(args.target, args.targetid)]
+
+    for target_name in targets:
+        try:
+            _approach_volume_single_intersection(target_name, args)
+        except SystemExit:
+            print(f"\n⏭️ Skipping {target_name} due to errors.", file=sys.stderr)
+        except Exception as exc:
+            print(
+                f"\n❌ Unexpected error generating approach volume for {target_name}: {exc}",
                 file=sys.stderr,
             )
             if getattr(args, "verbose", False):
@@ -4027,6 +4155,81 @@ def _add_green_time_parser(subs: argparse._SubParsersAction) -> None:
     p_gt.set_defaults(func=handle_green_time)
 
 
+def _add_approach_volume_parser(subs: argparse._SubParsersAction) -> None:
+    """Attach the ``approach-volume`` subcommand parser."""
+    p_av = subs.add_parser(
+        "approach-volume",
+        help="Generate approach volume tables and plots.",
+        description=(
+            "Calculate approach volume (UDOT S-M8), peak hour, PHF, K-factor and D-factor.\n\n"
+            "Outputs (CSV + interactive HTML) are saved to:\n"
+            "  intersections/<target>/outputs/"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    group_av = p_av.add_mutually_exclusive_group(required=True)
+    group_av.add_argument(
+        "--target",
+        metavar="FOLDER",
+        help="Exact intersection folder name (e.g. '2068_US-95_and_SH-8').",
+    )
+    group_av.add_argument(
+        "--targetid",
+        metavar="ID",
+        help="Intersection ID prefix (e.g. '2068').",
+    )
+    group_av.add_argument(
+        "--all",
+        action="store_true",
+        help="Generate approach volume for all intersections in the directory.",
+    )
+    p_av.add_argument(
+        "--start",
+        required=True,
+        metavar="DATETIME",
+        help=(
+            "Period start (local time): 'YYYY-MM-DD' or 'YYYY-MM-DD HH:MM' "
+            "for sub-day peak periods."
+        ),
+    )
+    p_av.add_argument(
+        "--end",
+        required=True,
+        metavar="DATETIME",
+        help=(
+            "Period end (local time): 'YYYY-MM-DD' (inclusive whole day) or "
+            "'YYYY-MM-DD HH:MM' (exclusive)."
+        ),
+    )
+    p_av.add_argument(
+        "--bin-len",
+        type=int,
+        default=15,
+        metavar="M",
+        help="Aggregation interval in minutes (default: 15, must divide 60).",
+    )
+    p_av.add_argument(
+        "--no-plot",
+        action="store_true",
+        dest="no_plot",
+        default=False,
+        help="Disable interactive HTML plot generation.",
+    )
+    p_av.add_argument(
+        "--timezone",
+        default=None,
+        metavar="TZ",
+        help="Override the timezone from metadata.json (e.g. 'US/Pacific').",
+    )
+    p_av.add_argument(
+        "--verbose",
+        action="store_true",
+        default=False,
+        help="Print full tracebacks for any errors.",
+    )
+    p_av.set_defaults(func=handle_approach_volume)
+
+
 def _add_ped_delay_parser(subs: argparse._SubParsersAction) -> None:
     """Attach the ``ped-delay`` subcommand parser."""
     p_pd = subs.add_parser(
@@ -5538,6 +5741,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_approach_delay_parser(subs)
     _add_yellow_red_parser(subs)
     _add_green_time_parser(subs)
+    _add_approach_volume_parser(subs)
     _add_ped_delay_parser(subs)
     _add_wait_time_parser(subs)
     _add_detector_health_parser(subs)
