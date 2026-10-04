@@ -20,6 +20,7 @@ Modules:
 - yellow_red_actuations: Yellow and red actuations (UDOT YRA) per green-to-green cycle
 - call_service: Call-to-service pairing; pedestrian delay and wait time (UDOT)
 - green_time_utilization: Actuations per second-of-green bin (UDOT GTU)
+- approach_volume: Directional volumes, peak hour, K- and D-factor (UDOT)
 """
 
 from .decoders import (
@@ -140,6 +141,7 @@ from .green_time_utilization import (
     summarize_gtu_bins,
     summarize_gtu_splits,
 )
+from .approach_volume import approach_volume, direction_detectors
 
 __all__ = [
     # Decoders
@@ -240,4 +242,7 @@ __all__ = [
     'green_time_utilization',
     'summarize_gtu_bins',
     'summarize_gtu_splits',
+    # Approach volume
+    'approach_volume',
+    'direction_detectors',
 ]

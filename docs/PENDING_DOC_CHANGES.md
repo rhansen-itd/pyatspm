@@ -88,3 +88,4 @@ See CLAUDE.md "Documentation Workflow" for the rules.
 - [src/atspm/cli.py] new green-time subcommand
 - [src/atspm/data/__init__.py] export GreenTimeEngine, get_green_time
 - [src/atspm/plotting/__init__.py] export plot_green_time
+- [src/atspm/analysis/__init__.py] export approach_volume, direction_detectors
