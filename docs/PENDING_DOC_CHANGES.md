@@ -81,3 +81,6 @@ See CLAUDE.md "Documentation Workflow" for the rules.
 - [src/atspm/data/__init__.py] export YellowRedEngine, get_yellow_red
 - [src/atspm/plotting/__init__.py] export plot_yellow_red
 - [src/atspm/analysis/__init__.py] export ped_delay, wait_time, summarize_ped_delay, summarize_wait_time
+- [src/atspm/cli.py] new ped-delay and wait-time subcommands
+- [src/atspm/data/__init__.py] export CallServiceEngine, get_ped_delay, get_wait_time
+- [src/atspm/plotting/__init__.py] export plot_ped_delay, plot_wait_time

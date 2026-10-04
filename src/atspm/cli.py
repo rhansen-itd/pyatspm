@@ -13,6 +13,8 @@ Exposes subcommands from intersection configuration setup through reporting and 
     atspm aog                --targetid <id> [...]       Generate Arrival on Green (AOG) tables
     atspm approach-delay     --targetid <id> [...]       Generate approach delay and Arrival on Red tables and plots
     atspm yellow-red         --targetid <id> [...]       Generate yellow and red actuation tables and plots
+    atspm ped-delay          --targetid <id> [...]       Generate pedestrian delay tables and plots
+    atspm wait-time          --targetid <id> [...]       Generate vehicle wait time tables and plots
     atspm detector-health    --targetid <id> [...]       Evaluate detector health rules and generate heatmap
     atspm split-failures     --targetid <id> [...]       Generate Purdue split-failure tables and plots
     atspm infer-detectors    --targetid <id> [...]       Propose detector configuration for review
@@ -1111,6 +1113,223 @@ def handle_yellow_red(args: argparse.Namespace) -> None:
         except Exception as exc:
             print(
                 f"\n❌ Unexpected error generating yellow and red actuations for {target_name}: {exc}",
+                file=sys.stderr,
+            )
+            if getattr(args, "verbose", False):
+                traceback.print_exc()
+
+
+# ---------------------------------------------------------------------------
+# ped-delay
+# ---------------------------------------------------------------------------
+
+def _ped_delay_single_intersection(target_name: str, args: argparse.Namespace) -> None:
+    """Core logic to generate pedestrian delay for a single intersection.
+
+    Args:
+        target_name: Exact intersection folder name
+            (e.g., ``'2068_US-95_and_SH-8'``).
+        args: Parsed CLI arguments from the ``ped-delay`` subcommand.
+    """
+    import pandas as pd
+    from atspm.data.call_service import CallServiceEngine
+    from atspm.data.critical import CriticalMovementEngine
+
+    target_dir = _get_target_dir(target_name)
+    meta = _load_metadata(target_dir)
+    db_path = _resolve_db_path(target_dir, meta)
+
+    output_dir = target_dir / "outputs"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    int_name = meta.get("intersection_name", target_name)
+    timezone = args.timezone or meta.get("timezone") or DEFAULT_TIMEZONE
+
+    if not db_path.exists():
+        _die(
+            f"Database not found: {db_path}\n"
+            f"Run 'atspm process --target {target_name}' first."
+        )
+
+    print(f"\n🚶  Generating Pedestrian Delay for {int_name}")
+    print(f"    DB:        {db_path.name}")
+    print(f"    Window:    {args.start} → {args.end}")
+    print(f"    Bins:      {args.bin_len}min")
+    if args.phases:
+        print(f"    Phases:    {args.phases}")
+
+    engine = CallServiceEngine(db_path=db_path, timezone=timezone)
+
+    try:
+        engine.ped_delay(
+            start=args.start,
+            end=args.end,
+            phases=args.phases,
+            bin_len=args.bin_len,
+            make_plot=not args.no_plot,
+            output_dir=output_dir,
+        )
+    except Exception as exc:
+        if args.verbose:
+            traceback.print_exc()
+        _die(f"Pedestrian delay generation failed: {exc}")
+
+    # After writing, print a short summary from the plans CSV
+    start_dt, end_dt = CriticalMovementEngine._parse_range(args.start, args.end)
+    stamp = engine._format_stamp(start_dt, end_dt)
+    plans_file = output_dir / f"PedDelay_Plans_{stamp}.csv"
+    if plans_file.exists():
+        plans_df = pd.read_csv(plans_file)
+        if not plans_df.empty:
+            for _, row in plans_df.iterrows():
+                ph = int(row["phase"])
+                plan = int(row["coord_plan"]) if pd.notna(row["coord_plan"]) else "?"
+                n_walks = int(row["n_walks"])
+                n_called = int(row["n_called"])
+                avg_d = f"{row['avg_delay_s']:.1f}s" if pd.notna(row.get("avg_delay_s")) else "N/A"
+                max_d = f"{row['max_delay_s']:.1f}s" if pd.notna(row.get("max_delay_s")) else "N/A"
+                print(
+                    f"    Ph{ph} Plan {plan}: {n_walks} walks, {n_called} called, "
+                    f"avg delay {avg_d}, max delay {max_d}"
+                )
+
+
+def handle_ped_delay(args: argparse.Namespace) -> None:
+    """Generate pedestrian delay tables and plots for one or more intersections.
+
+    Args:
+        args: Parsed CLI arguments from the ``ped-delay`` subcommand.
+    """
+    intersections_dir = _get_intersections_dir()
+
+    if getattr(args, "all", False):
+        targets = [p.name for p in intersections_dir.iterdir() if p.is_dir()]
+        if not targets:
+            _die(f"No intersection directories found in {intersections_dir}")
+        print(f"\n🌍 Batch generating pedestrian delay for {len(targets)} intersections...")
+    else:
+        targets = [_resolve_target_name(args.target, args.targetid)]
+
+    for target_name in targets:
+        try:
+            _ped_delay_single_intersection(target_name, args)
+        except SystemExit:
+            print(f"\n⏭️ Skipping {target_name} due to errors.", file=sys.stderr)
+        except Exception as exc:
+            print(
+                f"\n❌ Unexpected error generating pedestrian delay for {target_name}: {exc}",
+                file=sys.stderr,
+            )
+            if getattr(args, "verbose", False):
+                traceback.print_exc()
+
+
+# ---------------------------------------------------------------------------
+# wait-time
+# ---------------------------------------------------------------------------
+
+def _wait_time_single_intersection(target_name: str, args: argparse.Namespace) -> None:
+    """Core logic to generate vehicle wait time for a single intersection.
+
+    Args:
+        target_name: Exact intersection folder name
+            (e.g., ``'2068_US-95_and_SH-8'``).
+        args: Parsed CLI arguments from the ``wait-time`` subcommand.
+    """
+    import pandas as pd
+    from atspm.data.call_service import CallServiceEngine
+    from atspm.data.critical import CriticalMovementEngine
+
+    target_dir = _get_target_dir(target_name)
+    meta = _load_metadata(target_dir)
+    db_path = _resolve_db_path(target_dir, meta)
+
+    output_dir = target_dir / "outputs"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    int_name = meta.get("intersection_name", target_name)
+    timezone = args.timezone or meta.get("timezone") or DEFAULT_TIMEZONE
+
+    if not db_path.exists():
+        _die(
+            f"Database not found: {db_path}\n"
+            f"Run 'atspm process --target {target_name}' first."
+        )
+
+    max_wait = None if args.max_wait == 0 else args.max_wait
+
+    print(f"\n⏱️  Generating Wait Time for {int_name}")
+    print(f"    DB:        {db_path.name}")
+    print(f"    Window:    {args.start} → {args.end}")
+    print(f"    Dropping:  {args.dropping}")
+    print(f"    Max Wait:  {args.max_wait}s")
+    print(f"    Bins:      {args.bin_len}min")
+    if args.phases:
+        print(f"    Phases:    {args.phases}")
+
+    engine = CallServiceEngine(db_path=db_path, timezone=timezone)
+
+    try:
+        engine.wait_time(
+            start=args.start,
+            end=args.end,
+            phases=args.phases,
+            dropping=args.dropping,
+            max_wait=max_wait,
+            bin_len=args.bin_len,
+            make_plot=not args.no_plot,
+            output_dir=output_dir,
+        )
+    except Exception as exc:
+        if args.verbose:
+            traceback.print_exc()
+        _die(f"Wait time generation failed: {exc}")
+
+    # After writing, print a short summary from the plans CSV
+    start_dt, end_dt = CriticalMovementEngine._parse_range(args.start, args.end)
+    stamp = engine._format_stamp(start_dt, end_dt)
+    plans_file = output_dir / f"WaitTime_Plans_{stamp}.csv"
+    if plans_file.exists():
+        plans_df = pd.read_csv(plans_file)
+        if not plans_df.empty:
+            for _, row in plans_df.iterrows():
+                ph = int(row["phase"])
+                plan = int(row["coord_plan"]) if pd.notna(row["coord_plan"]) else "?"
+                n_win = int(row["n_windows"])
+                n_called = int(row["n_called"])
+                n_held = int(row["n_held"])
+                avg_w = f"{row['avg_wait_s']:.1f}s" if pd.notna(row.get("avg_wait_s")) else "N/A"
+                avg_udot = f"{row['avg_wait_udot_s']:.1f}s" if pd.notna(row.get("avg_wait_udot_s")) else "N/A"
+                print(
+                    f"    Ph{ph} Plan {plan}: {n_win} windows, {n_called} called, {n_held} held, "
+                    f"avg wait {avg_w}, avg wait (UDOT) {avg_udot}"
+                )
+
+
+def handle_wait_time(args: argparse.Namespace) -> None:
+    """Generate wait time tables and plots for one or more intersections.
+
+    Args:
+        args: Parsed CLI arguments from the ``wait-time`` subcommand.
+    """
+    intersections_dir = _get_intersections_dir()
+
+    if getattr(args, "all", False):
+        targets = [p.name for p in intersections_dir.iterdir() if p.is_dir()]
+        if not targets:
+            _die(f"No intersection directories found in {intersections_dir}")
+        print(f"\n🌍 Batch generating wait time for {len(targets)} intersections...")
+    else:
+        targets = [_resolve_target_name(args.target, args.targetid)]
+
+    for target_name in targets:
+        try:
+            _wait_time_single_intersection(target_name, args)
+        except SystemExit:
+            print(f"\n⏭️ Skipping {target_name} due to errors.", file=sys.stderr)
+        except Exception as exc:
+            print(
+                f"\n❌ Unexpected error generating wait time for {target_name}: {exc}",
                 file=sys.stderr,
             )
             if getattr(args, "verbose", False):
@@ -3576,6 +3795,187 @@ def _add_yellow_red_parser(subs: argparse._SubParsersAction) -> None:
     p_yr.set_defaults(func=handle_yellow_red)
 
 
+def _add_ped_delay_parser(subs: argparse._SubParsersAction) -> None:
+    """Attach the ``ped-delay`` subcommand parser."""
+    p_pd = subs.add_parser(
+        "ped-delay",
+        help="Generate pedestrian delay tables and plots.",
+        description=(
+            "Calculate per-walk, binned, and per-plan pedestrian delay\n"
+            "(UDOT S-M5).\n\n"
+            "Outputs (CSV + interactive HTML) are saved to:\n"
+            "  intersections/<target>/outputs/"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    group = p_pd.add_mutually_exclusive_group(required=True)
+    group.add_argument(
+        "--target",
+        metavar="FOLDER",
+        help="Exact intersection folder name (e.g. '2068_US-95_and_SH-8').",
+    )
+    group.add_argument(
+        "--targetid",
+        metavar="ID",
+        help="Intersection ID prefix (e.g. '2068').",
+    )
+    group.add_argument(
+        "--all",
+        action="store_true",
+        help="Generate pedestrian delay for all intersections in the directory.",
+    )
+    p_pd.add_argument(
+        "--start",
+        required=True,
+        metavar="DATETIME",
+        help=(
+            "Period start (local time): 'YYYY-MM-DD' or 'YYYY-MM-DD HH:MM' "
+            "for sub-day peak periods."
+        ),
+    )
+    p_pd.add_argument(
+        "--end",
+        required=True,
+        metavar="DATETIME",
+        help=(
+            "Period end (local time): 'YYYY-MM-DD' (inclusive whole day) or "
+            "'YYYY-MM-DD HH:MM' (exclusive)."
+        ),
+    )
+    p_pd.add_argument(
+        "--phases",
+        nargs="+",
+        type=int,
+        metavar="N",
+        default=None,
+        help="Signal phase numbers to analyse, e.g. --phases 2 4. Omit to analyse all configured phases.",
+    )
+    p_pd.add_argument(
+        "--bin-len",
+        type=int,
+        default=60,
+        metavar="MINUTES",
+        help="Summary aggregation interval in minutes (default: 60).",
+    )
+    p_pd.add_argument(
+        "--no-plot",
+        action="store_true",
+        dest="no_plot",
+        default=False,
+        help="Disable interactive HTML plot generation.",
+    )
+    p_pd.add_argument(
+        "--timezone",
+        default=None,
+        metavar="TZ",
+        help="Override the timezone from metadata.json (e.g. 'US/Pacific').",
+    )
+    p_pd.add_argument(
+        "--verbose",
+        action="store_true",
+        default=False,
+        help="Print full tracebacks for any errors.",
+    )
+    p_pd.set_defaults(func=handle_ped_delay)
+
+
+def _add_wait_time_parser(subs: argparse._SubParsersAction) -> None:
+    """Attach the ``wait-time`` subcommand parser."""
+    p_wt = subs.add_parser(
+        "wait-time",
+        help="Generate vehicle wait time tables and plots.",
+        description=(
+            "Calculate per-window, binned, and per-plan vehicle wait time\n"
+            "(UDOT S-M5).\n\n"
+            "Outputs (CSV + interactive HTML) are saved to:\n"
+            "  intersections/<target>/outputs/"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    group = p_wt.add_mutually_exclusive_group(required=True)
+    group.add_argument(
+        "--target",
+        metavar="FOLDER",
+        help="Exact intersection folder name (e.g. '2068_US-95_and_SH-8').",
+    )
+    group.add_argument(
+        "--targetid",
+        metavar="ID",
+        help="Intersection ID prefix (e.g. '2068').",
+    )
+    group.add_argument(
+        "--all",
+        action="store_true",
+        help="Generate wait time for all intersections in the directory.",
+    )
+    p_wt.add_argument(
+        "--start",
+        required=True,
+        metavar="DATETIME",
+        help=(
+            "Period start (local time): 'YYYY-MM-DD' or 'YYYY-MM-DD HH:MM' "
+            "for sub-day peak periods."
+        ),
+    )
+    p_wt.add_argument(
+        "--end",
+        required=True,
+        metavar="DATETIME",
+        help=(
+            "Period end (local time): 'YYYY-MM-DD' (inclusive whole day) or "
+            "'YYYY-MM-DD HH:MM' (exclusive)."
+        ),
+    )
+    p_wt.add_argument(
+        "--phases",
+        nargs="+",
+        type=int,
+        metavar="N",
+        default=None,
+        help="Signal phase numbers to analyse, e.g. --phases 2 4. Omit to analyse all configured phases.",
+    )
+    p_wt.add_argument(
+        "--dropping",
+        choices=["auto", "on", "off"],
+        default="auto",
+        help="Phases using UDOT's dropping algorithm ('auto', 'on', or 'off', default: 'auto').",
+    )
+    p_wt.add_argument(
+        "--max-wait",
+        type=float,
+        default=360.0,
+        metavar="SEC",
+        help="Maximum wait time in seconds for summary averages (default: 360.0, 0 means no cap).",
+    )
+    p_wt.add_argument(
+        "--bin-len",
+        type=int,
+        default=15,
+        metavar="MINUTES",
+        help="Summary aggregation interval in minutes (default: 15).",
+    )
+    p_wt.add_argument(
+        "--no-plot",
+        action="store_true",
+        dest="no_plot",
+        default=False,
+        help="Disable interactive HTML plot generation.",
+    )
+    p_wt.add_argument(
+        "--timezone",
+        default=None,
+        metavar="TZ",
+        help="Override the timezone from metadata.json (e.g. 'US/Pacific').",
+    )
+    p_wt.add_argument(
+        "--verbose",
+        action="store_true",
+        default=False,
+        help="Print full tracebacks for any errors.",
+    )
+    p_wt.set_defaults(func=handle_wait_time)
+
+
 def _add_split_monitor_parser(subs: argparse._SubParsersAction) -> None:
     """Attach the ``split-monitor`` subcommand parser."""
     p_sm = subs.add_parser(
@@ -4905,6 +5305,8 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_aog_parser(subs)
     _add_approach_delay_parser(subs)
     _add_yellow_red_parser(subs)
+    _add_ped_delay_parser(subs)
+    _add_wait_time_parser(subs)
     _add_detector_health_parser(subs)
     _add_split_failures_parser(subs)
     _add_infer_detectors_parser(subs)

@@ -64,6 +64,12 @@ from .yellow_red_actuations import (
     get_yellow_red,
 )
 
+from .call_service import (
+    CallServiceEngine,
+    get_ped_delay,
+    get_wait_time,
+)
+
 from .split_monitor import (
     SplitMonitorEngine,
     get_split_monitor,
@@ -168,6 +174,10 @@ __all__ = [
     # Yellow and Red Actuations
     'YellowRedEngine',
     'get_yellow_red',
+    # Call Service
+    'CallServiceEngine',
+    'get_ped_delay',
+    'get_wait_time',
     # Split Monitor
     'SplitMonitorEngine',
     'get_split_monitor',
