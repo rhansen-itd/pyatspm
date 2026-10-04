@@ -54,6 +54,11 @@ from .aog import (
     get_arrival_on_green,
 )
 
+from .approach_delay import (
+    ApproachDelayEngine,
+    get_approach_delay,
+)
+
 from .split_failures import (
     SplitFailureEngine,
     get_split_failures,
@@ -147,6 +152,9 @@ __all__ = [
     #AoG
     'AogEngine',
     'get_arrival_on_green',
+    # Approach Delay
+    'ApproachDelayEngine',
+    'get_approach_delay',
     # Split Failures
     'SplitFailureEngine',
     'get_split_failures',

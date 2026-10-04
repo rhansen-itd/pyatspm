@@ -10,6 +10,7 @@ Exposes subcommands from intersection configuration setup through reporting and 
     atspm counts             --targetid <id> [...]       Generate vehicle and pedestrian counts
     atspm splits             --targetid <id> [...]       Generate phase split and timing records
     atspm aog                --targetid <id> [...]       Generate Arrival on Green (AOG) tables
+    atspm approach-delay     --targetid <id> [...]       Generate approach delay and Arrival on Red tables and plots
     atspm detector-health    --targetid <id> [...]       Evaluate detector health rules and generate heatmap
     atspm split-failures     --targetid <id> [...]       Generate Purdue split-failure tables and plots
     atspm infer-detectors    --targetid <id> [...]       Propose detector configuration for review
@@ -869,6 +870,133 @@ def handle_aog(args: argparse.Namespace) -> None:
         except Exception as exc:
             print(
                 f"\n❌ Unexpected error generating AOG for {target_name}: {exc}",
+                file=sys.stderr,
+            )
+            if getattr(args, "verbose", False):
+                traceback.print_exc()
+
+
+# ---------------------------------------------------------------------------
+# approach-delay
+# ---------------------------------------------------------------------------
+
+def _approach_delay_single_intersection(target_name: str, args: argparse.Namespace) -> None:
+    """Core logic to generate approach delay for a single intersection.
+
+    Args:
+        target_name: Exact intersection folder name
+            (e.g., ``'2068_US-95_and_SH-8'``).
+        args: Parsed CLI arguments from the ``approach-delay`` subcommand.
+    """
+    import pandas as pd
+    from atspm.data.approach_delay import ApproachDelayEngine
+    from atspm.data.critical import CriticalMovementEngine
+
+    target_dir = _get_target_dir(target_name)
+    meta = _load_metadata(target_dir)
+    db_path = _resolve_db_path(target_dir, meta)
+
+    output_dir = target_dir / "outputs"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    int_name = meta.get("intersection_name", target_name)
+    timezone = args.timezone or meta.get("timezone") or DEFAULT_TIMEZONE
+
+    if not db_path.exists():
+        _die(
+            f"Database not found: {db_path}\n"
+            f"Run 'atspm process --target {target_name}' first."
+        )
+
+    print(f"\n🚦  Generating Approach Delay for {int_name}")
+    print(f"    DB:        {db_path.name}")
+    print(f"    Window:    {args.start} → {args.end}")
+    print(f"    Offset:    {args.offset}s")
+    print(f"    Bins:      {args.bin_len}")
+    if args.phases:
+        print(f"    Phases:    {args.phases}")
+
+    engine = ApproachDelayEngine(db_path=db_path, timezone=timezone)
+
+    try:
+        engine.approach_delay(
+            start=args.start,
+            end=args.end,
+            phases=args.phases,
+            travel_time_sec=args.offset,
+            bin_len=args.bin_len,
+            exclude_missing=args.exclude_missing,
+            make_plot=not args.no_plot,
+            output_dir=output_dir,
+        )
+    except Exception as exc:
+        if args.verbose:
+            traceback.print_exc()
+        _die(f"Approach delay generation failed: {exc}")
+
+    # After writing, print a short per-phase summary from the cycle CSV
+    start_dt, end_dt = CriticalMovementEngine._parse_range(args.start, args.end)
+    stamp = engine._format_stamp(start_dt, end_dt)
+    cycle_file = output_dir / f"AD_Cycle_{stamp}.csv"
+    if cycle_file.exists():
+        cyc = pd.read_csv(cycle_file)
+        if not cyc.empty and "phase" in cyc.columns:
+            for ph in sorted(cyc["phase"].unique()):
+                sub = cyc.loc[cyc["phase"] == ph]
+                n_total = len(sub)
+                n_cens = int(sub["censored"].sum())
+                n_ok = n_total - n_cens
+                ok_sub = sub.loc[~sub["censored"]]
+
+                tot_arr = ok_sub["arrivals"].sum() if "arrivals" in ok_sub.columns else 0
+                tot_g = ok_sub["arrivals_green"].sum() if "arrivals_green" in ok_sub.columns else 0
+                tot_y = ok_sub["arrivals_yellow"].sum() if "arrivals_yellow" in ok_sub.columns else 0
+                tot_r = ok_sub["arrivals_red"].sum() if "arrivals_red" in ok_sub.columns else 0
+                tot_delay = ok_sub["total_delay_s"].sum() if "total_delay_s" in ok_sub.columns else 0.0
+
+                src = str(sub["travel_source"].iloc[0]) if "travel_source" in sub.columns else "offset"
+                if tot_arr > 0:
+                    aog_pct = (tot_g / tot_arr) * 100.0
+                    aoy_pct = (tot_y / tot_arr) * 100.0
+                    aor_pct = (tot_r / tot_arr) * 100.0
+                    delay_per_veh = tot_delay / tot_arr
+                    print(
+                        f"    Ph{ph}: {n_ok} cycles ({n_cens} censored), "
+                        f"AoG {aog_pct:.1f}% / AoY {aoy_pct:.1f}% / AoR {aor_pct:.1f}%, "
+                        f"delay {delay_per_veh:.1f} s/veh ({src})"
+                    )
+                else:
+                    print(
+                        f"    Ph{ph}: {n_ok} cycles ({n_cens} censored), "
+                        f"AoG NaN% / AoY NaN% / AoR NaN%, "
+                        f"delay NaN s/veh ({src})"
+                    )
+
+
+def handle_approach_delay(args: argparse.Namespace) -> None:
+    """Generate approach delay and Arrival on Red tables and plots for one or more intersections.
+
+    Args:
+        args: Parsed CLI arguments from the ``approach-delay`` subcommand.
+    """
+    intersections_dir = _get_intersections_dir()
+
+    if getattr(args, "all", False):
+        targets = [p.name for p in intersections_dir.iterdir() if p.is_dir()]
+        if not targets:
+            _die(f"No intersection directories found in {intersections_dir}")
+        print(f"\n🌍 Batch generating approach delay for {len(targets)} intersections...")
+    else:
+        targets = [_resolve_target_name(args.target, args.targetid)]
+
+    for target_name in targets:
+        try:
+            _approach_delay_single_intersection(target_name, args)
+        except SystemExit:
+            print(f"\n⏭️ Skipping {target_name} due to errors.", file=sys.stderr)
+        except Exception as exc:
+            print(
+                f"\n❌ Unexpected error generating approach delay for {target_name}: {exc}",
                 file=sys.stderr,
             )
             if getattr(args, "verbose", False):
@@ -3015,6 +3143,110 @@ def _add_aog_parser(subs: argparse._SubParsersAction) -> None:
     p_aog.set_defaults(func=handle_aog)
 
 
+def _add_approach_delay_parser(subs: argparse._SubParsersAction) -> None:
+    """Attach the ``approach-delay`` subcommand parser."""
+    p_ad = subs.add_parser(
+        "approach-delay",
+        help="Generate approach delay and Arrival on Red tables and plots.",
+        description=(
+            "Calculate per-cycle and binned approach delay and arrival shares (AoG/AoY/AoR)\n"
+            "for advance detector arrivals. Detector IDs and travel times are read from\n"
+            "active configuration ('P{N} Arrival' and 'P{N} Arrival Travel' keys).\n\n"
+            "Outputs (CSV + interactive HTML) are saved to:\n"
+            "  intersections/<target>/outputs/"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    group_ad = p_ad.add_mutually_exclusive_group(required=True)
+    group_ad.add_argument(
+        "--target",
+        metavar="FOLDER",
+        help="Exact intersection folder name (e.g. '2068_US-95_and_SH-8').",
+    )
+    group_ad.add_argument(
+        "--targetid",
+        metavar="ID",
+        help="Intersection ID prefix (e.g. '2068').",
+    )
+    group_ad.add_argument(
+        "--all",
+        action="store_true",
+        help="Generate approach delay for all intersections in the directory.",
+    )
+    p_ad.add_argument(
+        "--start",
+        required=True,
+        metavar="DATETIME",
+        help=(
+            "Period start (local time): 'YYYY-MM-DD' or 'YYYY-MM-DD HH:MM' "
+            "for sub-day peak periods."
+        ),
+    )
+    p_ad.add_argument(
+        "--end",
+        required=True,
+        metavar="DATETIME",
+        help=(
+            "Period end (local time): 'YYYY-MM-DD' (inclusive whole day) or "
+            "'YYYY-MM-DD HH:MM' (exclusive)."
+        ),
+    )
+    p_ad.add_argument(
+        "--phases",
+        nargs="+",
+        type=int,
+        metavar="N",
+        default=None,
+        help="Signal phase numbers to analyse, e.g. --phases 2 6. Omit to analyse all configured phases.",
+    )
+    p_ad.add_argument(
+        "--offset",
+        type=float,
+        default=0.0,
+        metavar="SEC",
+        help="travel time from the advance detector to the stop line, used for phases without a Det_P{N}_Arrival_Travel key",
+    )
+    p_ad.add_argument(
+        "--bin-len",
+        default="15",
+        metavar="N",
+        help=(
+            "Aggregation interval in minutes, or 'cycle' for one row per "
+            "detected cycle (default: 15)."
+        ),
+    )
+    p_ad.add_argument(
+        "--exclude-missing",
+        action="store_true",
+        default=False,
+        help=(
+            "Drop bins labeled 'partial' or 'missing' from binned output. "
+            "Full-day-missing days are always dropped regardless of this flag. "
+            "Ignored in cycle mode."
+        ),
+    )
+    p_ad.add_argument(
+        "--no-plot",
+        action="store_true",
+        dest="no_plot",
+        default=False,
+        help="Disable interactive HTML plot generation.",
+    )
+    p_ad.add_argument(
+        "--timezone",
+        default=None,
+        metavar="TZ",
+        help="Override the timezone from metadata.json (e.g. 'US/Pacific').",
+    )
+    p_ad.add_argument(
+        "--verbose",
+        action="store_true",
+        default=False,
+        help="Print full tracebacks for any errors.",
+    )
+    p_ad.set_defaults(func=handle_approach_delay)
+
+
 def _add_detector_health_parser(subs: argparse._SubParsersAction) -> None:
     """Attach the ``detector-health`` subcommand parser."""
     p_dh = subs.add_parser(
@@ -4256,6 +4488,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_counts_parser(subs)
     _add_splits_parser(subs)
     _add_aog_parser(subs)
+    _add_approach_delay_parser(subs)
     _add_detector_health_parser(subs)
     _add_split_failures_parser(subs)
     _add_infer_detectors_parser(subs)

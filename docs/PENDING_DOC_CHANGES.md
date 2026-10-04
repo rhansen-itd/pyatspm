@@ -68,3 +68,6 @@ See CLAUDE.md "Documentation Workflow" for the rules.
 - [src/atspm/data/__init__.py] export PreemptEngine, get_preempt
 - [src/atspm/analysis/__init__.py] export approach_delay, bin_approach_delay (new analysis/approach_delay.py), arrival_travel_times
 - [int_cfg.csv / config] new optional Det: P{N} Arrival Travel key (seconds) → Det_P{N}_Arrival_Travel
+- [src/atspm/cli.py] new approach-delay subcommand
+- [src/atspm/data/__init__.py] export ApproachDelayEngine, get_approach_delay
+- [src/atspm/plotting/__init__.py] export plot_approach_delay
