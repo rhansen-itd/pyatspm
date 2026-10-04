@@ -21,6 +21,7 @@ Modules:
 - call_service: Call-to-service pairing; pedestrian delay and wait time (UDOT)
 - green_time_utilization: Actuations per second-of-green bin (UDOT GTU)
 - approach_volume: Directional volumes, peak hour, K- and D-factor (UDOT)
+- left_turn_gap: Opposing-through gaps for left turns, binned per green (UDOT)
 """
 
 from .decoders import (
@@ -95,6 +96,7 @@ from .detector_roles import (
     detector_sets,
     arrival_travel_times,
     phase_overlaps,
+    phase_directions,
 )
 
 from .detector_activity import detector_activity_profile
@@ -142,6 +144,12 @@ from .green_time_utilization import (
     summarize_gtu_splits,
 )
 from .approach_volume import approach_volume, direction_detectors
+from .left_turn_gap import (
+    left_turn_gaps,
+    left_turn_pairs,
+    summarize_left_turn_gaps,
+    through_phases,
+)
 
 __all__ = [
     # Decoders
@@ -193,6 +201,7 @@ __all__ = [
     'detector_sets',
     'arrival_travel_times',
     'phase_overlaps',
+    'phase_directions',
     # Approach delay
     'approach_delay',
     'bin_approach_delay',
@@ -244,5 +253,9 @@ __all__ = [
     'summarize_gtu_splits',
     # Approach volume
     'approach_volume',
+    'left_turn_gaps',
+    'left_turn_pairs',
+    'summarize_left_turn_gaps',
+    'through_phases',
     'direction_detectors',
 ]

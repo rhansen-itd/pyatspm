@@ -28,6 +28,13 @@ and one that says which signal a phase's driver sees (read by
     Det: P{N} Overlap  →  Det_P{N}_Overlap  overlap number ("1") or letter
                           ("A"); e.g. a protected left run as an FYA overlap
 
+and one that says which approach a through phase serves (read by
+:func:`phase_directions`)::
+
+    Det: P{N} Direction  →  Det_P{N}_Direction  "NB", "SB", "EB" or "WB"; the
+                            direction whose ``TM_{dir}T`` traffic phase N
+                            serves (left-turn gap analysis, S-M9)
+
 Role meanings (owner, 2026-10-02):
 
 - ``arrival`` — advance detection, upstream of the stop line (AoG, PCD).
@@ -73,6 +80,8 @@ _SUFFIX_TO_ROLE = {
 _WATCHDOG_KEY_RE = re.compile(r"^WD_Sensor\d+$")
 _TRAVEL_KEY_RE = re.compile(r"^Det_P(\d+)_Arrival_Travel$")
 _OVERLAP_KEY_RE = re.compile(r"^Det_P(\d+)_Overlap$")
+_DIRECTION_KEY_RE = re.compile(r"^Det_P(\d+)_Direction$")
+DIRECTIONS = ("NB", "SB", "EB", "WB")
 _TM_EXCLUDED_KEYS = frozenset({"TM_Exclusions"})
 
 _DTYPES = {
@@ -301,4 +310,32 @@ def phase_overlaps(config: Dict[str, Any]) -> Dict[int, int]:
         if not 1 <= num <= 16:
             raise ValueError(f"{key}: overlap must be 1-16 or A-P, got {raw!r}")
         out[int(match.group(1))] = num
+    return out
+
+
+def phase_directions(config: Dict[str, Any]) -> Dict[int, str]:
+    """Approach direction a through phase serves, from ``Det_P{N}_Direction``.
+
+    Args:
+        config: Active config dict, e.g. from
+            ``DatabaseManager.get_config_at_date``.
+
+    Returns:
+        ``{phase: direction}``, direction one of :data:`DIRECTIONS`.  Phases
+        without the key are absent.  Two phases may name the same direction
+        only if the caller tolerates it; see
+        ``left_turn_gap.through_phases``.
+
+    Raises:
+        ValueError: A value is not NB/SB/EB/WB (case-insensitive).
+    """
+    out: Dict[int, str] = {}
+    for key, raw in config.items():
+        match = _DIRECTION_KEY_RE.match(str(key))
+        if not match or _is_blank(raw):
+            continue
+        tok = str(raw).strip().upper()
+        if tok not in DIRECTIONS:
+            raise ValueError(f"{key}: direction must be one of {DIRECTIONS}, got {raw!r}")
+        out[int(match.group(1))] = tok
     return out

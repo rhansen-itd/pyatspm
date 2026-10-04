@@ -92,3 +92,5 @@ See CLAUDE.md "Documentation Workflow" for the rules.
 - [src/atspm/cli.py] new approach-volume subcommand
 - [src/atspm/data/__init__.py] export ApproachVolumeEngine, get_approach_volume
 - [src/atspm/plotting/__init__.py] export plot_approach_volume
+- [src/atspm/analysis/__init__.py] export left_turn_gaps, left_turn_pairs, summarize_left_turn_gaps, through_phases, phase_directions
+- [src/atspm/analysis/detector_roles.py] new config key Det_P{N}_Direction (int_cfg `Det:,P{N} Direction`)
