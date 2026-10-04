@@ -7,6 +7,7 @@ Exposes subcommands from intersection configuration setup through reporting and 
     atspm sync               {status,pull,push} [...]    Move intersection data between local and archive drives
     atspm retrieve           --targetid <id> [...]       Pull new .datZ files from configured devices via SCP
     atspm process            --targetid <id> [...]       Ingest data and compute cycles
+    atspm ingest-achd        --targetid <id> --source DIR Ingest ACHD event CSV exports into a database
     atspm report             --targetid <id> [...]       Generate ATSPM performance reports
     atspm counts             --targetid <id> [...]       Generate vehicle and pedestrian counts
     atspm splits             --targetid <id> [...]       Generate phase split and timing records
@@ -620,6 +621,149 @@ def handle_process(args: argparse.Namespace) -> None:
             print(f"\n❌ Unexpected error processing {target_name}: {exc}", file=sys.stderr)
             if getattr(args, "verbose", False):
                 traceback.print_exc()
+
+
+# ---------------------------------------------------------------------------
+# ingest-achd
+# ---------------------------------------------------------------------------
+
+_ACHD_DIRNAME = "achd"
+
+# ``271_Events_20240901T0000.csv`` → intersection id ``271``.
+_ACHD_FILE_RE = re.compile(r"^(\d+)_Events_\d{8}T\d{4}\.csv$", re.IGNORECASE)
+
+
+def _get_achd_dir() -> Path:
+    """Return the ``intersections/achd/`` directory, created if absent.
+
+    ACHD intersections are namespaced under their own subdirectory so their
+    ids (271, 272, …) never collide with the ITD/Econolite intersections that
+    live directly under ``intersections/`` (both number spaces include, e.g.,
+    201).
+    """
+    achd_dir = _get_intersections_dir() / _ACHD_DIRNAME
+    achd_dir.mkdir(parents=True, exist_ok=True)
+    return achd_dir
+
+
+def _discover_achd_ids(source_dir: Path) -> List[str]:
+    """Return the sorted distinct intersection ids present in *source_dir*."""
+    ids = set()
+    for p in source_dir.glob("*_Events_*.csv"):
+        m = _ACHD_FILE_RE.match(p.name)
+        if m:
+            ids.add(m.group(1))
+    return sorted(ids, key=lambda s: (len(s), s))
+
+
+def _ingest_achd_single(int_id: str, source_dir: Path, args: argparse.Namespace) -> None:
+    """Ingest one ACHD intersection's event CSVs into a pyATSPM database.
+
+    Writes ``intersections/achd/<id>/<id>_data.db`` and a sibling
+    ``metadata.json`` so the resulting database is a first-class target for the
+    rest of the toolchain (e.g. ``--target achd/<id>``).
+
+    Args:
+        int_id:     ACHD signal id (e.g. ``'271'``).
+        source_dir: Directory containing ``{id}_Events_*.csv`` files.
+        args:       Parsed CLI arguments.
+    """
+    from atspm.data import import_config
+    from atspm.data.achd_ingestion import ACHD_AGENCY_ID, run_achd_ingestion
+    from atspm.data.manager import DatabaseManager
+
+    target_dir = _get_achd_dir() / int_id
+    target_dir.mkdir(parents=True, exist_ok=True)
+    db_path = target_dir / f"{int_id}_data.db"
+    timezone = args.timezone or DEFAULT_TIMEZONE
+
+    print(f"\n🚦  Ingesting ACHD intersection {int_id}")
+    print(f"    Source: {source_dir}")
+    print(f"    DB:     {db_path}")
+
+    stats = run_achd_ingestion(
+        db_path=db_path,
+        raw_data_dir=source_dir,
+        intersection_id=int_id,
+        timezone=timezone,
+        rebuild=getattr(args, "rebuild", False),
+    )
+
+    # Import the intersection config (detector/movement mapping) into the DB
+    # if an int_cfg.csv sits beside the DB, mirroring 'atspm process'. Non-fatal:
+    # a missing or malformed config must not fail an otherwise good ingest.
+    config_csv = target_dir / "int_cfg.csv"
+    if config_csv.exists():
+        try:
+            import_config(config_csv, db_path)
+        except Exception as exc:  # noqa: BLE001
+            print(f"    ⚠️   Config import warning (non-fatal): {exc}")
+    else:
+        print("    ⚠️   int_cfg.csv not found beside DB — skipping config import")
+
+    # Drop a metadata.json so other subcommands can resolve this DB by
+    # --target achd/<id>; the authoritative metadata already lives in the DB.
+    meta_path = target_dir / "metadata.json"
+    if not meta_path.exists():
+        with DatabaseManager(db_path) as m:
+            db_meta = m.get_metadata()
+        metadata = {
+            "intersection_id":   int_id,
+            "intersection_name": db_meta.get("intersection_name", int_id),
+            "timezone":          timezone,
+            "folder_name":       f"{_ACHD_DIRNAME}/{int_id}",
+            "db_filename":       f"{int_id}_data.db",
+            "agency_id":         ACHD_AGENCY_ID,
+            "source":            "ACHD event CSV",
+        }
+        with meta_path.open("w") as fh:
+            json.dump(metadata, fh, indent=4)
+        print(f"    ✅  metadata.json written ({metadata['intersection_name']})")
+
+    return stats
+
+
+def handle_ingest_achd(args: argparse.Namespace) -> None:
+    """Ingest ACHD high-resolution event CSVs into pyATSPM database(s).
+
+    Reads ``{id}_Events_*.csv`` exports from ``--source`` and writes one
+    normalised database per intersection under ``intersections/achd/<id>/``.
+    Populates ``events`` (with comms-gap markers), ``ingestion_log`` spans and
+    ``metadata``; cycle/config derivation is a separate pass.
+
+    Target selection mirrors the other subcommands' mutually-exclusive group:
+    ``--targetid <id>`` for one intersection, or ``--all`` for every id found
+    in ``--source``.
+
+    Args:
+        args: Parsed CLI arguments.
+    """
+    source_dir = Path(args.source).expanduser()
+    if not source_dir.is_dir():
+        _die(f"Source directory not found: {source_dir}")
+
+    if getattr(args, "all", False):
+        int_ids = _discover_achd_ids(source_dir)
+        if not int_ids:
+            _die(f"No '*_Events_*.csv' files found in {source_dir}")
+        print(f"\n🌍 Ingesting {len(int_ids)} ACHD intersection(s): "
+              f"{', '.join(int_ids)}")
+    else:
+        if not args.targetid:
+            _die("Provide --targetid <id> or --all.")
+        int_ids = [str(args.targetid)]
+
+    for int_id in int_ids:
+        try:
+            _ingest_achd_single(int_id, source_dir, args)
+        except SystemExit:
+            print(f"\n⏭️ Skipping {int_id} due to errors.", file=sys.stderr)
+        except Exception as exc:
+            print(f"\n❌ Unexpected error ingesting {int_id}: {exc}", file=sys.stderr)
+            if getattr(args, "verbose", False):
+                traceback.print_exc()
+
+    print("\n✅  ACHD ingestion complete.")
 
 
 # ---------------------------------------------------------------------------
@@ -6421,6 +6565,52 @@ def _add_sync_parser(subs: argparse._SubParsersAction) -> None:
     p_sync.set_defaults(func=handle_sync)
 
 
+def _add_ingest_achd_parser(subs: argparse._SubParsersAction) -> None:
+    """Attach the ``ingest-achd`` subcommand parser."""
+    p_achd = subs.add_parser(
+        "ingest-achd",
+        help="Ingest ACHD event CSV exports into pyATSPM database(s).",
+        description=(
+            "Ingest ACHD high-resolution event exports ({id}_Events_*.csv)\n"
+            "into normalised pyATSPM databases, one per intersection under\n"
+            "intersections/achd/<id>/<id>_data.db.\n\n"
+            "Populates events (with comms-gap markers), ingestion_log spans and\n"
+            "metadata (id/name/timezone/agency). ACHD ids are namespaced under\n"
+            "achd/ so they never collide with the ITD intersections. Cycle and\n"
+            "config derivation are a separate pass (ACHD ships no int_cfg.csv).\n\n"
+            "Point --source at the directory of raw CSV exports (e.g. the\n"
+            "SPM_Data_Archive/ACHD_Data/Archive folder on the external SSD)."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    group_achd = p_achd.add_mutually_exclusive_group(required=True)
+    group_achd.add_argument(
+        "--targetid", metavar="ID",
+        help="ACHD intersection id to ingest (e.g. '271').",
+    )
+    group_achd.add_argument(
+        "--all", action="store_true",
+        help="Ingest every intersection id found in --source.",
+    )
+    p_achd.add_argument(
+        "--source", metavar="DIR", required=True,
+        help="Directory containing {id}_Events_*.csv exports.",
+    )
+    p_achd.add_argument(
+        "--timezone", metavar="TZ", default=None,
+        help=f"Intersection wall-clock IANA zone (default: {DEFAULT_TIMEZONE}).",
+    )
+    p_achd.add_argument(
+        "--rebuild", action="store_true",
+        help="Clear existing events/cycles/ingestion_log before ingesting.",
+    )
+    p_achd.add_argument(
+        "--verbose", action="store_true",
+        help="Print full tracebacks on per-intersection errors during --all.",
+    )
+    p_achd.set_defaults(func=handle_ingest_achd)
+
+
 def _build_parser() -> argparse.ArgumentParser:
     """Construct and return the top-level argument parser.
 
@@ -6444,6 +6634,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_sync_parser(subs)
     _add_retrieve_parser(subs)
     _add_process_parser(subs)
+    _add_ingest_achd_parser(subs)
     _add_report_parser(subs)
     _add_counts_parser(subs)
     _add_splits_parser(subs)

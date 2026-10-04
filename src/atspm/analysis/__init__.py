@@ -35,6 +35,13 @@ from .decoders import (
     detect_corruption,
 )
 
+from .achd import (
+    AchdDecodingError,
+    AchdHeader,
+    achd_events_from_frame,
+    parse_achd_header,
+)
+
 from .cycles import (
     CycleDetectionError,
     calculate_cycles,
@@ -161,6 +168,11 @@ __all__ = [
     'estimate_event_count',
     'insert_gap_marker',
     'detect_corruption',
+    # ACHD CSV parser
+    'AchdDecodingError',
+    'AchdHeader',
+    'achd_events_from_frame',
+    'parse_achd_header',
     # Cycles
     'CycleDetectionError',
     'calculate_cycles',

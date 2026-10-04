@@ -100,3 +100,8 @@ See CLAUDE.md "Documentation Workflow" for the rules.
 - [src/atspm/cli.py] new left-turn-gap subcommand
 - [src/atspm/data/__init__.py] export LeftTurnGapEngine, get_left_turn_gap
 - [src/atspm/plotting/__init__.py] export plot_left_turn_gap
+- [src/atspm/analysis/achd.py] new ACHD event-CSV parser (functional core): parse_achd_header, achd_events_from_frame
+- [src/atspm/analysis/__init__.py] export AchdDecodingError, AchdHeader, achd_events_from_frame, parse_achd_header
+- [src/atspm/data/achd_ingestion.py] new AchdIngestionEngine, run_achd_ingestion (ACHD CSV → events/ingestion_log/metadata; comms-gap fencing; intersections/achd/<id>/)
+- [src/atspm/data/__init__.py] export AchdIngestionEngine, run_achd_ingestion
+- [src/atspm/cli.py] new ingest-achd subcommand (--targetid/--all, --source, --timezone, --rebuild); also imports intersections/achd/<id>/int_cfg.csv into the DB config table when present (non-fatal), mirroring process
