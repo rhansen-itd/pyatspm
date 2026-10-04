@@ -74,6 +74,11 @@ from .green_time_utilization import (
     get_green_time,
 )
 
+from .left_turn_gap import (
+    LeftTurnGapEngine,
+    get_left_turn_gap,
+)
+
 from .call_service import (
     CallServiceEngine,
     get_ped_delay,
@@ -190,6 +195,9 @@ __all__ = [
     # Green Time Utilization
     'GreenTimeEngine',
     'get_green_time',
+    # Left Turn Gap
+    'LeftTurnGapEngine',
+    'get_left_turn_gap',
     # Call Service
     'CallServiceEngine',
     'get_ped_delay',

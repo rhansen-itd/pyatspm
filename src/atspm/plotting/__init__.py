@@ -20,6 +20,7 @@ from .approach_delay import plot_approach_delay
 from .approach_volume import plot_approach_volume
 from .yellow_red_actuations import plot_yellow_red
 from .green_time_utilization import plot_green_time
+from .left_turn_gap import plot_left_turn_gap
 from .call_service import plot_ped_delay, plot_wait_time
 from .split_monitor import plot_split_monitor
 from .detector_health import plot_detector_health
@@ -39,6 +40,7 @@ __all__ = [
     'plot_approach_volume',
     'plot_yellow_red',
     'plot_green_time',
+    'plot_left_turn_gap',
     'plot_ped_delay',
     'plot_wait_time',
     'plot_split_monitor',
