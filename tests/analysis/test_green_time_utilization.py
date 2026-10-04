@@ -340,6 +340,23 @@ def test_split_summary():
     assert r["act_per_cycle"] == 1.5
 
 
+def test_split_summary_needs_most_greens_programmed():
+    # Plan label 0 on all three greens; only the last sees a running plan
+    # (a label lagging the plan change).  1 of 3 → no programmed split.
+    ev = _events([(0, 10), (60, 10), (120, 10)], plan=0.0,
+                 extra=_plan_rows(-5, 0, 0, 0) + _plan_rows(110, 1, 100, 30))
+    cy, _ = green_time_utilization(ev, _PH, [_A], timeline=plan_timeline(ev))
+    assert cy["programmed_split"].notna().tolist() == [False, False, True]
+    s = summarize_gtu_splits(cy, bin_len=None)
+    assert np.isnan(s.loc[0, "programmed_split"]) and np.isnan(s.loc[0, "programmed_green"])
+    # 2 of 3 is enough.
+    ev = _events([(0, 10), (60, 10), (120, 10)], plan=1.0,
+                 extra=_plan_rows(-5, 0, 0, 0) + _plan_rows(50, 1, 100, 30))
+    cy, _ = green_time_utilization(ev, _PH, [_A], timeline=plan_timeline(ev))
+    s = summarize_gtu_splits(cy, bin_len=None)
+    assert s.loc[0, "programmed_green"] == 24.0
+
+
 def test_split_summary_keeps_censored_only_group():
     ev = _events([(0, 10), (1000, 10)], [1.0], gaps=[1005])
     cy, _ = green_time_utilization(ev, _PH, [_A])

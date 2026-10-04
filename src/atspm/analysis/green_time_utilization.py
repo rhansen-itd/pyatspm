@@ -425,9 +425,11 @@ def summarize_gtu_splits(cycle_df: pd.DataFrame, bin_len: Optional[int] = 15) ->
             n_censored        int
             avg_green_s       float – mean green_dur (UDOT "Average Split")
             avg_clearance_s   float – mean yellow + red clearance
-            programmed_split  float – median split in force (NaN if unknown)
+            programmed_split  float – median split in force; NaN unless at
+                                      least half the uncensored greens
+                                      have one
             programmed_green  float – median programmed_green (UDOT
-                                      "Programmed Split")
+                                      "Programmed Split"), same rule
             actuations        int
             act_per_cycle     float – actuations / n_cycles
 
@@ -454,8 +456,14 @@ def summarize_gtu_splits(cycle_df: pd.DataFrame, bin_len: Optional[int] = 15) ->
         avg_clearance_s=("clearance_dur", "mean"),
         programmed_split=("_split", "median"),
         programmed_green=("programmed_green", "median"),
+        _n_split=("_split", "count"),
         actuations=("_act", "sum"),
     ).reset_index()
+    # A plan label can lag the plan change by a cycle, so a few greens of a
+    # free group see the next plan's split (315 P4 "plan 0": 3 of 372).
+    # Report a programmed split only when most of the group has one.
+    thin = agg["_n_split"] * 2 < agg["n_cycles"]
+    agg.loc[thin, ["programmed_split", "programmed_green"]] = np.nan
     agg["act_per_cycle"] = _ratio(agg["actuations"], agg["n_cycles"])
     for col in ("n_cycles", "n_censored", "actuations", "phase"):
         agg[col] = agg[col].astype(int)
