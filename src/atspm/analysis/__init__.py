@@ -17,6 +17,7 @@ Modules:
 - timing_actuation: Timing-and-actuation intervals, row layout, finding links
 - preempt: Preemption request/service episodes and daily summary
 - split_monitor: Programmed-plan timeline (131–149) and per-service split monitor
+- yellow_red_actuations: Yellow and red actuations (UDOT YRA) per green-to-green cycle
 """
 
 from .decoders import (
@@ -90,6 +91,7 @@ from .detector_roles import (
     parse_detector_roles,
     detector_sets,
     arrival_travel_times,
+    phase_overlaps,
 )
 
 from .detector_activity import detector_activity_profile
@@ -124,6 +126,7 @@ from .split_monitor import (
     split_monitor,
     split_monitor_stats,
 )
+from .yellow_red_actuations import summarize_yellow_red, yellow_red_actuations
 
 __all__ = [
     # Decoders
@@ -174,6 +177,7 @@ __all__ = [
     'parse_detector_roles',
     'detector_sets',
     'arrival_travel_times',
+    'phase_overlaps',
     # Approach delay
     'approach_delay',
     'bin_approach_delay',
@@ -212,4 +216,6 @@ __all__ = [
     'programmed_at',
     'split_monitor',
     'split_monitor_stats',
+    'yellow_red_actuations',
+    'summarize_yellow_red',
 ]

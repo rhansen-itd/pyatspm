@@ -22,6 +22,12 @@ One non-role key rides with the arrival role (read by
                                  detector → stop line ("5.4", or one value
                                  per Det_P{N}_Arrival detector, in order)
 
+and one that says which signal a phase's driver sees (read by
+:func:`phase_overlaps`)::
+
+    Det: P{N} Overlap  →  Det_P{N}_Overlap  overlap number ("1") or letter
+                          ("A"); e.g. a protected left run as an FYA overlap
+
 Role meanings (owner, 2026-10-02):
 
 - ``arrival`` — advance detection, upstream of the stop line (AoG, PCD).
@@ -66,6 +72,7 @@ _SUFFIX_TO_ROLE = {
 }
 _WATCHDOG_KEY_RE = re.compile(r"^WD_Sensor\d+$")
 _TRAVEL_KEY_RE = re.compile(r"^Det_P(\d+)_Arrival_Travel$")
+_OVERLAP_KEY_RE = re.compile(r"^Det_P(\d+)_Overlap$")
 _TM_EXCLUDED_KEYS = frozenset({"TM_Exclusions"})
 
 _DTYPES = {
@@ -262,4 +269,36 @@ def arrival_travel_times(config: Dict[str, Any]) -> Dict[int, Dict[int, float]]:
                 f"{key} has {len(secs)} values for {len(dets)} arrival detectors {dets}"
             )
         out[phase] = dict(zip(dets, secs))
+    return out
+
+
+def phase_overlaps(config: Dict[str, Any]) -> Dict[int, int]:
+    """Overlap shown to a phase's movement, from the ``Det_P{N}_Overlap`` keys.
+
+    Args:
+        config: Active config dict, e.g. from
+            ``DatabaseManager.get_config_at_date``.
+
+    Returns:
+        ``{phase: overlap_number}`` (A = 1 … P = 16).  Phases without the
+        key are absent.
+
+    Raises:
+        ValueError: A value is neither an integer 1–16 nor a letter A–P.
+    """
+    out: Dict[int, int] = {}
+    for key, raw in config.items():
+        match = _OVERLAP_KEY_RE.match(str(key))
+        if not match or _is_blank(raw):
+            continue
+        tok = str(raw).strip().upper()
+        if tok.isdigit():
+            num = int(tok)
+        elif len(tok) == 1 and "A" <= tok <= "P":
+            num = ord(tok) - ord("A") + 1
+        else:
+            num = 0
+        if not 1 <= num <= 16:
+            raise ValueError(f"{key}: overlap must be 1-16 or A-P, got {raw!r}")
+        out[int(match.group(1))] = num
     return out
