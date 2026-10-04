@@ -85,3 +85,6 @@ See CLAUDE.md "Documentation Workflow" for the rules.
 - [src/atspm/data/__init__.py] export CallServiceEngine, get_ped_delay, get_wait_time
 - [src/atspm/plotting/__init__.py] export plot_ped_delay, plot_wait_time
 - [src/atspm/analysis/__init__.py] export green_time_utilization, summarize_gtu_bins, summarize_gtu_splits
+- [src/atspm/cli.py] new green-time subcommand
+- [src/atspm/data/__init__.py] export GreenTimeEngine, get_green_time
+- [src/atspm/plotting/__init__.py] export plot_green_time

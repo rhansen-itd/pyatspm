@@ -64,6 +64,11 @@ from .yellow_red_actuations import (
     get_yellow_red,
 )
 
+from .green_time_utilization import (
+    GreenTimeEngine,
+    get_green_time,
+)
+
 from .call_service import (
     CallServiceEngine,
     get_ped_delay,
@@ -174,6 +179,9 @@ __all__ = [
     # Yellow and Red Actuations
     'YellowRedEngine',
     'get_yellow_red',
+    # Green Time Utilization
+    'GreenTimeEngine',
+    'get_green_time',
     # Call Service
     'CallServiceEngine',
     'get_ped_delay',
