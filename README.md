@@ -1,6 +1,6 @@
 # pyATSPM
 
-A Python package for Automated Traffic Signal Performance Measures (ATSPM) analysis: ingest raw signal controller event logs (`.datZ`), store them in a normalized per-intersection SQLite database, and compute signal performance measures (Arrival on Green, counts, phase splits, detector discrepancies, saturation flow rate, critical movements) with Plotly visualizations.
+A Python package for Automated Traffic Signal Performance Measures (ATSPM) analysis: ingest raw signal controller event logs (`.datZ`, plus ACHD event-CSV exports), store them in a normalized per-intersection SQLite database, and compute signal performance measures with Plotly visualizations. Measures include Arrival on Green, counts, phase splits, detector discrepancies, saturation flow rate, critical movements, Purdue split failures, approach delay and volume, yellow/red actuations, green-time utilization, permissive left-turn gaps, pedestrian delay and vehicle wait time, split monitoring, a throughput-maximizing cycle/split optimizer, preemption episodes, controller clock drift, and detector health/inference — alongside video overlays and video-to-database time sync, and a local↔archive data-sync workflow.
 
 Built on two principles:
 - **One SQLite database per intersection** — normalized, indexed, WAL-mode.
@@ -19,7 +19,7 @@ pyatspm/
 │
 ├── docs/
 │   ├── architecture.md       # Functional Core / Imperative Shell, design principles
-│   ├── database_schema.md    # events, cycles, config, metadata, ingestion_log tables
+│   ├── database_schema.md    # events, cycles, config, metadata, ingestion_log, detector_findings tables
 │   ├── configuration.md      # metadata.json and int_cfg.csv reference
 │   ├── cli_reference.md      # every `atspm` subcommand and flag
 │   ├── api_reference.md      # public functions/classes per package
