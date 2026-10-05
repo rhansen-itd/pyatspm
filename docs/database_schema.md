@@ -19,7 +19,14 @@ Indexes: `idx_events_timestamp`, `idx_events_code_param`, `idx_events_ts_code` (
 
 `event_code = -1` is inserted by the ingestion pipeline whenever a discontinuity is detected (missing/corrupt file, controller reset). Any logic that computes a duration or pairs sequential events (phase splits, AOG, counts, detector intervals) must stop at a gap marker and never interpolate or bridge across it.
 
-A **backward controller clock set** also produces one, placed 0.05 s below the first post-step event. The set makes recorded time decrease part-way through a file — the offsets replay a band, so events from two different real moments carry the same labels — and the marker fences that break so nothing is measured across it. It does not repair the band. Ingestion reports these separately as `clock_steps`, while `gap_markers` stays the database-wide `event_code = -1` total (clock-step markers included).
+Two kinds of discontinuity share `event_code = -1`; the `parameter` column says which:
+
+| `parameter` | Constant (`analysis.decoders`) | Meaning |
+|---|---|---|
+| `-1` | `COMMS_GAP_PARAM` | Lost data — missing/corrupt files, comms gap |
+| `-2` | `CLOCK_STEP_FENCE_PARAM` | Backward controller-clock step, fenced at ingest |
+
+Every consumer must stop at either kind; the `parameter` only lets the clock-mark decoder tell a fenced step from lost data. A **backward controller clock set** is placed 0.05 s below the first post-step event. The set makes recorded time decrease part-way through a file — the offsets replay a band, so events from two different real moments carry the same labels — and the marker fences that break so nothing is measured across it. It does not repair the band. Ingestion reports these separately as `clock_steps`, while `gap_markers` stays the database-wide `event_code = -1` total (clock-step fences included). `check_data_quality` likewise splits them: `gap_count` counts comms-gap markers only, `clock_step_count` the fences.
 
 ### Common event codes
 
@@ -81,7 +88,7 @@ CREATE TABLE config (
     start_date TEXT    NOT NULL,
     end_date   TEXT,
     -- dynamic columns added at import time, one per int_cfg.csv row category:
-    -- TM_*, RB_*, Det_*, WD_*, TM_Exclusions
+    -- TM_*, RB_*, Det_*, WD_*, Clk_*, TM_Exclusions
     UNIQUE(start_date) ON CONFLICT REPLACE
 )
 ```
@@ -125,6 +132,30 @@ CREATE TABLE ingestion_log (
 Index: `idx_ingestion_span_end`.
 
 Tracks contiguous spans of ingested data rather than individual filenames. Adjacent/overlapping spans are merged (`MIN(start)`, `MAX(end)`, summed `row_count`) during gap-fill ingestion. Use this table — not `events` — for date-level coverage/summary queries; `events` can hold millions of rows per intersection.
+
+## `detector_findings` — detector-health findings
+
+```sql
+CREATE TABLE detector_findings (
+    date        TEXT    NOT NULL,
+    window      TEXT    NOT NULL,
+    detector    INTEGER NOT NULL,
+    phase       INTEGER NOT NULL,
+    role        TEXT    NOT NULL DEFAULT '',
+    rule        TEXT    NOT NULL,
+    severity    TEXT    NOT NULL,
+    value       REAL,
+    threshold   REAL,
+    message     TEXT,
+    ts          REAL    NOT NULL,
+    computed_at TEXT    NOT NULL,
+    UNIQUE(date, window, detector, phase, role, rule, ts) ON CONFLICT REPLACE
+)
+```
+
+Index: `idx_findings_date`.
+
+One row per `atspm detector-health` finding, written by `DetectorHealthEngine` via `DatabaseManager.replace_findings()` and read back with `get_findings()`. The key is delete-then-replace idempotent so a re-run over a date range overwrites its own rows. SQLite treats NULLs as distinct in a UNIQUE index, so NA `phase`/`ts`/`role` are stored as sentinels (`phase`/`ts` = `-1`, `role` = `''`) to keep the key total — one day can hold several reboot episodes (distinct `ts`) and several units failing at the same instant (distinct `role`). The table is created lazily by `replace_findings` for databases that predate it, and `clear_ingested_data()` (behind `atspm process --rebuild`) clears it along with `events`/`cycles`/`ingestion_log`.
 
 ## No ORM
 

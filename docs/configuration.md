@@ -57,15 +57,20 @@ Loaded with `pd.read_csv(csv_path, index_col=[0, 1])`. Each date column becomes 
 |---|---|---|
 | `TM:` | `TM_<movement>` | e.g. `TM_EBL` — detector IDs assigned to a named movement, used by `vehicle_counts` |
 | `RB:` | `RB_<param>` | e.g. `RB_R1` — ring-barrier phase membership |
-| `Det:` / `Plt:` | `Det_<param>` | both prefixes map to the same `Det_` column family |
-| `WD:` | `WD_<param>` | watchdog/timing parameters |
+| `Det:` / `Plt:` | `Det_<param>` | both prefixes map to the same `Det_` column family; spaces in the parameter become underscores (`P2 Stop Bar` → `Det_P2_Stop_Bar`) |
+| `WD:` | `WD_<param>` | watchdog/detector-health parameters (spaces → underscores); consumed by `detector-health` |
+| `Clk:` | `Clk_<param>` | clock-mark decoder parameters (spaces → underscores): `Clk_Behind`, `Clk_Ahead`, `Clk_Set` — the ped phases a controller pulses to encode clock drift, read by `clock-drift` |
 | `Exc:` | — | rows are collected and JSON-encoded into a single `TM_Exclusions` column instead of one column per row |
 
 ### `Det_` column patterns
 
 - **`Det_P<N>_Arrival`** — comma-separated advance-detector IDs for phase `N` (e.g. `"33,34"`). Read by `AogEngine`/`arrival_on_green` to find which detectors count as "arrivals" for that phase.
 - **`Det_P<N>_Pairs`** — JSON list of `[det_a, det_b]` pairs for phase `N` (e.g. `"[[33,40]]"`), matched by the regex `^Det_P(\d+)_Pairs$` and parsed into `[{"phase": N, "det_a": ..., "det_b": ...}, ...]`. Read by `DetectorEngine`/`analyze_discrepancies` to find co-located detector pairs to compare.
-- **`Det_P<N>_Stopbar`** — comma-separated stop-bar detector IDs for phase `N` (e.g. `"1,2"`). Read by `FlowRateEngine`/`flow_rate` to measure departures within the split window, and by `CriticalMovementEngine` to map `TM_*` movements onto phases by detector overlap. A movement whose detectors overlap no phase's stop-bar set, or more than one, is reported as unmapped and excluded from the demand total rather than guessed at.
+- **`Det_P<N>_Stop_Bar`** (or the older `Det_P<N>_Stopbar`, still accepted) — comma-separated stop-bar detector IDs for phase `N` (e.g. `"1,2"`), from `Det:` rows named `P<N> Stop Bar`. Read by `FlowRateEngine`/`flow_rate` to measure departures within the split window, and by `CriticalMovementEngine` to map `TM_*` movements onto phases by detector overlap. A movement whose detectors overlap no phase's stop-bar set, or more than one, is reported as unmapped and excluded from the demand total rather than guessed at.
+- **`Det_P<N>_Occupancy`** — comma-separated presence (stop-line occupancy) detector IDs for phase `N`, one zone per lane. Read by `SplitFailureEngine`/`split_failures` for Purdue GOR/ROR5 and, with `--role occupancy`, by the yellow/red and green-time measures. Distinct from `Stop_Bar` count channels.
+- **`Det_P<N>_Arrival_Travel`** — optional travel time in seconds from the advance detector to the stop line for phase `N`. Read by `ApproachDelayEngine`/`approach_delay` (`arrival_travel_times`); phases without this key fall back to the command's `--offset`.
+- **`Det_P<N>_Overlap`** — the overlap (number, or letter `A`-`P`) driven by phase `N`'s detectors. Read by `phase_overlaps`; lets `yellow-red` and `green-time` measure the configured overlap with `--overlap`.
+- **`Det_P<N>_Direction`** — the approach direction (e.g. `NB`, `SBL`) phase `N` serves. Read by `phase_directions`/`through_phases` to pair permissive left turns with their opposing through movement in `left-turn-gap`.
 
 ### `TM_Exclusions`
 
