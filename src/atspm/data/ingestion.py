@@ -283,7 +283,11 @@ class IngestionEngine:
                         for info in zf.infolist():
                             if info.is_dir() or not info.filename.endswith(".datZ"):
                                 continue
-                            member_name = Path(info.filename).name
+                            # pack-raw writes flat members; a nested path could
+                            # not be read back by its basename.
+                            member_name = info.filename
+                            if "/" in member_name:
+                                continue
                             if member_name in candidates:
                                 # Loose takes precedence; or already recorded from earlier archive
                                 continue
@@ -376,7 +380,7 @@ class IngestionEngine:
 
     def _process_batches(
         self,
-        file_list: List[Tuple[Path, float]],
+        file_list: List[Union[DatzSource, Tuple[Path, float]]],
         batch_size: int,
         fill_gaps: bool,
     ) -> None:
@@ -407,8 +411,12 @@ class IngestionEngine:
         # Ranges committed in this batch; fed to the cycle hook after commit.
         batch_cycle_ranges: List[Tuple[float, float]] = []
 
-        current_zip_handle: Optional[zipfile.ZipFile] = None
-        current_zip_path: Optional[Path] = None
+        # One open handle per archive for the whole run: parsing a large
+        # central directory per file would dominate when loose and zipped
+        # sources interleave.
+        zip_handles: Dict[Path, Optional[zipfile.ZipFile]] = {}
+        # True once a file has been processed since the last commit.
+        pending = False
 
         try:
             for i, item in enumerate(file_list):
@@ -433,53 +441,51 @@ class IngestionEngine:
 
                 prev_last_event_ts = active_span[3] if active_span is not None else None
 
-                # Keep ZipFile open for consecutive files sharing the same archive
-                if archive_path != current_zip_path:
-                    if current_zip_handle is not None:
-                        current_zip_handle.close()
-                        current_zip_handle = None
-                    current_zip_path = archive_path
-                    if archive_path is not None:
+                archive_handle = None
+                if archive_path is not None:
+                    if archive_path not in zip_handles:
                         try:
-                            current_zip_handle = zipfile.ZipFile(archive_path, "r")
-                        except Exception as exc:
+                            zip_handles[archive_path] = zipfile.ZipFile(archive_path, "r")
+                        except (zipfile.BadZipFile, OSError) as exc:
                             print(f"Error opening archive {archive_path.name}: {exc}")
-                            current_zip_handle = None
+                            zip_handles[archive_path] = None
+                    archive_handle = zip_handles[archive_path]
 
                 result = self._process_file(
                     source, utc_start, next_file_utc,
                     active_span, prev_last_event_ts,
-                    archive_handle=current_zip_handle,
+                    archive_handle=archive_handle,
                 )
-                if result is None:
-                    continue
+                # A file that fails to read/decode must not skip the final
+                # commit, or the buffered batch would be silently dropped.
+                if result is not None:
+                    events_df, row_count, gap_opened, new_span = result
+                    self._files_processed += 1
+                    self._total_events    += row_count
 
-                events_df, row_count, gap_opened, new_span = result
-                self._files_processed += 1
-                self._total_events    += row_count
+                    if not events_df.empty:
+                        events_buffer.append(events_df)
 
-                if not events_df.empty:
-                    events_buffer.append(events_df)
+                    if gap_opened and active_span is not None:
+                        span_updates.append(active_span[:3])
+                        batch_cycle_ranges.append((active_span[0], active_span[1]))
+                        active_span = new_span
+                    elif active_span is None:
+                        active_span = new_span
+                    else:
+                        active_span = (
+                            active_span[0],
+                            utc_start,
+                            active_span[2] + row_count,
+                            new_span[3],
+                        )
 
-                if gap_opened and active_span is not None:
-                    span_updates.append(active_span[:3])
-                    batch_cycle_ranges.append((active_span[0], active_span[1]))
-                    active_span = new_span
-                elif active_span is None:
-                    active_span = new_span
-                else:
-                    active_span = (
-                        active_span[0],
-                        utc_start,
-                        active_span[2] + row_count,
-                        new_span[3],
-                    )
+                    pending = True
 
-                should_commit = (
+                should_commit = pending and (
                     len(span_updates) + 1 >= batch_size or i == total - 1
                 )
-                if should_commit and (events_buffer or span_updates or
-                                      active_span is not None):
+                if should_commit:
                     all_spans = span_updates[:]
                     if active_span is not None:
                         all_spans.append(active_span[:3])
@@ -495,10 +501,12 @@ class IngestionEngine:
                     events_buffer       = []
                     span_updates        = []
                     batch_cycle_ranges  = []
+                    pending             = False
                     # active_span stays open — it may still grow
         finally:
-            if current_zip_handle is not None:
-                current_zip_handle.close()
+            for zf in zip_handles.values():
+                if zf is not None:
+                    zf.close()
 
     # ------------------------------------------------------------------
     # Cycle processing hook
@@ -575,10 +583,7 @@ class IngestionEngine:
         try:
             if isinstance(source, DatzSource):
                 if source.archive_path is not None:
-                    if (
-                        archive_handle is not None
-                        and getattr(archive_handle, "filename", None) == str(source.archive_path)
-                    ):
+                    if archive_handle is not None:
                         raw_bytes = archive_handle.read(source.name)
                     else:
                         with zipfile.ZipFile(source.archive_path, "r") as zf:

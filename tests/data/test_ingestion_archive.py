@@ -284,3 +284,26 @@ class TestArchiveIngestion:
         assert stats["files_processed"] == 1
         assert stats["total_events"] == 2
 
+
+    def test_nested_zip_member_is_skipped(self, empty_db, raw_dir):
+        good = "ECON_10.0.0.1_2026_04_01_0100.datZ"
+        _create_zip_archive(raw_dir / "raw_2026_04.zip", {
+            good: _datz_bytes("4/1/2026,01:00:00.0"),
+            "sub/ECON_10.0.0.1_2026_04_01_0200.datZ": _datz_bytes("4/1/2026,02:00:00.0"),
+        })
+        engine = IngestionEngine(empty_db, raw_dir, timezone="US/Mountain")
+        assert [c.name for c in engine._scan_all_candidates()] == [good]
+
+    def test_unreadable_last_file_still_commits_batch(self, empty_db, raw_dir):
+        _create_zip_archive(raw_dir / "raw_2026_04.zip", {
+            "ECON_10.0.0.1_2026_04_01_0100.datZ": _datz_bytes("4/1/2026,01:00:00.0"),
+            "ECON_10.0.0.1_2026_04_01_0200.datZ": b"not-a-datz-payload",
+        })
+        engine = IngestionEngine(empty_db, raw_dir, timezone="US/Mountain")
+        engine.run()
+
+        with sqlite3.connect(empty_db) as conn:
+            n_events = conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+            n_spans = conn.execute("SELECT COUNT(*) FROM ingestion_log").fetchone()[0]
+        assert n_events == 2
+        assert n_spans == 1

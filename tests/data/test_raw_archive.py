@@ -268,8 +268,56 @@ class TestPackMonthlyArchive:
 
         res = pack_monthly_archive(tmp_path, year=2026, month=6, remove_loose=True)
         assert res.ok is False
-        assert "Size mismatch" in res.detail
+        assert "differs from the loose file" in res.detail
         assert f1.exists()
+
+    def test_same_size_different_content_aborts_without_deleting_loose(self, tmp_path):
+        name = "ECON_10.0.0.1_2026_06_15_0100.datZ"
+        archive = tmp_path / "raw_2026_06.zip"
+        with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_STORED) as zf:
+            zf.writestr(name, b"AAAA")
+        f1 = tmp_path / name
+        f1.write_bytes(b"BBBB")
+
+        res = pack_monthly_archive(tmp_path, year=2026, month=6, remove_loose=True)
+        assert res.ok is False
+        assert f1.read_bytes() == b"BBBB"
+
+    def test_interrupted_append_leaves_existing_archive_intact(self, tmp_path, monkeypatch):
+        f1 = _make_dummy_datz(tmp_path / "ECON_10.0.0.1_2026_06_15_0100.datZ", b"file-1")
+        assert pack_monthly_archive(tmp_path, year=2026, month=6, remove_loose=True).ok
+        assert not f1.exists()
+        archive = tmp_path / "raw_2026_06.zip"
+        before = archive.read_bytes()
+
+        f2 = _make_dummy_datz(tmp_path / "ECON_10.0.0.1_2026_06_16_0100.datZ", b"file-2")
+
+        # Members get written but the central directory never does, as on a
+        # crash or power loss mid-pack.
+        def _crash(self, *a, **k):
+            raise OSError("power loss")
+
+        monkeypatch.setattr(zipfile.ZipFile, "_write_end_record", _crash)
+        res = pack_monthly_archive(tmp_path, year=2026, month=6, remove_loose=True)
+
+        assert res.ok is False
+        assert archive.read_bytes() == before  # month already pruned stays readable
+        assert f2.exists()
+        assert list(tmp_path.glob("*.packtmp")) == []
+
+    def test_append_to_existing_archive_keeps_prior_members(self, tmp_path):
+        _make_dummy_datz(tmp_path / "ECON_10.0.0.1_2026_06_15_0100.datZ", b"file-1")
+        assert pack_monthly_archive(tmp_path, year=2026, month=6).ok
+        _make_dummy_datz(tmp_path / "ECON_10.0.0.1_2026_06_16_0100.datZ", b"file-2")
+        res = pack_monthly_archive(tmp_path, year=2026, month=6)
+
+        assert res.ok and res.files_packed == 1 and res.files_removed == 1
+        with zipfile.ZipFile(tmp_path / "raw_2026_06.zip") as zf:
+            assert sorted(zf.namelist()) == [
+                "ECON_10.0.0.1_2026_06_15_0100.datZ",
+                "ECON_10.0.0.1_2026_06_16_0100.datZ",
+            ]
+        assert list(tmp_path.glob("*.packtmp")) == []
 
 
 # ---------------------------------------------------------------------------

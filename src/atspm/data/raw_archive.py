@@ -10,8 +10,11 @@ Package Location: src/atspm/data/raw_archive.py
 
 from __future__ import annotations
 
+import os
 import re
+import shutil
 import zipfile
+import zlib
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -35,6 +38,9 @@ class PackResult:
     files_removed: int
     ok: bool
     detail: str = ""
+
+
+_CHUNK = 1 << 20  # 1 MiB streaming reads for checksums
 
 
 # Standard controller export pattern: *_YYYY_MM_DD_HHMM.datZ
@@ -105,15 +111,28 @@ def list_monthly_candidates(
     }
 
 
+def _crc32_file(path: Path) -> int:
+    """Return the CRC-32 of a file, streamed in chunks (zip member checksum)."""
+    crc = 0
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(_CHUNK), b""):
+            crc = zlib.crc32(chunk, crc)
+    return crc & 0xFFFFFFFF
+
+
 def verify_archive(
     archive_path: Path,
     expected_files: Optional[Dict[str, int]] = None,
+    expected_crcs: Optional[Dict[str, int]] = None,
 ) -> Tuple[bool, str]:
-    """Verify zip archive integrity and member sizes.
+    """Verify zip archive integrity, member sizes and (optionally) checksums.
 
     Args:
         archive_path: Path to the .zip file.
         expected_files: Optional mapping of member name -> expected byte size.
+        expected_crcs: Optional mapping of member name -> expected CRC-32 of the
+            source bytes.  Lets the caller prove the archived bytes are the
+            loose file's bytes, not merely a same-sized file of the same name.
 
     Returns:
         (True, "ok") or (False, error_detail).
@@ -128,17 +147,21 @@ def verify_archive(
             if bad_member is not None:
                 return False, f"Corrupted zip member (CRC mismatch): {bad_member}"
 
-            if expected_files:
-                member_sizes = {info.filename: info.file_size for info in zf.infolist()}
-                for name, exp_size in expected_files.items():
-                    if name not in member_sizes:
-                        return False, f"Missing member in archive: {name}"
-                    actual_size = member_sizes[name]
-                    if actual_size != exp_size:
-                        return (
-                            False,
-                            f"Size mismatch for {name}: expected {exp_size}, got {actual_size}",
-                        )
+            infos = {info.filename: info for info in zf.infolist()}
+            for name, exp_size in (expected_files or {}).items():
+                if name not in infos:
+                    return False, f"Missing member in archive: {name}"
+                actual_size = infos[name].file_size
+                if actual_size != exp_size:
+                    return (
+                        False,
+                        f"Size mismatch for {name}: expected {exp_size}, got {actual_size}",
+                    )
+            for name, exp_crc in (expected_crcs or {}).items():
+                if name not in infos:
+                    return False, f"Missing member in archive: {name}"
+                if infos[name].CRC != exp_crc:
+                    return False, f"Checksum mismatch for {name}"
     except zipfile.BadZipFile as exc:
         return False, f"Bad zip file: {exc}"
     except Exception as exc:
@@ -154,8 +177,16 @@ def pack_monthly_archive(
     remove_loose: bool = True,
     dry_run: bool = False,
     log: Callable[[str], None] = _noop,
+    candidate_files: Optional[List[Path]] = None,
 ) -> PackResult:
     """Pack loose .datZ files for (year, month) into raw_YYYY_MM.zip.
+
+    The archive is never modified in place: new members are appended to a
+    temporary copy (``raw_YYYY_MM.zip.packtmp``) that replaces the archive
+    atomically only after it verifies.  An interrupted run therefore can never
+    corrupt an existing archive whose loose files were already pruned.  Loose
+    files are deleted only once every one of them is proven present in the
+    archive by name, size and CRC-32.
 
     Args:
         raw_dir: Directory containing .datZ files.
@@ -164,6 +195,8 @@ def pack_monthly_archive(
         remove_loose: Delete loose source files after successful verification.
         dry_run: Report what would be packed and removed without modifying disk.
         log: Progress logging callback.
+        candidate_files: Loose files for this month, if the caller already
+            scanned ``raw_dir``; otherwise the directory is scanned here.
 
     Returns:
         PackResult summary.
@@ -171,14 +204,23 @@ def pack_monthly_archive(
     raw_path = Path(raw_dir)
     archive_path = raw_path / f"raw_{year}_{month:02d}.zip"
 
-    candidate_files = sorted(
-        [
-            p
-            for p in raw_path.glob("*.datZ")
-            if parse_datz_month(p.name) == (year, month)
-        ],
-        key=lambda p: p.name,
-    )
+    def _fail(detail: str, packed: int = 0, n_bytes: int = 0) -> PackResult:
+        return PackResult(
+            year=year,
+            month=month,
+            archive_path=archive_path,
+            files_packed=packed,
+            bytes_packed=n_bytes,
+            files_removed=0,
+            ok=False,
+            detail=detail,
+        )
+
+    if candidate_files is None:
+        candidate_files = [
+            p for p in raw_path.glob("*.datZ") if parse_datz_month(p.name) == (year, month)
+        ]
+    candidate_files = sorted(candidate_files, key=lambda p: p.name)
 
     if not candidate_files:
         log(f"No loose files to pack for {year}_{month:02d}")
@@ -194,73 +236,37 @@ def pack_monthly_archive(
         )
 
     # Inspect existing archive if present
-    existing_members: Dict[str, int] = {}
+    existing_members: Dict[str, zipfile.ZipInfo] = {}
     if archive_path.exists():
         try:
             with zipfile.ZipFile(archive_path, "r") as zf:
                 bad_member = zf.testzip()
                 if bad_member is not None:
-                    return PackResult(
-                        year=year,
-                        month=month,
-                        archive_path=archive_path,
-                        files_packed=0,
-                        bytes_packed=0,
-                        files_removed=0,
-                        ok=False,
-                        detail=f"Existing archive is corrupt (bad member: {bad_member})",
-                    )
-                existing_members = {
-                    info.filename: info.file_size for info in zf.infolist()
-                }
+                    return _fail(f"Existing archive is corrupt (bad member: {bad_member})")
+                existing_members = {info.filename: info for info in zf.infolist()}
         except Exception as exc:
-            return PackResult(
-                year=year,
-                month=month,
-                archive_path=archive_path,
-                files_packed=0,
-                bytes_packed=0,
-                files_removed=0,
-                ok=False,
-                detail=f"Existing archive cannot be opened: {exc}",
-            )
+            return _fail(f"Existing archive cannot be opened: {exc}")
 
+    expected_sizes: Dict[str, int] = {}
+    expected_crcs: Dict[str, int] = {}
     files_to_write: List[Tuple[Path, int]] = []
-    files_already_packed: List[Path] = []
     for cf in candidate_files:
         try:
             cf_size = cf.stat().st_size
+            cf_crc = _crc32_file(cf)
         except OSError as exc:
-            return PackResult(
-                year=year,
-                month=month,
-                archive_path=archive_path,
-                files_packed=0,
-                bytes_packed=0,
-                files_removed=0,
-                ok=False,
-                detail=f"Cannot stat loose file {cf.name}: {exc}",
-            )
+            return _fail(f"Cannot read loose file {cf.name}: {exc}")
+        expected_sizes[cf.name] = cf_size
+        expected_crcs[cf.name] = cf_crc
 
-        if cf.name in existing_members:
-            if existing_members[cf.name] == cf_size:
-                files_already_packed.append(cf)
-            else:
-                return PackResult(
-                    year=year,
-                    month=month,
-                    archive_path=archive_path,
-                    files_packed=0,
-                    bytes_packed=0,
-                    files_removed=0,
-                    ok=False,
-                    detail=(
-                        f"Size mismatch for existing archive member {cf.name}: "
-                        f"archive has {existing_members[cf.name]}, loose file has {cf_size}"
-                    ),
-                )
-        else:
+        member = existing_members.get(cf.name)
+        if member is None:
             files_to_write.append((cf, cf_size))
+        elif member.file_size != cf_size or member.CRC != cf_crc:
+            return _fail(
+                f"Existing archive member {cf.name} differs from the loose file "
+                f"(archive {member.file_size} B, loose {cf_size} B)"
+            )
 
     bytes_to_write = sum(sz for _, sz in files_to_write)
 
@@ -280,12 +286,15 @@ def pack_monthly_archive(
             detail="dry run",
         )
 
-    # Batch append to zip archive using ZIP_STORED and allowZip64=True
     if files_to_write:
-        raw_path.mkdir(parents=True, exist_ok=True)
+        # Build in a temporary copy, verify, then atomically replace.
+        tmp_path = archive_path.with_name(archive_path.name + ".packtmp")
         try:
+            tmp_path.unlink(missing_ok=True)
+            if archive_path.exists():
+                shutil.copyfile(archive_path, tmp_path)
             with zipfile.ZipFile(
-                archive_path,
+                tmp_path,
                 mode="a",
                 compression=zipfile.ZIP_STORED,
                 allowZip64=True,
@@ -293,32 +302,28 @@ def pack_monthly_archive(
                 for cf, _ in files_to_write:
                     zf.write(cf, arcname=cf.name)
                     log(f"Packed {cf.name} -> {archive_path.name}")
-        except Exception as exc:
-            return PackResult(
-                year=year,
-                month=month,
-                archive_path=archive_path,
-                files_packed=0,
-                bytes_packed=0,
-                files_removed=0,
-                ok=False,
-                detail=f"Failed writing to archive: {exc}",
-            )
 
-    # Verify integrity of archive and all candidate files
-    expected_files = {cf.name: cf.stat().st_size for cf in candidate_files}
-    verified, v_detail = verify_archive(archive_path, expected_files=expected_files)
-    if not verified:
-        return PackResult(
-            year=year,
-            month=month,
-            archive_path=archive_path,
-            files_packed=len(files_to_write),
-            bytes_packed=bytes_to_write,
-            files_removed=0,
-            ok=False,
-            detail=f"Verification failed: {v_detail}",
+            verified, v_detail = verify_archive(
+                tmp_path, expected_files=expected_sizes, expected_crcs=expected_crcs
+            )
+            if not verified:
+                tmp_path.unlink(missing_ok=True)
+                return _fail(
+                    f"Verification failed: {v_detail}", len(files_to_write), bytes_to_write
+                )
+            os.replace(tmp_path, archive_path)
+        except Exception as exc:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            return _fail(f"Failed writing to archive: {exc}")
+    else:
+        verified, v_detail = verify_archive(
+            archive_path, expected_files=expected_sizes, expected_crcs=expected_crcs
         )
+        if not verified:
+            return _fail(f"Verification failed: {v_detail}")
 
     # Prune loose files if requested
     files_removed = 0
@@ -369,7 +374,7 @@ def pack_intersection_raw(
         include_current=include_current,
     )
     results: List[PackResult] = []
-    for (year, month), _ in sorted(candidates.items()):
+    for (year, month), files in candidates.items():
         res = pack_monthly_archive(
             raw_dir=raw_dir,
             year=year,
@@ -377,6 +382,7 @@ def pack_intersection_raw(
             remove_loose=remove_loose,
             dry_run=dry_run,
             log=log,
+            candidate_files=files,
         )
         results.append(res)
     return results

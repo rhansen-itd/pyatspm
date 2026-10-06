@@ -628,6 +628,29 @@ def handle_process(args: argparse.Namespace) -> None:
 # pack-raw
 # ---------------------------------------------------------------------------
 
+def _print_pack_results(results, *, dry_run: bool, indent: str = "    ") -> None:
+    """Print one summary line per month from :func:`pack_intersection_raw`.
+
+    Args:
+        results: ``PackResult`` objects to summarise.
+        dry_run: Word the lines as what *would* happen.
+        indent:  Leading whitespace for each line.
+    """
+    from atspm.data.sync import human_bytes
+
+    for res in results:
+        icon = "✅" if res.ok else "❌"
+        action_tag = "would pack" if dry_run else "packed"
+        size_str = f" ({human_bytes(res.bytes_packed)})" if res.bytes_packed else ""
+        line = f"{indent}{icon}  {res.year}_{res.month:02d}: {action_tag} {res.files_packed} file(s){size_str}"
+        if res.files_removed > 0:
+            rem_tag = "would remove" if dry_run else "removed"
+            line += f", {rem_tag} {res.files_removed} loose file(s)"
+        if not res.ok:
+            line += f" — FAILED: {res.detail} (loose files kept)"
+        print(line)
+
+
 def handle_pack_raw(args: argparse.Namespace) -> None:
     """Group loose .datZ files by month into raw_YYYY_MM.zip archives.
 
@@ -635,7 +658,6 @@ def handle_pack_raw(args: argparse.Namespace) -> None:
         args: Parsed CLI arguments from the ``pack-raw`` subcommand.
     """
     from atspm.data.raw_archive import pack_intersection_raw
-    from atspm.data.sync import human_bytes
 
     intersections_dir = _get_intersections_dir()
 
@@ -670,19 +692,7 @@ def handle_pack_raw(args: argparse.Namespace) -> None:
                 print("    No eligible months with loose files to pack.")
                 continue
 
-            for res in results:
-                icon = "✅" if res.ok else "❌"
-                action_tag = "would pack" if args.dry_run else "packed"
-                size_str = f" ({human_bytes(res.bytes_packed)})" if res.bytes_packed else ""
-                status_line = (
-                    f"    {icon}  {res.year}_{res.month:02d}: {action_tag} {res.files_packed} file(s){size_str}"
-                )
-                if not getattr(args, "keep_loose", False) and res.files_removed > 0:
-                    rem_tag = "would remove" if args.dry_run else "removed"
-                    status_line += f", {rem_tag} {res.files_removed} loose file(s)"
-                if not res.ok:
-                    status_line += f" — FAILED: {res.detail}"
-                print(status_line)
+            _print_pack_results(results, dry_run=args.dry_run)
         except SystemExit:
             print(f"\n⏭️ Skipping {target_name} due to errors.", file=sys.stderr)
         except Exception as exc:
@@ -4135,16 +4145,17 @@ def _sync_transfer_single(
 
     if direction == "push" and getattr(args, "pack", False):
         from atspm.data.raw_archive import pack_intersection_raw
-        raw_dir = _get_target_dir(target_name) / "raw_data"
+        raw_dir = _get_target_dir(target_name, must_exist=False) / "raw_data"
         if raw_dir.is_dir():
-            print(f"    📦 Packing raw archives before push…")
-            pack_intersection_raw(
+            print(f"\n📦  Packing closed months of raw data: {target_name}")
+            pack_results = pack_intersection_raw(
                 raw_dir=raw_dir,
                 include_current=False,
                 remove_loose=True,
                 dry_run=args.dry_run,
                 log=print if args.verbose else (lambda _m: None),
             )
+            _print_pack_results(pack_results, dry_run=args.dry_run)
 
     default_components = "db,config" if direction == "pull" else "all"
     groups = _parse_sync_components(args.components, default=default_components)
