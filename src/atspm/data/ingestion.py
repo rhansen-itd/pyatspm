@@ -33,9 +33,11 @@ Package Location: src/atspm/data/ingestion.py
 
 import re
 import sqlite3
+import zipfile
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -52,6 +54,15 @@ from ..utils.timezone import DEFAULT_TIMEZONE
 # the one it fences — unlike the ``prev + 0.1`` used for comms gaps, which can
 # collide with a real timestamp inside a replayed band.
 _CLOCK_STEP_MARKER_LEAD = 0.05
+
+
+@dataclass(frozen=True)
+class DatzSource:
+    """Represents a .datZ source item, either loose or inside a zip archive."""
+
+    name: str  # filename, e.g. "ECON_10.0.0.1_2026_06_20_0400.datZ"
+    timestamp: float  # UTC epoch derived from filename
+    archive_path: Optional[Path] = None  # None if loose file; Path to zip if in archive
 
 
 class IngestionEngine:
@@ -244,10 +255,56 @@ class IngestionEngine:
     # File scanning
     # ------------------------------------------------------------------
 
+    def _scan_all_candidates(self) -> List[DatzSource]:
+        """Discover all loose .datZ files and members of raw_*.zip archives.
+
+        Deduplication rule:
+            If a file exists both loose and inside a zip archive, the loose file
+            takes precedence.
+
+        Returns:
+            Sorted list of DatzSource objects, ordered chronologically by timestamp.
+        """
+        candidates: Dict[str, DatzSource] = {}
+
+        if self.raw_data_dir.is_dir():
+            # 1. Loose files
+            for fp in self.raw_data_dir.glob("*.datZ"):
+                ts = self._parse_filename_timestamp(fp.name)
+                if ts is None:
+                    print(f"Warning: cannot parse timestamp from {fp.name}")
+                    continue
+                candidates[fp.name] = DatzSource(name=fp.name, timestamp=ts, archive_path=None)
+
+            # 2. Monthly zip archives (raw_*.zip)
+            for zp in sorted(self.raw_data_dir.glob("raw_*.zip")):
+                try:
+                    with zipfile.ZipFile(zp, "r") as zf:
+                        for info in zf.infolist():
+                            if info.is_dir() or not info.filename.endswith(".datZ"):
+                                continue
+                            member_name = Path(info.filename).name
+                            if member_name in candidates:
+                                # Loose takes precedence; or already recorded from earlier archive
+                                continue
+                            ts = self._parse_filename_timestamp(member_name)
+                            if ts is None:
+                                continue
+                            candidates[member_name] = DatzSource(
+                                name=member_name, timestamp=ts, archive_path=zp
+                            )
+                except (zipfile.BadZipFile, OSError) as exc:
+                    print(f"Warning: error reading archive {zp.name}: {exc}")
+                    continue
+
+        items = list(candidates.values())
+        items.sort(key=lambda s: (s.timestamp, s.name))
+        return items
+
     def _scan_files_append(
         self,
         min_timestamp: Optional[float],
-    ) -> List[Tuple[Path, float]]:
+    ) -> List[DatzSource]:
         """Scan for files strictly newer than ``min_timestamp``.
 
         Args:
@@ -255,21 +312,14 @@ class IngestionEngine:
                            ``None`` includes everything.
 
         Returns:
-            Sorted list of ``(filepath, utc_epoch)`` tuples.
+            Sorted list of DatzSource items.
         """
-        result = []
-        for fp in self.raw_data_dir.glob("*.datZ"):
-            ts = self._parse_filename_timestamp(fp.name)
-            if ts is None:
-                print(f"Warning: cannot parse timestamp from {fp.name}")
-                continue
-            if min_timestamp is not None and ts <= min_timestamp:
-                continue
-            result.append((fp, ts))
-        result.sort(key=lambda x: x[1])
-        return result
+        all_candidates = self._scan_all_candidates()
+        if min_timestamp is None:
+            return all_candidates
+        return [c for c in all_candidates if c.timestamp > min_timestamp]
 
-    def _scan_files_gap_fill(self) -> List[Tuple[Path, float]]:
+    def _scan_files_gap_fill(self) -> List[DatzSource]:
         """Scan all files, skipping those already covered by existing spans.
 
         A file is considered covered when its timestamp falls strictly inside
@@ -278,7 +328,7 @@ class IngestionEngine:
         genuine extensions or exact duplicates.
 
         Returns:
-            Sorted list of ``(filepath, utc_epoch)`` tuples for uncovered files.
+            Sorted list of DatzSource items for uncovered files.
         """
         existing_spans = self._get_all_spans()
 
@@ -288,17 +338,8 @@ class IngestionEngine:
                     return True
             return False
 
-        result = []
-        for fp in self.raw_data_dir.glob("*.datZ"):
-            ts = self._parse_filename_timestamp(fp.name)
-            if ts is None:
-                print(f"Warning: cannot parse timestamp from {fp.name}")
-                continue
-            if _is_covered(ts):
-                continue
-            result.append((fp, ts))
-        result.sort(key=lambda x: x[1])
-        return result
+        all_candidates = self._scan_all_candidates()
+        return [c for c in all_candidates if not _is_covered(c.timestamp)]
 
     def _parse_filename_timestamp(self, filename: str) -> Optional[float]:
         """Extract the local datetime from a filename and convert to UTC epoch.
@@ -346,7 +387,7 @@ class IngestionEngine:
         committed span and passes them to the cycle-processing hook.
 
         Args:
-            file_list:  Sorted ``(filepath, utc_epoch)`` tuples.
+            file_list:  Sorted list of DatzSource items or ``(filepath, utc_epoch)`` tuples.
             batch_size: Maximum files per transaction.
             fill_gaps:  Forwarded to the cycle-processing hook.
         """
@@ -366,59 +407,98 @@ class IngestionEngine:
         # Ranges committed in this batch; fed to the cycle hook after commit.
         batch_cycle_ranges: List[Tuple[float, float]] = []
 
-        for i, (file_path, utc_start) in enumerate(file_list):
-            next_file_utc      = file_list[i + 1][1] if i + 1 < total else None
-            prev_last_event_ts = active_span[3] if active_span is not None else None
+        current_zip_handle: Optional[zipfile.ZipFile] = None
+        current_zip_path: Optional[Path] = None
 
-            result = self._process_file(
-                file_path, utc_start, next_file_utc,
-                active_span, prev_last_event_ts,
-            )
-            if result is None:
-                continue
+        try:
+            for i, item in enumerate(file_list):
+                if isinstance(item, DatzSource):
+                    source: Union[DatzSource, Path] = item
+                    utc_start = item.timestamp
+                    archive_path = item.archive_path
+                else:
+                    source = item[0]
+                    utc_start = item[1]
+                    archive_path = None
 
-            events_df, row_count, gap_opened, new_span = result
-            self._files_processed += 1
-            self._total_events    += row_count
+                if i + 1 < total:
+                    next_item = file_list[i + 1]
+                    next_file_utc = (
+                        next_item.timestamp
+                        if isinstance(next_item, DatzSource)
+                        else next_item[1]
+                    )
+                else:
+                    next_file_utc = None
 
-            if not events_df.empty:
-                events_buffer.append(events_df)
+                prev_last_event_ts = active_span[3] if active_span is not None else None
 
-            if gap_opened and active_span is not None:
-                span_updates.append(active_span[:3])
-                batch_cycle_ranges.append((active_span[0], active_span[1]))
-                active_span = new_span
-            elif active_span is None:
-                active_span = new_span
-            else:
-                active_span = (
-                    active_span[0],
-                    utc_start,
-                    active_span[2] + row_count,
-                    new_span[3],
+                # Keep ZipFile open for consecutive files sharing the same archive
+                if archive_path != current_zip_path:
+                    if current_zip_handle is not None:
+                        current_zip_handle.close()
+                        current_zip_handle = None
+                    current_zip_path = archive_path
+                    if archive_path is not None:
+                        try:
+                            current_zip_handle = zipfile.ZipFile(archive_path, "r")
+                        except Exception as exc:
+                            print(f"Error opening archive {archive_path.name}: {exc}")
+                            current_zip_handle = None
+
+                result = self._process_file(
+                    source, utc_start, next_file_utc,
+                    active_span, prev_last_event_ts,
+                    archive_handle=current_zip_handle,
                 )
+                if result is None:
+                    continue
 
-            should_commit = (
-                len(span_updates) + 1 >= batch_size or i == total - 1
-            )
-            if should_commit and (events_buffer or span_updates or
-                                  active_span is not None):
-                all_spans = span_updates[:]
-                if active_span is not None:
-                    all_spans.append(active_span[:3])
+                events_df, row_count, gap_opened, new_span = result
+                self._files_processed += 1
+                self._total_events    += row_count
 
-                self._commit_batch(events_buffer, all_spans, fill_gaps=fill_gaps)
-                print(f"  Committed {i + 1}/{total} files...")
+                if not events_df.empty:
+                    events_buffer.append(events_df)
 
-                if active_span is not None:
+                if gap_opened and active_span is not None:
+                    span_updates.append(active_span[:3])
                     batch_cycle_ranges.append((active_span[0], active_span[1]))
+                    active_span = new_span
+                elif active_span is None:
+                    active_span = new_span
+                else:
+                    active_span = (
+                        active_span[0],
+                        utc_start,
+                        active_span[2] + row_count,
+                        new_span[3],
+                    )
 
-                self._trigger_cycle_processing(batch_cycle_ranges, fill_gaps)
+                should_commit = (
+                    len(span_updates) + 1 >= batch_size or i == total - 1
+                )
+                if should_commit and (events_buffer or span_updates or
+                                      active_span is not None):
+                    all_spans = span_updates[:]
+                    if active_span is not None:
+                        all_spans.append(active_span[:3])
 
-                events_buffer       = []
-                span_updates        = []
-                batch_cycle_ranges  = []
-                # active_span stays open — it may still grow
+                    self._commit_batch(events_buffer, all_spans, fill_gaps=fill_gaps)
+                    print(f"  Committed {i + 1}/{total} files...")
+
+                    if active_span is not None:
+                        batch_cycle_ranges.append((active_span[0], active_span[1]))
+
+                    self._trigger_cycle_processing(batch_cycle_ranges, fill_gaps)
+
+                    events_buffer       = []
+                    span_updates        = []
+                    batch_cycle_ranges  = []
+                    # active_span stays open — it may still grow
+        finally:
+            if current_zip_handle is not None:
+                current_zip_handle.close()
 
     # ------------------------------------------------------------------
     # Cycle processing hook
@@ -466,16 +546,17 @@ class IngestionEngine:
 
     def _process_file(
         self,
-        file_path: Path,
+        source: Union[DatzSource, Path],
         utc_start: float,
         next_file_utc: Optional[float],
         active_span: Optional[Tuple[float, float, int, float]],
         prev_last_event_ts: Optional[float],
+        archive_handle: Optional[zipfile.ZipFile] = None,
     ) -> Optional[Tuple[pd.DataFrame, int, bool, Tuple[float, float, int, float]]]:
-        """Decode one ``.datZ`` file and determine whether a gap precedes it.
+        """Decode one ``.datZ`` source item and determine whether a gap precedes it.
 
         Args:
-            file_path:          Path to the ``.datZ`` file.
+            source:             DatzSource item or Path to the ``.datZ`` file.
             utc_start:          UTC epoch of this file.
             next_file_utc:      UTC epoch of the next file (for duration
                                 inference), or ``None``.
@@ -484,30 +565,45 @@ class IngestionEngine:
                                 or ``None``.
             prev_last_event_ts: UTC epoch of the last real event in the
                                 preceding file; used to position gap markers.
+            archive_handle:     Optional open ZipFile handle if source is in a zip archive.
 
         Returns:
             ``(events_df, row_count, gap_opened, new_span_tuple)`` or ``None``
             on decode error.
         """
+        name = source.name
         try:
-            raw_bytes = file_path.read_bytes()
-        except OSError as exc:
-            print(f"Error reading {file_path.name}: {exc}")
+            if isinstance(source, DatzSource):
+                if source.archive_path is not None:
+                    if (
+                        archive_handle is not None
+                        and getattr(archive_handle, "filename", None) == str(source.archive_path)
+                    ):
+                        raw_bytes = archive_handle.read(source.name)
+                    else:
+                        with zipfile.ZipFile(source.archive_path, "r") as zf:
+                            raw_bytes = zf.read(source.name)
+                else:
+                    raw_bytes = (self.raw_data_dir / source.name).read_bytes()
+            else:
+                raw_bytes = source.read_bytes()
+        except (OSError, KeyError, zipfile.BadZipFile) as exc:
+            print(f"Error reading {name}: {exc}")
             return None
 
         try:
             df = decoders.parse_datz_bytes(raw_bytes, utc_start)
         except decoders.DatZDecodingError as exc:
-            print(f"Error decoding {file_path.name}: {exc}")
+            print(f"Error decoding {name}: {exc}")
             return None
 
-        self._check_header_alignment(file_path.name, raw_bytes, utc_start)
+        self._check_header_alignment(name, raw_bytes, utc_start)
 
         row_count     = len(df)
         last_event_ts = df["timestamp"].max() if not df.empty else utc_start
 
         df = self._fence_clock_steps(
-            df, file_path.name,
+            df, name,
             active_span[1] if active_span is not None else None,
             prev_last_event_ts,
         )

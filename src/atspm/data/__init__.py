@@ -17,7 +17,15 @@ Modules:
 
 from .manager import DatabaseManager, init_db, import_config
 from .retrieval import RetrievalEngine, run_retrieval
-from .ingestion import IngestionEngine, run_ingestion
+from .ingestion import IngestionEngine, run_ingestion, DatzSource
+from .raw_archive import (
+    PackResult,
+    parse_datz_month,
+    list_monthly_candidates,
+    verify_archive,
+    pack_monthly_archive,
+    pack_intersection_raw,
+)
 from .achd_ingestion import AchdIngestionEngine, run_achd_ingestion
 from .processing import CycleProcessor, run_cycle_processing
 from .reader import (
@@ -167,6 +175,14 @@ __all__ = [
     # Ingestion
     'IngestionEngine',
     'run_ingestion',
+    'DatzSource',
+    # Raw Archive
+    'PackResult',
+    'parse_datz_month',
+    'list_monthly_candidates',
+    'verify_archive',
+    'pack_monthly_archive',
+    'pack_intersection_raw',
     # ACHD ingestion
     'AchdIngestionEngine',
     'run_achd_ingestion',

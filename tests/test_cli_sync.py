@@ -198,3 +198,63 @@ class TestConfirmRelease:
         with pytest.raises(SystemExit):
             cli._confirm_release(["201_Foo"], assume_yes=False)
         assert "--yes" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# pack-raw CLI
+# ---------------------------------------------------------------------------
+
+class TestPackRawCli:
+
+    def _parse(self, argv):
+        return cli._build_parser().parse_args(argv)
+
+    def test_pack_raw_target_defaults(self):
+        args = self._parse(["pack-raw", "--target", "201_Foo"])
+        assert args.target == "201_Foo"
+        assert args.include_current is False
+        assert args.keep_loose is False
+        assert args.dry_run is False
+        assert args.verbose is False
+        assert args.func is cli.handle_pack_raw
+
+    def test_pack_raw_targetid_and_flags(self):
+        args = self._parse([
+            "pack-raw", "--targetid", "201",
+            "--include-current", "--keep-loose", "--dry-run", "--verbose",
+        ])
+        assert args.targetid == "201"
+        assert args.include_current is True
+        assert args.keep_loose is True
+        assert args.dry_run is True
+        assert args.verbose is True
+
+    def test_pack_raw_all(self):
+        args = self._parse(["pack-raw", "--all"])
+        assert args.all is True
+
+    def test_pack_raw_mutually_exclusive_targets(self):
+        with pytest.raises(SystemExit):
+            self._parse(["pack-raw", "--target", "201_Foo", "--targetid", "201"])
+        with pytest.raises(SystemExit):
+            self._parse(["pack-raw"])
+
+    def test_sync_push_accepts_pack_flag(self):
+        args = self._parse(["sync", "push", "--targetid", "201", "--pack"])
+        assert args.sync_action == "push"
+        assert args.pack is True
+
+    def test_handle_pack_raw_execution(self, project, monkeypatch):
+        target_dir = project / "intersections" / "201_SH-55"
+        raw_dir = target_dir / "raw_data"
+        raw_dir.mkdir(parents=True)
+        (raw_dir / "ECON_10.0.0.1_2026_05_01_0100.datZ").write_bytes(b"datz1")
+        (raw_dir / "ECON_10.0.0.1_2026_05_01_0200.datZ").write_bytes(b"datz2")
+
+        args = self._parse(["pack-raw", "--target", "201_SH-55", "--include-current"])
+        args.func(args)
+
+        assert (raw_dir / "raw_2026_05.zip").exists()
+        assert not (raw_dir / "ECON_10.0.0.1_2026_05_01_0100.datZ").exists()
+        assert not (raw_dir / "ECON_10.0.0.1_2026_05_01_0200.datZ").exists()
+

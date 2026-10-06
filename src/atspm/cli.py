@@ -7,6 +7,7 @@ Exposes subcommands from intersection configuration setup through reporting and 
     atspm sync               {status,pull,push} [...]    Move intersection data between local and archive drives
     atspm retrieve           --targetid <id> [...]       Pull new .datZ files from configured devices via SCP
     atspm process            --targetid <id> [...]       Ingest data and compute cycles
+    atspm pack-raw           --targetid <id> [...]       Pack loose .datZ files into monthly raw_YYYY_MM.zip archives
     atspm ingest-achd        --targetid <id> --source DIR Ingest ACHD event CSV exports into a database
     atspm report             --targetid <id> [...]       Generate ATSPM performance reports
     atspm counts             --targetid <id> [...]       Generate vehicle and pedestrian counts
@@ -619,6 +620,73 @@ def handle_process(args: argparse.Namespace) -> None:
             print(f"\n⏭️ Skipping {target_name} due to errors.", file=sys.stderr)
         except Exception as exc:
             print(f"\n❌ Unexpected error processing {target_name}: {exc}", file=sys.stderr)
+            if getattr(args, "verbose", False):
+                traceback.print_exc()
+
+
+# ---------------------------------------------------------------------------
+# pack-raw
+# ---------------------------------------------------------------------------
+
+def handle_pack_raw(args: argparse.Namespace) -> None:
+    """Group loose .datZ files by month into raw_YYYY_MM.zip archives.
+
+    Args:
+        args: Parsed CLI arguments from the ``pack-raw`` subcommand.
+    """
+    from atspm.data.raw_archive import pack_intersection_raw
+    from atspm.data.sync import human_bytes
+
+    intersections_dir = _get_intersections_dir()
+
+    if getattr(args, "all", False):
+        targets = sorted([p.name for p in intersections_dir.iterdir() if p.is_dir()])
+        if not targets:
+            _die(f"No intersection directories found in {intersections_dir}")
+        print(f"\n🌍 Batch packing raw archives for {len(targets)} intersection(s)...")
+    else:
+        targets = [_resolve_target_name(args.target, args.targetid)]
+
+    log = print if getattr(args, "verbose", False) else (lambda _m: None)
+
+    for target_name in targets:
+        try:
+            target_dir = _get_target_dir(target_name)
+            raw_dir = target_dir / "raw_data"
+            if not raw_dir.is_dir():
+                print(f"\n⏭️ Skipping {target_name}: no raw_data/ directory found.")
+                continue
+
+            print(f"\n📦 Packing raw data for {target_name}…")
+            results = pack_intersection_raw(
+                raw_dir=raw_dir,
+                include_current=getattr(args, "include_current", False),
+                remove_loose=not getattr(args, "keep_loose", False),
+                dry_run=getattr(args, "dry_run", False),
+                log=log,
+            )
+
+            if not results:
+                print("    No eligible months with loose files to pack.")
+                continue
+
+            for res in results:
+                icon = "✅" if res.ok else "❌"
+                action_tag = "would pack" if args.dry_run else "packed"
+                size_str = f" ({human_bytes(res.bytes_packed)})" if res.bytes_packed else ""
+                status_line = (
+                    f"    {icon}  {res.year}_{res.month:02d}: {action_tag} {res.files_packed} file(s){size_str}"
+                )
+                if not getattr(args, "keep_loose", False) and res.files_removed > 0:
+                    rem_tag = "would remove" if args.dry_run else "removed"
+                    status_line += f", {rem_tag} {res.files_removed} loose file(s)"
+                if not res.ok:
+                    status_line += f" — FAILED: {res.detail}"
+                print(status_line)
+        except SystemExit:
+            print(f"\n⏭️ Skipping {target_name} due to errors.", file=sys.stderr)
+        except Exception as exc:
+            print(f"\n❌ Unexpected error packing {target_name}: {exc}", file=sys.stderr)
             if getattr(args, "verbose", False):
                 traceback.print_exc()
 
@@ -4065,6 +4133,19 @@ def _sync_transfer_single(
     """
     from atspm.data.sync import sync_item, human_bytes
 
+    if direction == "push" and getattr(args, "pack", False):
+        from atspm.data.raw_archive import pack_intersection_raw
+        raw_dir = _get_target_dir(target_name) / "raw_data"
+        if raw_dir.is_dir():
+            print(f"    📦 Packing raw archives before push…")
+            pack_intersection_raw(
+                raw_dir=raw_dir,
+                include_current=False,
+                remove_loose=True,
+                dry_run=args.dry_run,
+                log=print if args.verbose else (lambda _m: None),
+            )
+
     default_components = "db,config" if direction == "pull" else "all"
     groups = _parse_sync_components(args.components, default=default_components)
     items = _intersection_sync_items(target_name, archive_root)
@@ -4280,6 +4361,43 @@ def _add_process_parser(subs: argparse._SubParsersAction) -> None:
         ),
     )
     p_proc.set_defaults(func=handle_process)
+
+
+def _add_pack_raw_parser(subs: argparse._SubParsersAction) -> None:
+    """Attach the ``pack-raw`` subcommand parser."""
+    p_pack = subs.add_parser(
+        "pack-raw",
+        help="Pack loose .datZ files by month into uncompressed raw_YYYY_MM.zip archives.",
+        description=(
+            "Group loose .datZ files by calendar month into uncompressed\n"
+            "raw_YYYY_MM.zip container files, verify their integrity, and\n"
+            "remove the loose source files.\n\n"
+            "By default, the active/current calendar month is kept loose for\n"
+            "incoming data collection. Use --include-current to pack it as well."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    group_pack = p_pack.add_mutually_exclusive_group(required=True)
+    group_pack.add_argument("--target", metavar="FOLDER", help="Exact intersection folder name.")
+    group_pack.add_argument("--targetid", metavar="ID", help="Intersection ID prefix (e.g. '201').")
+    group_pack.add_argument("--all", action="store_true", help="Pack raw data for all intersections.")
+    p_pack.add_argument(
+        "--include-current", action="store_true", default=False,
+        help="Pack the current calendar month as well as closed historical months.",
+    )
+    p_pack.add_argument(
+        "--keep-loose", action="store_true", default=False,
+        help="Keep loose .datZ files after packing and verifying them into the zip.",
+    )
+    p_pack.add_argument(
+        "--dry-run", action="store_true", default=False,
+        help="Report what would be packed and removed without modifying disk.",
+    )
+    p_pack.add_argument(
+        "--verbose", action="store_true", default=False,
+        help="Print per-file progress and details.",
+    )
+    p_pack.set_defaults(func=handle_pack_raw)
 
 
 def _add_report_parser(subs: argparse._SubParsersAction) -> None:
@@ -6559,6 +6677,10 @@ def _add_sync_parser(subs: argparse._SubParsersAction) -> None:
         help="Skip the confirmation prompt for --release.",
     )
     p_sync.add_argument(
+        "--pack", action="store_true", default=False,
+        help="push only: run pack-raw on eligible closed months before pushing.",
+    )
+    p_sync.add_argument(
         "--verbose", action="store_true",
         help="Print per-file progress and full tracebacks on error.",
     )
@@ -6634,6 +6756,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_sync_parser(subs)
     _add_retrieve_parser(subs)
     _add_process_parser(subs)
+    _add_pack_raw_parser(subs)
     _add_ingest_achd_parser(subs)
     _add_report_parser(subs)
     _add_counts_parser(subs)
