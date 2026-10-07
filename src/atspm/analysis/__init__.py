@@ -83,6 +83,7 @@ from .flow import (
 from .critical import (
     ring_barrier_structure,
     movement_phase_map,
+    parse_lane_config,
     phase_demand,
     critical_movement_analysis,
 )
@@ -202,6 +203,7 @@ __all__ = [
     # Critical
     'ring_barrier_structure',
     'movement_phase_map',
+    'parse_lane_config',
     'phase_demand',
     'critical_movement_analysis',
     # Split failures

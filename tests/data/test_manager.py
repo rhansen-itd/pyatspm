@@ -6,6 +6,7 @@ and pins both fallbacks to {"timezone": "US/Mountain"}: metadata table
 missing (the SELECT raises) and present but empty (no lock_id = 1 row).
 """
 
+from datetime import datetime
 from pathlib import Path
 
 from atspm.data.manager import DatabaseManager
@@ -36,3 +37,26 @@ class TestGetMetadataSmoke:
         with DatabaseManager(empty_db) as manager:
             manager.conn.execute("DELETE FROM metadata")
             assert manager.get_metadata() == {"timezone": "US/Mountain"}
+
+
+class TestImportConfigLanes:
+
+    def test_lanes_rows_become_config_columns(self, empty_db: Path, tmp_path: Path):
+        csv = tmp_path / "int_cfg.csv"
+        csv.write_text(
+            ",,1/1/2020,6/1/2026\n"
+            "TM:,EBT,63,63\n"
+            "Lanes:,EBL,,1\n"
+            "Lanes:,EBT,,2\n"
+            "Lanes:,EB Layout,,L|T|TR\n"
+        )
+        with DatabaseManager(empty_db) as m:
+            m.import_config(csv)
+            old = m.get_config_at_date(datetime(2021, 1, 1))
+            new = m.get_config_at_date(datetime(2026, 7, 1))
+
+        assert new["Lanes_EBL"] == "1"
+        assert new["Lanes_EBT"] == "2"
+        assert new["Lanes_EB_Layout"] == "L|T|TR"
+        # Only the latest column is filled; the earlier period has none
+        assert not old.get("Lanes_EB_Layout")

@@ -17,7 +17,8 @@ Classic critical movement analysis on a dual-ring, barriered controller:
    per-phase stop-bar detector sets (``Det_P{N}_Stopbar`` /
    ``Det_P{N}_Stop_Bar`` config).
 3. :func:`phase_demand` — time-binned hourly movement counts summed into
-   per-phase demand for the analysis period.
+   per-phase demand for the analysis period, divided per lane using the
+   ``Lanes:`` config (:func:`parse_lane_config`) when present.
 4. :func:`critical_movement_analysis` — the critical phase per concurrent
    slot and the critical path per barrier group: the ring whose summed
    demand (the required-time proxy) is larger.
@@ -43,7 +44,8 @@ Package Location: src/atspm/analysis/critical.py
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Tuple
+import re
+from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 import pandas as pd
 
@@ -66,12 +68,13 @@ _STRUCTURE_SCHEMA = [
 ]
 _MAP_SCHEMA = ["movement", "phase", "detectors", "n_detectors", "n_matched"]
 _DEMAND_SCHEMA = [
-    "phase", "movements", "n_detectors",
+    "phase", "movements", "n_detectors", "n_lanes", "lane_source",
     "demand_vph", "peak_vph", "demand_per_lane", "peak_per_lane",
 ]
 _PHASE_SCHEMA = [
     "phase", "ring", "barrier_group", "position", "movements",
-    "n_detectors", "demand_vph", "demand_per_lane", "has_demand",
+    "n_detectors", "n_lanes", "lane_source",
+    "demand_vph", "demand_per_lane", "has_demand",
     "slot_critical", "on_critical_path",
 ]
 _GROUP_SCHEMA = [
@@ -81,6 +84,30 @@ _GROUP_SCHEMA = [
 
 # Valid demand bases for critical_movement_analysis
 DEMAND_BASES = ("per_lane", "total")
+
+# Lane-count provenance in phase_demand output, most to least physical
+LANE_SOURCES = ("layout", "movement", "detectors")
+
+# Lane designations a Lanes_{dir}_Layout token may combine
+_LANE_TURNS = frozenset("ULTR")
+
+# Movement label → (approach, turn), e.g. 'EBT' → ('EB', 'T')
+_MOVEMENT_RE = re.compile(r"^([A-Z]{2})([ULTR])$")
+
+
+class LaneConfig(NamedTuple):
+    """Parsed ``Lanes:`` config rows.
+
+    Attributes:
+        layouts: Approach (``'EB'``) → left-to-right lanes, each the
+            frozenset of turns it serves (``'L|T|TR'`` →
+            ``({'L'}, {'T'}, {'T', 'R'})``).
+        counts: Movement label (``'EBT'``) → lanes serving it; a shared
+            lane counts toward every movement it serves.
+    """
+
+    layouts: Dict[str, Tuple[frozenset, ...]]
+    counts: Dict[str, int]
 
 
 # ---------------------------------------------------------------------------
@@ -230,6 +257,109 @@ def ring_barrier_structure(
     )
 
 
+def parse_lane_config(config: Dict[str, Any]) -> LaneConfig:
+    """Parse ``Lanes_*`` config keys into per-approach layouts and counts.
+
+    ``int_cfg.csv`` ``Lanes:`` rows import as ``Lanes_{movement}`` (lanes
+    serving the movement, e.g. ``Lanes_EBT = '2'``) and
+    ``Lanes_{dir}_Layout`` (left-to-right lane designations, e.g.
+    ``Lanes_EB_Layout = 'L|T|TR'``).  Blank values are skipped.
+
+    Args:
+        config: Active config dict.
+
+    Returns:
+        :class:`LaneConfig`; both maps empty when no ``Lanes_*`` key is set.
+
+    Raises:
+        ValueError: On a layout token that isn't a non-repeating
+            combination of ``U``/``L``/``T``/``R``, or a non-integer or
+            negative movement lane count.
+    """
+    layouts: Dict[str, Tuple[frozenset, ...]] = {}
+    counts: Dict[str, int] = {}
+    for key, value in config.items():
+        if not key.startswith("Lanes_"):
+            continue
+        if value is None or (isinstance(value, float) and pd.isna(value)):
+            continue
+        text = str(value).strip()
+        if not text:
+            continue
+        name = key[len("Lanes_"):]
+
+        if name.endswith("_Layout"):
+            lanes = []
+            for token in text.split("|"):
+                token = token.strip().upper()
+                turns = frozenset(token)
+                if (not token or len(turns) != len(token)
+                        or not turns <= _LANE_TURNS):
+                    raise ValueError(
+                        f"{key}: invalid lane designation {token!r} in "
+                        f"{text!r} (expected U/L/T/R combinations, "
+                        f"e.g. 'L|T|TR')."
+                    )
+                lanes.append(turns)
+            layouts[name[:-len("_Layout")]] = tuple(lanes)
+        else:
+            try:
+                value_f = float(text)
+            except ValueError:
+                value_f = -1.0
+            n = int(value_f) if value_f.is_integer() else -1
+            if n < 0:
+                raise ValueError(
+                    f"{key}: lane count must be a non-negative integer, "
+                    f"got {text!r}."
+                )
+            counts[name] = n
+    return LaneConfig(layouts, counts)
+
+
+def _phase_lanes(
+    movements: List[str],
+    lanes: LaneConfig,
+) -> Tuple[Optional[int], str]:
+    """Count the physical lanes serving one phase's movements.
+
+    Per approach, a ``Layout`` counts each **distinct** lane that serves
+    any of the phase's turns, so a shared lane is never counted twice.
+    Without a layout, the approach falls back to summing its movements'
+    ``Lanes_{movement}`` counts.
+
+    Args:
+        movements: The phase's movement labels.
+        lanes: Output of :func:`parse_lane_config`.
+
+    Returns:
+        ``(n_lanes, source)`` — ``source`` is ``'layout'`` when every
+        approach had a layout, else ``'movement'``.  ``(None,
+        'detectors')`` when any movement has no lane information or the
+        total is zero.
+    """
+    turns_by_dir: Dict[str, set] = {}
+    unparsed: List[str] = []
+    for label in movements:
+        match = _MOVEMENT_RE.match(label)
+        if match and match.group(1) in lanes.layouts:
+            turns_by_dir.setdefault(match.group(1), set()).add(match.group(2))
+        else:
+            unparsed.append(label)
+
+    if any(label not in lanes.counts for label in unparsed):
+        return None, "detectors"
+
+    n_lanes = sum(
+        sum(1 for lane in lanes.layouts[d] if lane & turns)
+        for d, turns in turns_by_dir.items()
+    ) + sum(lanes.counts[label] for label in unparsed)
+
+    if n_lanes == 0:
+        return None, "detectors"
+    return n_lanes, "movement" if unparsed else "layout"
+
+
 def movement_phase_map(config: Dict[str, Any]) -> pd.DataFrame:
     """Map movement labels to signal phases via stop-bar detector overlap.
 
@@ -292,6 +422,7 @@ def movement_phase_map(config: Dict[str, Any]) -> pd.DataFrame:
 def phase_demand(
     counts_df: pd.DataFrame,
     movement_map: pd.DataFrame,
+    lanes: Optional[LaneConfig] = None,
 ) -> pd.DataFrame:
     """Aggregate time-binned hourly movement counts into per-phase demand.
 
@@ -306,6 +437,8 @@ def phase_demand(
             detector IDs) are ignored.
         movement_map: Output of :func:`movement_phase_map`.  Unmapped
             movements (``phase`` = NA) are excluded.
+        lanes: Output of :func:`parse_lane_config`.  ``None`` or empty
+            uses the detector-count proxy for every phase.
 
     Returns:
         DataFrame with one row per phase::
@@ -313,11 +446,18 @@ def phase_demand(
             phase           int
             movements       str    – comma-joined contributing movements
             n_detectors     int    – distinct detectors across movements
-                                     (lane-count proxy)
+            n_lanes         int    – per-lane divisor (see lane_source)
+            lane_source     str    – 'layout': distinct lanes from the
+                                     approach layouts; 'movement': summed
+                                     Lanes_{movement} counts on at least
+                                     one approach (a shared lane counts
+                                     once per movement); 'detectors':
+                                     no lane config covers every
+                                     movement, n_lanes = n_detectors
             demand_vph      float  – mean of the per-phase bin rates
             peak_vph        float  – max of the per-phase bin rates
-            demand_per_lane float  – demand_vph / n_detectors
-            peak_per_lane   float  – peak_vph / n_detectors
+            demand_per_lane float  – demand_vph / n_lanes
+            peak_per_lane   float  – peak_vph / n_lanes
 
         Empty (correct schema) when nothing is mapped or counted.
     """
@@ -344,20 +484,33 @@ def phase_demand(
         })
         for phase, group in available.groupby("phase")
     }
-    movement_labels = (
+    movement_lists = (
         available.groupby(available["phase"].astype(int))["movement"]
-        .agg(",".join)
+        .agg(list)
+        .reindex(phase_ts.columns)
     )
+    n_detectors = [lane_counts[int(p)] for p in phase_ts.columns]
+
+    if lanes is None or not (lanes.layouts or lanes.counts):
+        lane_info = [(None, "detectors")] * len(n_detectors)
+    else:
+        lane_info = [_phase_lanes(mvs, lanes) for mvs in movement_lists]
+    n_lanes = [
+        n if n is not None else n_det
+        for (n, _), n_det in zip(lane_info, n_detectors)
+    ]
 
     result = pd.DataFrame({
         "phase": phase_ts.columns.astype(int),
-        "movements": movement_labels.reindex(phase_ts.columns).values,
-        "n_detectors": [lane_counts[int(p)] for p in phase_ts.columns],
+        "movements": [",".join(mvs) for mvs in movement_lists],
+        "n_detectors": n_detectors,
+        "n_lanes": n_lanes,
+        "lane_source": [source for _, source in lane_info],
         "demand_vph": phase_ts.mean().values,
         "peak_vph": phase_ts.max().values,
     })
-    result["demand_per_lane"] = result["demand_vph"] / result["n_detectors"]
-    result["peak_per_lane"] = result["peak_vph"] / result["n_detectors"]
+    result["demand_per_lane"] = result["demand_vph"] / result["n_lanes"]
+    result["peak_per_lane"] = result["peak_vph"] / result["n_lanes"]
 
     return (
         result[_DEMAND_SCHEMA]
@@ -396,7 +549,8 @@ def critical_movement_analysis(
         * ``phase_df`` — one row per structure phase::
 
               phase, ring, barrier_group, position, movements,
-              n_detectors, demand_vph, demand_per_lane,
+              n_detectors, n_lanes, lane_source,
+              demand_vph, demand_per_lane,
               has_demand         bool – demand data existed for this phase
               slot_critical      bool
               on_critical_path   bool
@@ -427,8 +581,8 @@ def critical_movement_analysis(
     value_col = "demand_per_lane" if basis == "per_lane" else "demand_vph"
 
     phase_df = structure_df.merge(
-        demand_df[["phase", "movements", "n_detectors",
-                   "demand_vph", "demand_per_lane"]],
+        demand_df[["phase", "movements", "n_detectors", "n_lanes",
+                   "lane_source", "demand_vph", "demand_per_lane"]],
         on="phase",
         how="left",
     )
@@ -437,9 +591,10 @@ def critical_movement_analysis(
         phase_df[["demand_vph", "demand_per_lane"]].fillna(0.0)
     )
     phase_df["movements"] = phase_df["movements"].fillna("")
-    phase_df["n_detectors"] = (
-        phase_df["n_detectors"].fillna(0).astype(int)
+    phase_df[["n_detectors", "n_lanes"]] = (
+        phase_df[["n_detectors", "n_lanes"]].fillna(0).astype(int)
     )
+    phase_df["lane_source"] = phase_df["lane_source"].fillna("")
 
     placed = phase_df["barrier_group"].notna()
 

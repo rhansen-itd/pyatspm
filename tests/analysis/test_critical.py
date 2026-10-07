@@ -13,7 +13,8 @@ movement_phase_map: TM_* movements assigned to the phase whose stop-bar
     detector set (Det_P{N}_Stopbar / Det_P{N}_Stop_Bar) shares the most
     detectors; no overlap or a tied maximal overlap → phase NA.
 phase_demand: hourly-rate movement bins summed to per-phase series first,
-    then mean/peak; n_detectors = distinct detectors (lane proxy).
+    then mean/peak; n_lanes = distinct physical lanes from Lanes_{dir}_Layout,
+    else summed Lanes_{movement} counts, else n_detectors (lane proxy).
 critical_movement_analysis: per barrier group the ring with the larger
     demand sum is the critical path (tie → lower ring); per concurrent slot
     (barrier_group, position) the higher-demand phase is slot_critical.
@@ -22,9 +23,13 @@ critical_movement_analysis: per barrier group the ring with the larger
 import numpy as np
 import pandas as pd
 
+import pytest
+
 from atspm.analysis.critical import (
+    LaneConfig,
     critical_movement_analysis,
     movement_phase_map,
+    parse_lane_config,
     phase_demand,
     ring_barrier_structure,
 )
@@ -188,6 +193,144 @@ class TestPhaseDemand:
         assert "demand_per_lane" in out.columns
 
 
+# EB approach: L|T|TR — the TR lane is shared by EBT and EBR.
+# P2 serves EBT+EBR (3 detectors), P5 serves EBL.  WB has per-movement
+# rows only; NB has no lane config at all.
+_LANE_MAP_CONFIG = {
+    "TM_EBL": "1",
+    "TM_EBT": "2,3",
+    "TM_EBR": "4",
+    "TM_WBT": "5,6,7",
+    "TM_WBR": "8",
+    "TM_NBT": "9",
+    "Det_P5_Stopbar": "1",
+    "Det_P2_Stopbar": "2,3,4",
+    "Det_P6_Stopbar": "5,6,7,8",
+    "Det_P8_Stopbar": "9",
+    "Lanes_EBL": "1",
+    "Lanes_EBT": "2",
+    "Lanes_EBR": "1",
+    "Lanes_EB_Layout": "L|T|TR",
+    "Lanes_WBT": "2",
+    "Lanes_WBR": "1",
+}
+
+
+def _lane_counts() -> pd.DataFrame:
+    return pd.DataFrame({
+        "EBL": [100.0], "EBT": [500.0], "EBR": [100.0],
+        "WBT": [600.0], "WBR": [300.0], "NBT": [400.0],
+    })
+
+
+class TestParseLaneConfig:
+
+    def test_layout_and_counts(self):
+        lanes = parse_lane_config(_LANE_MAP_CONFIG)
+        assert lanes.layouts == {
+            "EB": (frozenset("L"), frozenset("T"), frozenset("TR")),
+        }
+        assert lanes.counts == {
+            "EBL": 1, "EBT": 2, "EBR": 1, "WBT": 2, "WBR": 1,
+        }
+
+    def test_blank_and_nan_values_skipped(self):
+        lanes = parse_lane_config({
+            "Lanes_EBT": "", "Lanes_WBT": float("nan"),
+            "Lanes_EB_Layout": None, "TM_EBT": "1",
+        })
+        assert lanes == LaneConfig({}, {})
+
+    def test_numeric_count_from_db_accepted(self):
+        # A config column read back from SQLite may arrive as 2.0
+        assert parse_lane_config({"Lanes_EBT": 2.0}).counts == {"EBT": 2}
+
+    @pytest.mark.parametrize("layout", ["L|X", "L||T", "L|TT"])
+    def test_bad_layout_raises(self, layout):
+        with pytest.raises(ValueError, match="Lanes_EB_Layout"):
+            parse_lane_config({"Lanes_EB_Layout": layout})
+
+    @pytest.mark.parametrize("count", ["two", "-1", "1.5"])
+    def test_bad_count_raises(self, count):
+        with pytest.raises(ValueError, match="Lanes_EBT"):
+            parse_lane_config({"Lanes_EBT": count})
+
+
+class TestPhaseDemandLanes:
+
+    def _out(self, config=_LANE_MAP_CONFIG) -> pd.DataFrame:
+        return phase_demand(
+            _lane_counts(),
+            movement_phase_map(config),
+            parse_lane_config(config),
+        ).set_index("phase")
+
+    def test_shared_lane_counted_once_from_layout(self):
+        # EBT+EBR over L|T|TR: lanes T and TR → 2, not 2+1 = 3 by sum
+        out = self._out()
+        assert out.loc[2, "n_lanes"] == 2
+        assert out.loc[2, "lane_source"] == "layout"
+        assert out.loc[2, "n_detectors"] == 3
+        assert out.loc[2, "demand_per_lane"] == 300.0
+        assert out.loc[2, "peak_per_lane"] == 300.0
+
+    def test_left_lane_from_layout(self):
+        out = self._out()
+        assert out.loc[5, "n_lanes"] == 1
+        assert out.loc[5, "lane_source"] == "layout"
+
+    def test_movement_rows_without_layout_are_summed(self):
+        out = self._out()
+        assert out.loc[6, "n_lanes"] == 3        # WBT 2 + WBR 1
+        assert out.loc[6, "lane_source"] == "movement"
+        assert out.loc[6, "demand_per_lane"] == 300.0
+
+    def test_uncovered_phase_falls_back_to_detectors(self):
+        out = self._out()
+        assert out.loc[8, "lane_source"] == "detectors"
+        assert out.loc[8, "n_lanes"] == out.loc[8, "n_detectors"] == 1
+
+    def test_layout_without_counts_rows(self):
+        config = {k: v for k, v in _LANE_MAP_CONFIG.items()
+                  if not k.startswith("Lanes_EB") or k.endswith("Layout")}
+        out = self._out(config)
+        assert out.loc[2, "n_lanes"] == 2
+        assert out.loc[2, "lane_source"] == "layout"
+
+    def test_layout_serving_none_of_the_turns_falls_back(self):
+        config = {**_LANE_MAP_CONFIG, "Lanes_EB_Layout": "L|L"}
+        out = self._out(config)
+        assert out.loc[2, "lane_source"] == "detectors"
+        assert out.loc[2, "n_lanes"] == 3
+
+    def test_no_lane_config_matches_detector_proxy(self):
+        config = {k: v for k, v in _LANE_MAP_CONFIG.items()
+                  if not k.startswith("Lanes_")}
+        with_none = phase_demand(_lane_counts(), movement_phase_map(config))
+        with_empty = phase_demand(
+            _lane_counts(), movement_phase_map(config),
+            parse_lane_config(config),
+        )
+        pd.testing.assert_frame_equal(with_none, with_empty)
+        assert (with_none["n_lanes"] == with_none["n_detectors"]).all()
+        assert (with_none["lane_source"] == "detectors").all()
+
+    def test_lanes_carried_into_phase_output(self):
+        demand = phase_demand(
+            _lane_counts(), movement_phase_map(_LANE_MAP_CONFIG),
+            parse_lane_config(_LANE_MAP_CONFIG),
+        )
+        phase_df, _ = critical_movement_analysis(
+            ring_barrier_structure(_RB_CONFIG), demand,
+        )
+        row = phase_df.set_index("phase").loc[2]
+        assert row["n_lanes"] == 2
+        assert row["lane_source"] == "layout"
+        # Unserved structure phase: zero lanes, empty source
+        assert phase_df.set_index("phase").loc[1, "n_lanes"] == 0
+        assert phase_df.set_index("phase").loc[1, "lane_source"] == ""
+
+
 class TestCriticalMovementAnalysis:
 
     def _demand(self, per_phase: dict) -> pd.DataFrame:
@@ -195,6 +338,8 @@ class TestCriticalMovementAnalysis:
             "phase": list(per_phase),
             "movements": ["M"] * len(per_phase),
             "n_detectors": [1] * len(per_phase),
+            "n_lanes": [1] * len(per_phase),
+            "lane_source": ["detectors"] * len(per_phase),
             "demand_vph": list(per_phase.values()),
             "peak_vph": list(per_phase.values()),
             "demand_per_lane": list(per_phase.values()),

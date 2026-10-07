@@ -44,6 +44,7 @@ from ..utils.timezone import to_epoch
 from ..analysis.critical import (
     critical_movement_analysis as _critical_core,
     movement_phase_map as _movement_map_core,
+    parse_lane_config as _lane_config_core,
     phase_demand as _phase_demand_core,
     ring_barrier_structure as _structure_core,
 )
@@ -159,7 +160,14 @@ class CriticalMovementEngine:
         structure_df = _structure_core(config, cycles_df)
         self._warn_structure(structure_df)
 
-        demand_df = _phase_demand_core(counts_df, movement_map)
+        try:
+            lanes = _lane_config_core(config)
+        except ValueError as exc:
+            print(f"  ⚠️  Critical: ignoring Lanes config ({exc}).")
+            lanes = None
+        demand_df = _phase_demand_core(counts_df, movement_map, lanes)
+        if basis == "per_lane":
+            self._warn_lane_fallback(demand_df)
         if demand_df.empty:
             print("  ⚠️  Critical: no mapped movement produced demand — "
                   "check TM_* and Det_P{N}_Stopbar config.")
@@ -252,6 +260,20 @@ class CriticalMovementEngine:
                 f"  ⚠️  Critical: movements not mapped to a phase "
                 f"(no or ambiguous stop-bar detector overlap): "
                 f"{', '.join(unmapped)}.  Their demand is excluded."
+            )
+
+    @staticmethod
+    def _warn_lane_fallback(demand_df: pd.DataFrame) -> None:
+        """Print the phases whose per-lane divisor is the detector proxy."""
+        if demand_df.empty:
+            return
+        proxied = demand_df.loc[
+            demand_df["lane_source"] == "detectors", "phase"
+        ].tolist()
+        if proxied:
+            print(
+                f"  ℹ️  Critical: no Lanes config covers phases {proxied} — "
+                f"their per-lane demand divides by stop-bar detector count."
             )
 
     @staticmethod

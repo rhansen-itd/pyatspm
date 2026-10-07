@@ -5839,7 +5839,8 @@ def _add_critical_parser(subs: argparse._SubParsersAction) -> None:
             "against observed cycle sequences; movement counts (TM_* keys)\n"
             "are mapped to phases by stop-bar detector overlap\n"
             "(P{N} Stop Bar rows: Det_P{N}_Stop_Bar; Det_P{N}_Stopbar also accepted).\n\n"
-            "Demand (vph, or vphpl with --basis per_lane) is the\n"
+            "Demand (vph, or vphpl with --basis per_lane; lanes from\n"
+            "Lanes:{movement} / Lanes:{dir} Layout rows, else detectors) is the\n"
             "required-time proxy: per barrier group, the ring with the\n"
             "larger demand sum is the critical path.\n\n"
             "Outputs (CSV) are saved to:\n"
@@ -5893,8 +5894,9 @@ def _add_critical_parser(subs: argparse._SubParsersAction) -> None:
         choices=["per_lane", "total"],
         default="per_lane",
         help=(
-            "Demand basis for criticality: 'per_lane' = vph per detector "
-            "(lane-count proxy; default), 'total' = raw vph."
+            "Demand basis for criticality: 'per_lane' = vph per lane "
+            "(default; lanes from Lanes: config rows, else stop-bar "
+            "detector count), 'total' = raw vph."
         ),
     )
     p_crit.add_argument(
