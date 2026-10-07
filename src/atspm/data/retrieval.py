@@ -182,7 +182,12 @@ class RetrievalEngine:
         try:
             ssh.connect(host, port=port, username=user, password=password, timeout=15)
 
-            stdin, stdout, stderr = ssh.exec_command(f"ls -p {remote_folder} | grep -v /")
+            # grep exits 1 on no matches, so an empty folder must not read as
+            # a failure; only a missing folder is an error.
+            stdin, stdout, stderr = ssh.exec_command(
+                f"if [ -d {remote_folder} ]; then ls -p {remote_folder} | grep -v / || true; "
+                f"else echo 'folder not found' >&2; exit 2; fi"
+            )
             output = stdout.read().decode().strip()
             exit_status = stdout.channel.recv_exit_status()
             if exit_status != 0:
