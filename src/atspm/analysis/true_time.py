@@ -8,15 +8,24 @@ series decoded from ``eos_set_time``'s clock marks (``analysis.clock_marks``):
 
     true = label - d(label)
 
-where ``d`` is the controller's drift (controller minus true), fitted per
-segment and stepping by ``shift`` at each clock set.  ``events`` keeps
+where ``d`` is the controller's drift (controller minus true), interpolated
+between drift samples within a segment and stepping by ``shift`` at each
+clock set.  ``events`` keeps
 controller labels; this map is applied on read (``docs/ROADMAP.md``, S2).
 
 Segments and dead zones:
     The label axis is cut at every clock break.  Between two breaks lies one
-    segment with its own linear fit (least squares with outlier rejection
-    over the segment's drift samples; constant when they span under
-    ``_MIN_RATE_SPAN``).  A
+    segment, over which ``d`` is linear between consecutive drift samples
+    (the hourly checks) and held at the first / last sample beyond them.
+    Holding beats carrying a trend on: an end slope from pulse-only samples
+    (~0.15 s each) amplifies their noise, and a set's anchor and residual
+    sit seconds apart.  The cost is up to ``_MAX_EXTRAPOLATION`` of
+    unfollowed wander past a segment's outermost sample.
+    Field controllers keep time off the 60 Hz line, whose frequency
+    wanders: 701 drifted 0.5-1 s per hour in both directions within a day,
+    so one line per segment missed by ~0.35 s where interpolating through
+    the samples tracks it.  A sample is dropped only as a spike, more than
+    ``_SPIKE_FLOOR`` from both neighbours in the same direction.  A
     break owns a *dead zone* of labels that are not mapped (NaN):
 
     - **Decoded set** (``shift`` known): labels that the step makes
@@ -64,12 +73,11 @@ from .decoders import CLOCK_STEP_FENCE_PARAM, COMMS_GAP_PARAM
 
 _GAP_CODE: int = -1
 
-# Samples must span at least this long before a rate is fitted.
-_MIN_RATE_SPAN: float = 3600.0
-
-# A sample further than this from the first fit (and than 3 robust sigma)
-# is dropped before the refit.  Clean samples sit within about 0.2 s.
-_OUTLIER_FLOOR: float = 0.5
+# An interior sample further than this from the line through its
+# neighbours, on the same side of both, is dropped as a spike.  Line-
+# frequency wander moved 701's drift 0.8 s off that line in the field, so
+# this only catches a misdecoded pulse (e.g. a flipped sign).
+_SPIKE_FLOOR: float = 2.0
 
 # A segment is mapped at most this far beyond its outermost sample (two
 # missed hourly checks).
@@ -94,7 +102,7 @@ _USABLE_DRIFT = ("ok", "send_log")
 _KIND_SEVERITY = {"set": 0, "set_undecoded": 1, "fence": 2, "gap": 3}
 
 MODEL_COLUMNS = [
-    "seg_start", "seg_end", "t_ref", "intercept", "slope",
+    "segment", "seg_start", "seg_end", "t_ref", "intercept", "slope",
     "n_samples", "span", "resid_mad", "opened_by", "closed_by",
 ]
 
@@ -109,7 +117,7 @@ def drift_model(
     gaps_df: pd.DataFrame,
     window: Tuple[float, float],
 ) -> pd.DataFrame:
-    """Fit the controller's drift per segment between clock breaks.
+    """Model the controller's drift, piecewise linear between drift samples.
 
     Args:
         drift_df: Drift samples from ``decode_clock_marks`` (label time).
@@ -123,11 +131,18 @@ def drift_model(
             segment's samples are all present.
 
     Returns:
-        DataFrame with ``MODEL_COLUMNS``, one row per mappable segment,
-        sorted and non-overlapping.  ``d(t) = intercept + slope * (t -
-        t_ref)`` on ``[seg_start, seg_end)``.  ``opened_by`` / ``closed_by``
-        name the bounding break: ``'window'``, ``'set'``,
-        ``'set_undecoded'``, ``'fence'``, ``'gap'`` or ``'extrapolation'``.
+        DataFrame with ``MODEL_COLUMNS``, one row per piece, sorted and
+        non-overlapping.  ``d(t) = intercept + slope * (t - t_ref)`` on
+        ``[seg_start, seg_end)``.  Pieces of one segment share ``segment``
+        and are contiguous; a piece runs between two drift samples, or holds
+        the end sample's drift (``slope = 0``) out to the segment's bounds.
+        ``n_samples``, ``span`` and ``resid_mad`` describe the whole
+        segment; ``resid_mad`` is the median miss of each interior sample
+        against the line through its neighbours (NaN under three samples),
+        i.e. how well the sampling rate follows the clock.  ``opened_by`` /
+        ``closed_by`` name the bounding break on a segment's first / last
+        piece: ``'window'``, ``'set'``, ``'set_undecoded'``, ``'fence'``,
+        ``'gap'`` or ``'extrapolation'``; ``'knot'`` between pieces.
     """
     lo_w, hi_w = float(window[0]), float(window[1])
     breaks = _build_breaks(sets_df, gaps_df)
@@ -174,12 +189,24 @@ def drift_model(
         if end <= start:
             continue
 
-        t_ref, intercept, slope, mad = _fit(ts, ds)
-        rows.append((
-            start, end, t_ref, intercept, slope, int(sel.sum()),
-            float(ts.max() - ts.min()), mad, opened, closed,
-        ))
-    return pd.DataFrame(rows, columns=MODEL_COLUMNS)
+        kt, kd = _knots(ts, ds)
+        edges = np.concatenate([[start], kt[(kt > start) & (kt < end)], [end]])
+        d_e = np.interp(edges, kt, kd)
+        n_p = edges.size - 1
+        opened_p = np.full(n_p, "knot", dtype=object)
+        closed_p = np.full(n_p, "knot", dtype=object)
+        opened_p[0], closed_p[-1] = opened, closed
+        rows.append(pd.DataFrame({
+            "segment": len(rows), "seg_start": edges[:-1], "seg_end": edges[1:],
+            "t_ref": edges[:-1], "intercept": d_e[:-1],
+            "slope": np.diff(d_e) / np.diff(edges),
+            "n_samples": int(sel.sum()), "span": float(ts.max() - ts.min()),
+            "resid_mad": _interp_mad(kt, kd),
+            "opened_by": opened_p, "closed_by": closed_p,
+        }))
+    if not rows:
+        return pd.DataFrame(columns=MODEL_COLUMNS)
+    return pd.concat(rows, ignore_index=True)[MODEL_COLUMNS]
 
 
 def to_true_time(ts: np.ndarray, model: pd.DataFrame) -> np.ndarray:
@@ -363,38 +390,39 @@ def _build_breaks(sets_df: pd.DataFrame, gaps_df: pd.DataFrame) -> pd.DataFrame:
     return merged.reset_index(drop=True)[cols]
 
 
-def _fit(t: np.ndarray, d: np.ndarray) -> Tuple[float, float, float, float]:
-    """Least-squares line through ``(t, d)`` with one round of outlier rejection.
+def _knots(t: np.ndarray, d: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """Sorted, unique interpolation knots with spikes removed.
 
-    Drift samples are quantized to 0.1 s and a segment's whole drift range
-    is a few tenths of a second, so most sample pairs tie: a median-of-slopes
-    estimator (Theil-Sen) collapses to zero slope there.  Least squares uses
-    every sample; rejecting residuals beyond ``_OUTLIER_FLOOR`` (or 3 robust
-    sigma, if wider) and refitting keeps a stray sample from tilting it.
-
-    Returns ``(t_ref, intercept, slope, resid_mad)``.
+    Samples sharing a label are averaged.  An interior sample more than
+    ``_SPIKE_FLOOR`` off the line through its neighbours, and above (or
+    below) both of them, is dropped.
     """
-    t_ref = float(t.min())
-    x = t - t_ref
-    slope, intercept = _line(x, d)
-    resid = d - (intercept + slope * x)
-    sigma = 1.4826 * float(np.median(np.abs(resid)))
-    keep = np.abs(resid) <= max(_OUTLIER_FLOOR, 3.0 * sigma)
-    slope, intercept = _line(x[keep], d[keep])
-    mad = float(np.median(np.abs(d[keep] - (intercept + slope * x[keep]))))
-    return t_ref, intercept, slope, mad
+    kt, inv = np.unique(t, return_inverse=True)
+    kd = np.bincount(inv, weights=d) / np.bincount(inv)
+    if kt.size < 3:
+        return kt, kd
+    left, right = kd[1:-1] - kd[:-2], kd[1:-1] - kd[2:]
+    miss = kd[1:-1] - _neighbour_line(kt, kd)
+    spike = (np.abs(miss) > _SPIKE_FLOOR) & (np.sign(left) == np.sign(right))
+    keep = np.concatenate([[True], ~spike, [True]])
+    return kt[keep], kd[keep]
 
 
-def _line(x: np.ndarray, d: np.ndarray) -> Tuple[float, float]:
-    """``(slope, intercept)``; a constant when *x* spans under ``_MIN_RATE_SPAN``."""
-    if np.ptp(x) < _MIN_RATE_SPAN:
-        return 0.0, float(d.mean())
-    slope, intercept = np.polyfit(x, d, 1)
-    return float(slope), float(intercept)
+def _neighbour_line(t: np.ndarray, d: np.ndarray) -> np.ndarray:
+    """Each interior knot's drift as predicted by the line through its neighbours."""
+    w = (t[1:-1] - t[:-2]) / (t[2:] - t[:-2])
+    return d[:-2] + w * (d[2:] - d[:-2])
+
+
+def _interp_mad(t: np.ndarray, d: np.ndarray) -> float:
+    """Median leave-one-out miss of interior knots; NaN under three knots."""
+    if t.size < 3:
+        return float("nan")
+    return float(np.median(np.abs(d[1:-1] - _neighbour_line(t, d))))
 
 
 def _drift_at(ts: np.ndarray, model: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray]:
-    """Evaluate the model at *ts*: ``(drift, segment index)``; NaN / -1 if uncovered."""
+    """Evaluate the model at *ts*: ``(drift, segment id)``; NaN / -1 if uncovered."""
     if model.empty or ts.size == 0:
         return np.full(ts.shape, np.nan), np.full(ts.shape, -1, dtype=np.int64)
     start = model["seg_start"].to_numpy(dtype=float)
@@ -405,4 +433,5 @@ def _drift_at(ts: np.ndarray, model: pd.DataFrame) -> Tuple[np.ndarray, np.ndarr
     d = (model["intercept"].to_numpy(dtype=float)[kc]
          + model["slope"].to_numpy(dtype=float)[kc]
          * (ts - model["t_ref"].to_numpy(dtype=float)[kc]))
-    return np.where(covered, d, np.nan), np.where(covered, kc, -1)
+    seg = model["segment"].to_numpy(dtype=np.int64)[kc]
+    return np.where(covered, d, np.nan), np.where(covered, seg, -1)

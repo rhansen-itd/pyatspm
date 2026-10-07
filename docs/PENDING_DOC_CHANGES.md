@@ -17,3 +17,4 @@ See CLAUDE.md "Documentation Workflow" for the rules.
 - [src/atspm/data/manager.py] int_cfg `Lanes:` rows import as config columns Lanes_{movement}, Lanes_{dir}_Layout
 - [src/atspm/analysis/__init__.py] export parse_lane_config; phase_demand gains lanes=, outputs n_lanes/lane_source
 - [src/atspm/cli.py] critical --basis per_lane divides by Lanes config lanes (detector proxy fallback)
+- [src/atspm/analysis/true_time.py] drift_model interpolates hourly samples; MODEL_COLUMNS gains `segment`, rows are pieces

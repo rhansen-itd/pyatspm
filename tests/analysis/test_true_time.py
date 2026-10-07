@@ -42,11 +42,14 @@ class Controller:
     ``d`` starts at *d0*, runs at *ppm*, and steps by each applied shift.
     It logs eos_set_time's pulses: hourly checks at :37, a daily set at
     09:17 UTC, with the ON registering 0.0-0.3 s late (bench-measured).
+    *wander* adds a line-frequency style excursion ``wander(true - T0)``.
     """
 
-    def __init__(self, d0, ppm, seed, days=2, set_min_drift=0.75):
+    def __init__(self, d0, ppm, seed, days=2, set_min_drift=0.75, wander=None):
         self.rng = np.random.default_rng(seed)
         self.d0, self.rate = d0, ppm * 1e-6
+        self.wander = wander
+        self.host = []  # (true send time, host-timed drift), as eos-time.jsonl
         self.steps = []  # (true time, shift)
         self.rows = []   # (true time, code, param, pulse_on_delay)
         self.true_shift = []
@@ -56,6 +59,8 @@ class Controller:
     def d(self, t):
         t = np.asarray(t, dtype=float)
         out = self.d0 + self.rate * (t - T0)
+        if self.wander is not None:
+            out = out + self.wander(t - T0)
         for ts, s in self.steps:
             out = out + np.where(t >= ts, s, 0.0)
         return out
@@ -67,6 +72,7 @@ class Controller:
 
     def _drift_pulse(self, t):
         m = float(self.d(t)) + self.rng.normal(0, 0.02)
+        self.host.append((t, m))
         width = float(np.clip(round(abs(m), 1), 0.1, 30.0))
         return self._pulse(t, width, PEDS.ahead if m > 0 else PEDS.behind), m
 
@@ -102,6 +108,11 @@ class Controller:
             self.rows += [(x, SHARED_CODE, SHARED_PARAM) for x in shared_times(self.days)]
         return self
 
+    def host_log(self):
+        """The head unit's own drift measurements, keyed by ON label time."""
+        t = np.array([h[0] for h in self.host])
+        return pd.DataFrame({"label": t + self.d(t), "drift": [h[1] for h in self.host]})
+
     def log(self):
         """Events as the DB holds them: label time, fenced, sorted, unique."""
         rows = sorted(self.rows, key=lambda r: r[0])
@@ -127,10 +138,21 @@ def shared_times(days):
     return T0 + 3.3 + 10.0 * np.arange(int(days * DAY / 10) - 1)
 
 
-def correct(events, send_log=None):
-    """The read path: decode, fit, map. Returns (mapped events, model, sets)."""
+def correct(events, send_log=None, host=None):
+    """The read path: decode, fit, map. Returns (mapped events, model, sets).
+
+    *host* (``Controller.host_log()``) fills ``drift_host`` the way a
+    matched eos-time.jsonl does.
+    """
     lab = events[["timestamp", "event_code", "parameter"]]
     drift, sets = decode_clock_marks(lab, PEDS, send_log)
+    if host is not None:
+        lbl = host["label"].to_numpy()
+        ts = drift["ts"].to_numpy(dtype=float)
+        i = np.clip(np.searchsorted(lbl, ts), 1, len(lbl) - 1)
+        i = np.where(np.abs(lbl[i - 1] - ts) < np.abs(lbl[i] - ts), i - 1, i)
+        near = np.abs(lbl[i] - ts) < 1.0
+        drift["drift_host"] = np.where(near, host["drift"].to_numpy()[i], np.nan)
     gaps = lab.loc[lab["event_code"] == -1, ["timestamp", "parameter"]]
     window = (lab["timestamp"].min(), lab["timestamp"].max() + 1)
     model = drift_model(drift, sets, gaps, window)
@@ -139,6 +161,20 @@ def correct(events, send_log=None):
 
 def real_rows(out):
     return out.loc[out["event_code"] != -1]
+
+
+def bounds(model, col="opened_by"):
+    """Per segment: its first piece's opened_by (or last piece's closed_by)."""
+    g = model.groupby("segment", sort=True)[col]
+    return (g.first() if col == "opened_by" else g.last()).tolist()
+
+
+def segment_rates(model):
+    """Per segment spanning over 6 h, the ppm of a line through its knots."""
+    return np.array([
+        np.polyfit(g["t_ref"], g["intercept"], 1)[0] * 1e6
+        for _, g in model.groupby("segment") if g["span"].iloc[0] > 6 * 3600
+    ])
 
 
 # ---------------------------------------------------------------------------
@@ -161,21 +197,29 @@ class TestKnownClock:
         assert all(s < 0 for s in c.true_shift)
 
     def test_every_mapped_event_lands_on_its_true_instant(self, fast):
+        # Pulse widths only: interpolation carries their ~0.15 s noise.
         _, out, _, _ = fast
         err = (real_rows(out)["timestamp"] - real_rows(out)["true"]).abs()
-        assert err.max() < 0.3
+        assert err.max() < 0.4
         assert err.median() < 0.12
+
+    def test_host_timed_samples_tighten_it(self, fast):
+        c = fast[0]
+        out, _, _ = correct(c.log(), host=c.host_log())
+        err = (real_rows(out)["timestamp"] - real_rows(out)["true"]).abs()
+        assert err.max() < 0.2
+        assert err.median() < 0.06
 
     def test_correction_is_needed(self, fast):
         c, out, _, _ = fast
         raw = c.log()
         assert (raw["timestamp"] - raw["true"]).abs().max() > 2.5
 
-    def test_fitted_rate_recovers_the_ppm(self, fast):
+    def test_knots_follow_the_ppm(self, fast):
         _, _, model, _ = fast
-        long = model.loc[model["span"] > 6 * 3600]
-        assert len(long) >= 2
-        assert np.allclose(long["slope"] * 1e6, 40, atol=6)
+        rates = segment_rates(model)
+        assert len(rates) >= 2
+        assert np.allclose(rates, 40, atol=6)
 
     def test_almost_everything_maps(self, fast):
         c, out, _, _ = fast
@@ -190,6 +234,48 @@ class TestKnownClock:
         _, _, model, _ = fast
         assert list(model.columns) == MODEL_COLUMNS
         assert (model["seg_start"].to_numpy()[1:] >= model["seg_end"].to_numpy()[:-1]).all()
+        # Pieces of a segment are contiguous and the drift is continuous.
+        same = model["segment"].to_numpy()[1:] == model["segment"].to_numpy()[:-1]
+        end_d = model["intercept"] + model["slope"] * (model["seg_end"] - model["t_ref"])
+        assert np.allclose(model["seg_start"].to_numpy()[1:][same], model["seg_end"].to_numpy()[:-1][same])
+        assert np.allclose(model["intercept"].to_numpy()[1:][same], end_d.to_numpy()[:-1][same])
+
+
+class TestLineFrequencyClock:
+    """A clock on the 60 Hz line wanders by up to a few hundred ppm either
+    way (701, 2026-10-06/07).  Interpolating the hourly host-timed samples
+    follows it; one line per segment could not."""
+
+    @staticmethod
+    def wander(x):
+        return 1.0 * np.sin(2 * np.pi * x / (8 * 3600)) + 0.25 * np.sin(2 * np.pi * x / (4 * 3600) + 1)
+
+    def test_interpolation_tracks_a_wandering_clock(self):
+        c = Controller(d0=0.0, ppm=0, seed=7, wander=self.wander).run(shared=False)
+        log = c.log()
+        out, model, _ = correct(log, host=c.host_log())
+        # Between samples; before the first (00:37) and after the last
+        # (47:37) the drift is held and the wander is not followed.
+        kept = real_rows(out)
+        kept = kept.loc[kept["true"].between(T0 + 3600, T0 + 47.5 * 3600)]
+        err = (kept["timestamp"] - kept["true"]).abs()
+        assert err.max() < 0.3
+        assert err.median() < 0.08
+        assert np.nanmax(model["resid_mad"]) < 0.25
+
+        # The best single line per segment misses by well over a second.
+        ev = log.dropna(subset=["true"])
+        lab = ev["timestamp"].to_numpy()
+        drift = lab - ev["true"].to_numpy()
+        k = np.searchsorted(model["seg_start"].to_numpy(), lab, side="right") - 1
+        seg = np.where(k >= 0, model["segment"].to_numpy()[np.maximum(k, 0)], -1)
+        misses = []
+        for s_id in np.unique(seg[seg >= 0]):
+            m = seg == s_id
+            if np.ptp(lab[m]) > 6 * 3600:
+                fit = np.polyval(np.polyfit(lab[m], drift[m], 1), lab[m])
+                misses.append(np.abs(drift[m] - fit).max())
+        assert max(misses) > 1.0
 
 
 class TestTwoControllersAgree:
@@ -200,12 +286,17 @@ class TestTwoControllersAgree:
         ((1.2, 40, 11), (-0.9, -30, 12)),   # one fast, one slow
         ((0.4, 5, 13), (-2.5, 60, 14)),     # starts far apart
     ])
-    def test_shared_events_agree(self, a, b):
+    @pytest.mark.parametrize("host, tol_max, tol_med", [
+        (False, 0.5, 0.15),  # pulse widths only: interpolation carries their noise
+        (True, 0.2, 0.06),   # with the head unit's host-timed measurements
+    ])
+    def test_shared_events_agree(self, a, b, host, tol_max, tol_med):
         out = {}
         raw = {}
         for name, (d0, ppm, seed) in zip("ab", (a, b)):
-            log = Controller(d0=d0, ppm=ppm, seed=seed).run().log()
-            mapped, _, _ = correct(log)
+            c = Controller(d0=d0, ppm=ppm, seed=seed).run()
+            log = c.log()
+            mapped, _, _ = correct(log, host=c.host_log() if host else None)
             pick = lambda f: f.loc[(f["event_code"] == SHARED_CODE) & (f["parameter"] == SHARED_PARAM)]
             slot = lambda f: np.round((f["true"] - T0 - 3.3) / 10).astype(int)
             out[name] = pick(mapped).set_index(slot(pick(mapped)))["timestamp"]
@@ -213,8 +304,8 @@ class TestTwoControllersAgree:
         both = out["a"].index.intersection(out["b"].index)
         assert len(both) > 0.99 * len(shared_times(2))
         diff = (out["a"][both] - out["b"][both]).abs()
-        assert diff.max() < 0.35
-        assert diff.median() < 0.15
+        assert diff.max() < tol_max
+        assert diff.median() < tol_med
         uncorrected = (raw["a"][both] - raw["b"][both]).abs()
         assert uncorrected.max() > 3.0
 
@@ -340,7 +431,7 @@ class TestZones:
         sets = _sets([(on, on + 8, 8, 2.1, -2.1, 10, -2, on + 1.4, on + 10, np.nan, "ok")])
         drift = _drift([on - 2.3], [2.1], role=["pre_set"])
         model = drift_model(drift, sets, NO_GAPS, (T0, T0 + DAY))
-        assert model["opened_by"].tolist()[1:] == ["set"]
+        assert bounds(model)[1:] == ["set"]
         assert to_true_time(np.array([on + 20]), model)[0] == pytest.approx(on + 20 - 0.1)
 
     def test_undecoded_set_is_strict(self):
@@ -348,9 +439,10 @@ class TestZones:
         sets = _sets([(on, on + 8, 8, np.nan, np.nan, np.nan, np.nan, on + 1.4, np.nan, np.nan, "no_pre_pulse")])
         drift = _drift([on - 3600, on + 1800], [2.1, 0.1])
         model = drift_model(drift, sets, NO_GAPS, (T0, T0 + DAY))
-        assert model["opened_by"].tolist()[1:] == ["set_undecoded"]
-        assert model["seg_start"].iloc[1] == pytest.approx(on + 1800)
-        assert model["seg_end"].iloc[0] == pytest.approx(on - 60)
+        assert bounds(model)[1:] == ["set_undecoded"]
+        seg = model.groupby("segment").agg(lo=("seg_start", "min"), hi=("seg_end", "max"))
+        assert seg["lo"].iloc[1] == pytest.approx(on + 1800)
+        assert seg["hi"].iloc[0] == pytest.approx(on - 60)
 
     def test_fence_explained_by_a_set_does_not_break_strictly(self):
         on = T0 + 9 * 3600 + 17 * 60 + 10.0
@@ -358,14 +450,14 @@ class TestZones:
         drift = _drift([on - 2.3], [2.1], role=["pre_set"])
         gaps = pd.DataFrame({"timestamp": [on + 2.0 - 2 - 0.05], "parameter": [CLOCK_STEP_FENCE_PARAM]})
         model = drift_model(drift, sets, gaps, (T0, T0 + DAY))
-        assert model["opened_by"].tolist()[1:] == ["set"]
+        assert bounds(model)[1:] == ["set"]
 
     def test_saturated_and_unpaired_samples_are_not_used(self):
         drift = _drift([T0 + 100, T0 + 200, T0 + 300], [np.nan, 5.0, 0.2],
                        status=["saturated", "unpaired_on", "ok"])
         model = drift_model(drift, _sets([]), NO_GAPS, (T0, T0 + DAY))
-        assert model["n_samples"].tolist() == [1]
-        assert model["intercept"].iloc[0] == pytest.approx(0.2)
+        assert model["n_samples"].unique().tolist() == [1]
+        assert to_true_time(np.array([T0 + 300]), model)[0] == pytest.approx(T0 + 300 - 0.2)
 
     def test_send_log_measurement_is_preferred(self):
         drift = _drift([T0 + 100], [0.25]).assign(drift_host=0.31)
@@ -375,25 +467,33 @@ class TestZones:
 
 class TestFitLimits:
 
-    def test_short_span_fits_a_constant(self):
-        drift = _drift([T0, T0 + 600, T0 + 1200], [0.1, 0.3, 0.2])
+    def test_interpolates_between_samples_and_holds_beyond(self):
+        drift = _drift([T0 + 3600, T0 + 7200, T0 + 10800], [0.1, 0.5, 0.2])
         model = drift_model(drift, _sets([]), NO_GAPS, (T0, T0 + DAY))
-        assert model["slope"].iloc[0] == 0.0
-        assert model["intercept"].iloc[0] == pytest.approx(0.2)
+        t = T0 + np.array([1800, 3600, 5400, 9000, 12600])
+        assert to_true_time(t, model) == pytest.approx(t - np.array([0.1, 0.1, 0.3, 0.35, 0.2]))
+        assert model["resid_mad"].iloc[0] == pytest.approx(0.35)
 
-    def test_robust_to_one_outlier(self):
-        ts = T0 + 3600 * np.arange(12)
-        d = 0.1 + 20e-6 * (ts - T0)
-        d[5] += 5.0
+    def test_drops_a_spike_keeps_a_swing(self):
+        ts = T0 + 3600 * np.arange(6)
+        d = np.array([0.0, -1.1, -2.7, -2.2, 5.0, -1.7])  # -2.7: real; 5.0: misdecoded
         model = drift_model(_drift(ts, d), _sets([]), NO_GAPS, (T0, T0 + DAY))
-        assert model["slope"].iloc[0] * 1e6 == pytest.approx(20, abs=0.5)
+        got = ts - to_true_time(ts, model)
+        assert got[:4] == pytest.approx(d[:4])
+        assert got[4] == pytest.approx(-1.95)
+
+    def test_samples_sharing_a_label_are_averaged(self):
+        drift = _drift([T0 + 100, T0 + 100], [0.2, 0.4])
+        model = drift_model(drift, _sets([]), NO_GAPS, (T0, T0 + DAY))
+        assert to_true_time(np.array([T0 + 100]), model)[0] == pytest.approx(T0 + 99.7)
 
     def test_extrapolation_is_bounded(self):
         drift = _drift([T0 + 10 * 3600], [0.4])
         model = drift_model(drift, _sets([]), NO_GAPS, (T0, T0 + DAY))
-        assert model["seg_start"].iloc[0] == pytest.approx(T0 + 8 * 3600)
-        assert model["seg_end"].iloc[0] == pytest.approx(T0 + 12 * 3600)
-        assert model["opened_by"].tolist() == ["extrapolation"]
+        assert model["seg_start"].min() == pytest.approx(T0 + 8 * 3600)
+        assert model["seg_end"].max() == pytest.approx(T0 + 12 * 3600)
+        assert bounds(model) == ["extrapolation"]
+        assert bounds(model, "closed_by") == ["extrapolation"]
 
     def test_no_samples_no_model(self):
         model = drift_model(_drift([], []), _sets([]), NO_GAPS, (T0, T0 + DAY))

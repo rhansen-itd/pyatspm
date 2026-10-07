@@ -174,7 +174,7 @@ class ClockMarkEngine:
             model_df = model_df.loc[
                 (model_df["seg_end"] > start_epoch) & (model_df["seg_start"] < end_epoch)
             ].reset_index(drop=True)
-            print(f"  Drift model: {len(model_df)} segment(s).")
+            print(f"  Drift model: {model_df['segment'].nunique()} segment(s), {len(model_df)} piece(s).")
 
         if output_dir is not None:
             self._write_outputs(drift_df, sets_df, output_dir, start_dt, end_dt, model_df)

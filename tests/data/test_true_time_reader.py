@@ -133,10 +133,12 @@ class TestLoader:
         # whose samples must all be in the fit.
         start = T0 + 86400 + 20 * 3600
         model = load_drift_model(db, start, start + 3600)
-        seg = model.loc[(model["seg_start"] <= start) & (model["seg_end"] > start)].iloc[0]
-        assert seg["opened_by"] == "set"
-        assert seg["n_samples"] >= 12
-        assert seg["slope"] * 1e6 == pytest.approx(40, abs=8)
+        piece = model.loc[(model["seg_start"] <= start) & (model["seg_end"] > start)].iloc[0]
+        seg = model.loc[model["segment"] == piece["segment"]]
+        assert seg["opened_by"].iloc[0] == "set"
+        assert piece["n_samples"] >= 12
+        rate = np.polyfit(seg["t_ref"], seg["intercept"], 1)[0]
+        assert rate * 1e6 == pytest.approx(40, abs=8)
 
     def test_send_log_beside_the_db_is_picked_up(self, sim, tmp_path):
         # An empty send log file is read without error.
