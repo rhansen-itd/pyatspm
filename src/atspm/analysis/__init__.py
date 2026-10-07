@@ -14,6 +14,7 @@ Modules:
 - detector_activity: Per-detector activity profile per local day/window
 - detector_health: Deterministic detector-health rules and onset bursts
 - clock_marks: eos_set_time drift/set marker decoding
+- true_time: drift model and label-to-true-time mapping
 - timing_actuation: Timing-and-actuation intervals, row layout, finding links
 - preempt: Preemption request/service episodes and daily summary
 - split_monitor: Programmed-plan timeline (131–149) and per-service split monitor
@@ -97,6 +98,7 @@ from .clock_marks import (
     pair_marker_pulses,
     decode_clock_marks,
 )
+from .true_time import drift_model, to_true_time, apply_true_time
 
 from .detector_roles import (
     parse_detector_roles,
@@ -237,6 +239,10 @@ __all__ = [
     'send_log_pulses',
     'pair_marker_pulses',
     'decode_clock_marks',
+    # True-time axis
+    'drift_model',
+    'to_true_time',
+    'apply_true_time',
     # Timing and actuation
     'TIMING_CODES',
     'finding_plot_windows',

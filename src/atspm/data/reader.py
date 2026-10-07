@@ -43,8 +43,10 @@ import pandas as pd
 import pytz
 
 from .manager import DatabaseManager, db_timezone
+from .true_time import load_drift_model
 from ..analysis.detector_roles import parse_detector_roles
 from ..analysis.decoders import CLOCK_STEP_FENCE_PARAM
+from ..analysis.true_time import apply_true_time
 from ..utils.timezone import to_epoch
 
 # ---------------------------------------------------------------------------
@@ -57,6 +59,11 @@ _TERMINATION_CODES: List[int] = [4, 5, 6, 21, 45, 105]
 # Cycle look-back buffer: fetch cycles up to this many seconds before the
 # requested window start so that the cycle active at window-open is included.
 _CYCLE_BUFFER_SECONDS: int = 3600
+
+# With ``true_time``, labels are fetched this far past the window on both
+# sides before mapping, then trimmed in true time.  Covers any drift a pulse
+# can measure (capped at 30 s) with room to spare.
+_TRUE_TIME_MARGIN: float = 300.0
 
 
 def _bounds_to_epoch(
@@ -98,12 +105,20 @@ def get_events_with_cycles_df(
     end: datetime,
     event_codes: Optional[List[int]] = None,
     timezone: Optional[str] = None,
+    true_time: bool = False,
 ) -> pd.DataFrame:
     """
     Query events and cycles, returning a joined flat DataFrame.
 
     Reconstructs a flat format joining raw events with active cycle data
     (timestamp, event_code, parameter, cycle_start, coord_plan).
+
+    With *true_time*, events are joined to cycles in controller label time
+    (the order the controller logged them in), then ``timestamp`` and
+    ``cycle_start`` are both mapped onto true time through the drift model
+    (``docs/ROADMAP.md``, S2) and the window is applied in true time.  Rows
+    in a clock break's dead zone are dropped and a gap marker takes their
+    place; a ``cycle_start`` inside a dead zone becomes NaN.
 
     Args:
         db_path: Path to SQLite database.
@@ -117,15 +132,26 @@ def get_events_with_cycles_df(
             timestamp and cycle_start from UTC epoch floats to tz-aware
             Timestamps.  Naive bounds fall back to the database's own
             ``metadata`` timezone when this is ``None``.
+        true_time: Return the head unit's true time instead of the
+            controller's labels.  Needs ``Clk_*`` config.
 
     Returns:
         DataFrame with columns [timestamp, event_code, parameter, cycle_start, coord_plan].
         Timestamps are UTC epoch floats unless *timezone* is supplied.
         Returns an empty DataFrame with the correct schema if no events found.
+
+    Raises:
+        ValueError: With *true_time*, when the intersection has no
+            ``Clk_*`` config.
     """
     start_epoch, end_epoch = _bounds_to_epoch(db_path, start, end, timezone)
+    q_start, q_end = start_epoch, end_epoch
+    if true_time:
+        q_start -= _TRUE_TIME_MARGIN
+        q_end += _TRUE_TIME_MARGIN
+        model = load_drift_model(db_path, q_start, q_end)
 
-    events_df = _query_events(db_path, start_epoch, end_epoch, event_codes)
+    events_df = _query_events(db_path, q_start, q_end, event_codes)
 
     if events_df.empty:
         # Changed: Updated to use native DB column names
@@ -137,11 +163,16 @@ def get_events_with_cycles_df(
     # started before the window but is still active at window-open.
     cycles_df = _query_cycles(
         db_path,
-        start_epoch - _CYCLE_BUFFER_SECONDS,
-        end_epoch,
+        q_start - _CYCLE_BUFFER_SECONDS,
+        q_end,
     )
 
     result_df = _merge_events_with_cycles(events_df, cycles_df)
+
+    if true_time:
+        result_df = apply_true_time(result_df, model, extra_columns=("cycle_start",))
+        in_window = result_df["timestamp"].between(start_epoch, end_epoch, inclusive="left")
+        result_df = result_df.loc[in_window].reset_index(drop=True)
     
     # Changed: Removed _format_legacy_columns() entirely. Native columns pass through.
     

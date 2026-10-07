@@ -23,6 +23,7 @@ from ..analysis.clock_marks import (
     send_log_pulses,
 )
 from ..plotting.clock_marks import plot_clock_drift
+from .true_time import load_drift_model
 from ..utils.timezone import to_epoch
 
 # Window around requested range to catch pulses & brackets spanning window edges
@@ -77,6 +78,7 @@ class ClockMarkEngine:
         end: Union[str, datetime],
         send_log_path: Optional[Union[str, Path]] = None,
         output_dir: Optional[Union[str, Path]] = None,
+        true_time: bool = False,
     ) -> Optional[Dict[str, pd.DataFrame]]:
         """Decode clock marks for a chosen period.
 
@@ -89,9 +91,13 @@ class ClockMarkEngine:
             output_dir: When provided, write CSVs and HTML plot to this
                 directory and return ``None``. When ``None``, return the
                 result dict.
+            true_time: Also fit the drift model the true-time axis maps
+                through (``atspm.data.true_time``): returned as ``"model"``,
+                written as ``Clock_Model_*.csv`` and drawn on the plot.
 
         Returns:
-            ``dict`` with keys ``"drift"`` and ``"sets"`` — or ``None`` when
+            ``dict`` with keys ``"drift"`` and ``"sets"`` (and ``"model"``
+            with *true_time*) — or ``None`` when
             *output_dir* is set, and an empty dict when configuration is missing
             or invalid.
         """
@@ -160,11 +166,24 @@ class ClockMarkEngine:
             f"{n_sets} clock sets ({n_sets_flagged} flagged)."
         )
 
+        model_df = None
+        if true_time:
+            model_df = load_drift_model(
+                self.db_path, start_epoch, end_epoch, send_log_path
+            )
+            model_df = model_df.loc[
+                (model_df["seg_end"] > start_epoch) & (model_df["seg_start"] < end_epoch)
+            ].reset_index(drop=True)
+            print(f"  Drift model: {len(model_df)} segment(s).")
+
         if output_dir is not None:
-            self._write_outputs(drift_df, sets_df, output_dir, start_dt, end_dt)
+            self._write_outputs(drift_df, sets_df, output_dir, start_dt, end_dt, model_df)
             return None
 
-        return {"drift": drift_df, "sets": sets_df}
+        result = {"drift": drift_df, "sets": sets_df}
+        if model_df is not None:
+            result["model"] = model_df
+        return result
 
     def _read_timezone(self) -> str:
         """Read the intersection timezone from the database."""
@@ -225,6 +244,7 @@ class ClockMarkEngine:
         output_dir: Union[str, Path],
         start_dt: datetime,
         end_dt: datetime,
+        model_df: Optional[pd.DataFrame] = None,
     ) -> None:
         """Write result DataFrames to CSV and interactive plot to HTML.
 
@@ -234,6 +254,8 @@ class ClockMarkEngine:
             output_dir: Destination directory (created if absent).
             start_dt: Parsed period start (naive local datetime).
             end_dt: Parsed period end (exclusive).
+            model_df: Optional drift model segments, written and drawn when
+                given.
         """
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -276,10 +298,26 @@ class ClockMarkEngine:
         sets_csv.to_csv(output_dir / sets_csv_name, index=False)
         print(f"Wrote {sets_csv_name}")
 
+        if model_df is not None:
+            model_csv = model_df.copy()
+            for col in ("seg_start", "seg_end", "t_ref"):
+                model_csv[col] = (
+                    pd.to_datetime(model_csv[col], unit="s", utc=True)
+                    .dt.tz_convert(self.timezone)
+                    .dt.tz_localize(None)
+                )
+            model_csv["rate_ppm"] = model_csv["slope"] * 1e6
+            model_csv_name = f"Clock_Model_{date_str}.csv"
+            model_csv.to_csv(output_dir / model_csv_name, index=False)
+            print(f"Wrote {model_csv_name}")
+
         with DatabaseManager(self.db_path) as mgr:
             metadata = mgr.get_metadata()
 
-        fig = plot_clock_drift(drift_df, sets_df, metadata=metadata, timezone=self.timezone)
+        fig = plot_clock_drift(
+            drift_df, sets_df, metadata=metadata, timezone=self.timezone,
+            model_df=model_df,
+        )
         html_name = f"Clock_Drift_{date_str}.html"
         fig.write_html(output_dir / html_name)
         print(f"Wrote {html_name}")
@@ -292,6 +330,7 @@ def get_clock_marks(
     send_log_path: Optional[Union[str, Path]] = None,
     output_dir: Optional[Union[str, Path]] = None,
     timezone: Optional[str] = None,
+    true_time: bool = False,
 ) -> Optional[Dict[str, pd.DataFrame]]:
     """Convenience wrapper around :class:`ClockMarkEngine`.decode.
 
@@ -302,6 +341,7 @@ def get_clock_marks(
         send_log_path: Path to head unit's eos-time.jsonl log.
         output_dir: Write CSVs and HTML plot and return None when provided.
         timezone: Override intersection timezone.
+        true_time: Also fit and return the drift model.
 
     Returns:
         Result dict or None if output_dir is set.
@@ -311,4 +351,5 @@ def get_clock_marks(
         end=end,
         send_log_path=send_log_path,
         output_dir=output_dir,
+        true_time=true_time,
     )
