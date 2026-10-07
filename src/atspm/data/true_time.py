@@ -21,8 +21,10 @@ import pytz
 
 from .manager import DatabaseManager
 from ..analysis.clock_marks import (
+    MARKER_CODES,
+    MARKER_ON_CODES,
     decode_clock_marks,
-    marker_peds_from_config,
+    marker_phases_from_config,
     send_log_pulses,
 )
 from ..analysis.true_time import drift_model
@@ -36,6 +38,9 @@ _BREAK_SEARCH: float = 7 * 86400.0
 _FETCH_MARGIN: float = 300.0
 
 SEND_LOG_NAME = "eos-time.jsonl"
+
+_CODES_SQL = ", ".join(str(c) for c in MARKER_CODES)
+_ON_CODES_SQL = ", ".join(str(c) for c in MARKER_ON_CODES)
 
 
 def load_drift_model(
@@ -70,18 +75,18 @@ def load_drift_model(
         config = mgr.get_config_at_date(
             datetime.fromtimestamp(start_epoch, tz=pytz.utc)
         ) or {}
-        peds = marker_peds_from_config(config)
-        if peds is None:
+        phases = marker_phases_from_config(config)
+        if phases is None:
             raise ValueError(
                 f"{db_path.name}: no Clk_* config, so no clock marks to "
                 f"build a true-time axis from"
             )
 
-        lo, hi = _break_bounds(mgr, peds.set, start_epoch, end_epoch)
+        lo, hi = _break_bounds(mgr, phases.set, start_epoch, end_epoch)
         events_df = pd.read_sql_query(
             "SELECT timestamp, event_code, parameter FROM events "
             "WHERE timestamp >= ? AND timestamp < ? "
-            "AND event_code IN (-1, 89, 90) "
+            f"AND event_code IN (-1, {_CODES_SQL}) "
             "ORDER BY timestamp, event_code, parameter",
             mgr.conn,
             params=(lo, hi),
@@ -95,28 +100,28 @@ def load_drift_model(
         send_log_path = db_path.parent / SEND_LOG_NAME
     send_log = _read_send_log(send_log_path) if send_log_path else None
 
-    drift_df, sets_df = decode_clock_marks(events_df, peds, send_log)
+    drift_df, sets_df = decode_clock_marks(events_df, phases, send_log)
     gaps_df = events_df.loc[events_df["event_code"] == -1, ["timestamp", "parameter"]]
     return drift_model(drift_df, sets_df, gaps_df, (lo, hi))
 
 
 def _break_bounds(
     mgr: DatabaseManager,
-    set_ped: int,
+    set_phase: int,
     start_epoch: float,
     end_epoch: float,
 ) -> Tuple[float, float]:
     """Label range from the break before *start_epoch* to the one after *end_epoch*."""
-    is_break = "(event_code = -1 OR (event_code = 90 AND parameter = ?))"
+    is_break = f"(event_code = -1 OR (event_code IN ({_ON_CODES_SQL}) AND parameter = ?))"
     before = mgr.conn.execute(
         f"SELECT MAX(timestamp) FROM events WHERE timestamp >= ? "
         f"AND timestamp < ? AND {is_break}",
-        (start_epoch - _BREAK_SEARCH, start_epoch, set_ped),
+        (start_epoch - _BREAK_SEARCH, start_epoch, set_phase),
     ).fetchone()[0]
     after = mgr.conn.execute(
         f"SELECT MIN(timestamp) FROM events WHERE timestamp >= ? "
         f"AND timestamp < ? AND {is_break}",
-        (end_epoch, end_epoch + _BREAK_SEARCH, set_ped),
+        (end_epoch, end_epoch + _BREAK_SEARCH, set_phase),
     ).fetchone()[0]
     lo = before - _FETCH_MARGIN if before is not None else start_epoch - _BREAK_SEARCH
     hi = after + _FETCH_MARGIN if after is not None else end_epoch + _BREAK_SEARCH

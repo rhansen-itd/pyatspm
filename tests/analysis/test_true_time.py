@@ -13,7 +13,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from atspm.analysis.clock_marks import MarkerPeds, decode_clock_marks, send_log_pulses
+from atspm.analysis.clock_marks import MarkerPhases, decode_clock_marks, send_log_pulses
 from atspm.analysis.decoders import CLOCK_STEP_FENCE_PARAM, COMMS_GAP_PARAM
 from atspm.analysis.true_time import (
     MODEL_COLUMNS,
@@ -25,7 +25,7 @@ from atspm.data.ingestion import IngestionEngine
 from atspm.data.manager import DatabaseManager
 
 BENCH = Path(__file__).resolve().parents[1] / "fixtures" / "clock_marks_bench_2026_09_30"
-PEDS = MarkerPeds(behind=15, ahead=16, set=14)
+MARKS = MarkerPhases(behind=15, ahead=16, set=14)
 
 DAY = 86400.0
 T0 = 1_790_726_400.0  # 2026-09-30 00:00 UTC
@@ -43,12 +43,14 @@ class Controller:
     It logs eos_set_time's pulses: hourly checks at :37, a daily set at
     09:17 UTC, with the ON registering 0.0-0.3 s late (bench-measured).
     *wander* adds a line-frequency style excursion ``wander(true - T0)``.
+    *mark* is ``'ped'`` (90/45/89, before 2026-10-07) or ``'hold'`` (41/42).
     """
 
-    def __init__(self, d0, ppm, seed, days=2, set_min_drift=0.75, wander=None):
+    def __init__(self, d0, ppm, seed, days=2, set_min_drift=0.75, wander=None, mark="ped"):
         self.rng = np.random.default_rng(seed)
         self.d0, self.rate = d0, ppm * 1e-6
         self.wander = wander
+        self.mark = mark
         self.host = []  # (true send time, host-timed drift), as eos-time.jsonl
         self.steps = []  # (true time, shift)
         self.rows = []   # (true time, code, param, pulse_on_delay)
@@ -65,16 +67,21 @@ class Controller:
             out = out + np.where(t >= ts, s, 0.0)
         return out
 
-    def _pulse(self, t, width, ped):
-        delay = self.rng.uniform(0.0, min(0.3, width))
-        self.rows += [(t + delay, 90, ped), (t + delay, 45, ped), (t + width, 89, ped)]
+    def _pulse(self, t, width, phase):
+        # The ON registers late: 0.0-0.3 s for ped calls, ~0.0-0.1 s for holds.
+        late = 0.1 if self.mark == "hold" else 0.3
+        delay = self.rng.uniform(0.0, min(late, width))
+        if self.mark == "hold":
+            self.rows += [(t + delay, 41, phase), (t + width, 42, phase)]
+        else:
+            self.rows += [(t + delay, 90, phase), (t + delay, 45, phase), (t + width, 89, phase)]
         return t + width
 
     def _drift_pulse(self, t):
         m = float(self.d(t)) + self.rng.normal(0, 0.02)
         self.host.append((t, m))
         width = float(np.clip(round(abs(m), 1), 0.1, 30.0))
-        return self._pulse(t, width, PEDS.ahead if m > 0 else PEDS.behind), m
+        return self._pulse(t, width, MARKS.ahead if m > 0 else MARKS.behind), m
 
     def _set(self, t, edit_lead=2.0):
         off, m = self._drift_pulse(t)
@@ -87,7 +94,7 @@ class Controller:
         on = off + 0.05
         self.steps.append((on + edit_lead, float(shift)))
         self.true_shift.append(shift)
-        b_off = self._pulse(on, period, PEDS.set)
+        b_off = self._pulse(on, period, MARKS.set)
         self._drift_pulse(b_off + 0.05)
 
     def run(self, extra_steps=(), shared=True, background=True):
@@ -145,7 +152,7 @@ def correct(events, send_log=None, host=None):
     matched eos-time.jsonl does.
     """
     lab = events[["timestamp", "event_code", "parameter"]]
-    drift, sets = decode_clock_marks(lab, PEDS, send_log)
+    drift, sets = decode_clock_marks(lab, MARKS, send_log)
     if host is not None:
         lbl = host["label"].to_numpy()
         ts = drift["ts"].to_numpy(dtype=float)
@@ -384,7 +391,7 @@ class TestUnmarkedBreaks:
 def _drift(ts, d, role="check", status="ok"):
     n = len(ts)
     return pd.DataFrame({
-        "ts": ts, "off": np.asarray(ts) + 0.1, "ped": PEDS.ahead, "width": 0.1,
+        "ts": ts, "off": np.asarray(ts) + 0.1, "phase": MARKS.ahead, "mark": "ped", "width": 0.1,
         "drift": d, "drift_lo": np.nan, "drift_hi": np.nan, "saturated": False,
         "role": [role] * n if isinstance(role, str) else role,
         "drift_host": np.nan, "status": [status] * n if isinstance(status, str) else status,
@@ -570,7 +577,7 @@ class TestBench:
             lo = pre["on_epoch"] + pre["drift_s"] - 1
             hi = res["off_epoch"] + run["after"]["drift"] + 1
             ev = bench_events.loc[bench_events["timestamp"].between(lo, hi)]
-            drift, sets = decode_clock_marks(ev, PEDS, log)
+            drift, sets = decode_clock_marks(ev, MARKS, log)
             assert sets["shift"].tolist() == [run["shift_s"]]
             drift = drift.loc[drift["role"] != "residual"]
             model = drift_model(drift, sets, NO_GAPS, (lo, lo + 600))

@@ -92,8 +92,8 @@ from .split_failures import split_failures, bin_split_failures
 from .optimizer import optimize
 from .optimizer_validation import validate_plans
 from .clock_marks import (
-    MarkerPeds,
-    marker_peds_from_config,
+    MarkerPhases,
+    marker_phases_from_config,
     drop_marker_events,
     send_log_pulses,
     pair_marker_pulses,
@@ -235,8 +235,8 @@ __all__ = [
     'wd_thresholds',
     'wd_units',
     # Clock marks
-    'MarkerPeds',
-    'marker_peds_from_config',
+    'MarkerPhases',
+    'marker_phases_from_config',
     'drop_marker_events',
     'send_log_pulses',
     'pair_marker_pulses',

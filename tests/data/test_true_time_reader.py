@@ -17,6 +17,7 @@ from atspm import cli
 from atspm.data.clock_marks import ClockMarkEngine
 from atspm.data.manager import DatabaseManager
 from atspm.data.reader import get_events_with_cycles_df
+from atspm.analysis.true_time import to_true_time
 from atspm.data.true_time import load_drift_model
 from tests.analysis.test_true_time import SHARED_CODE, SHARED_PARAM, T0, Controller, shared_times
 
@@ -126,6 +127,20 @@ class TestReader:
 
 
 class TestLoader:
+
+    def test_phase_hold_marks_build_the_same_model(self, sim, tmp_path):
+        # Upstream's marks from 2026-10-07: the loader's SQL must fetch
+        # 41/42 and find the SET bracket's hold ON as a break.
+        c, db, _ = sim
+        hold = Controller(d0=1.2, ppm=40, seed=21, mark="hold").run()
+        hold_db, _ = _seed(tmp_path, hold)
+        start = T0 + 86400 + 20 * 3600
+        model = load_drift_model(hold_db, start, start + 3600)
+        assert (model["opened_by"] == "set").sum() == 1
+        ped = load_drift_model(db, start, start + 3600)
+        assert model["segment"].nunique() == ped["segment"].nunique()
+        t = np.linspace(start, start + 3600, 50)
+        assert np.abs(to_true_time(t, model) - to_true_time(t, ped)).max() < 0.2
 
     def test_fetch_reaches_back_to_the_previous_set(self, sim):
         c, db, _ = sim

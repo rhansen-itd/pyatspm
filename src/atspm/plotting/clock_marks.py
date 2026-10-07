@@ -140,16 +140,16 @@ def plot_clock_drift(
         arr_lo = np.maximum(arr_lo, 0.0)
 
         roles = valid_drift["role"].to_numpy() if "role" in valid_drift.columns else [""] * len(valid_drift)
-        peds = valid_drift["ped"].to_numpy() if "ped" in valid_drift.columns else [""] * len(valid_drift)
+        phases = valid_drift["phase"].to_numpy() if "phase" in valid_drift.columns else [""] * len(valid_drift)
         statuses = valid_drift["status"].to_numpy() if "status" in valid_drift.columns else [""] * len(valid_drift)
 
         hover_texts = [
-            f"Drift: {d:+.3f} s<br>Bounds: [{lo:.3f}, {hi:.3f}]<br>Ped: {p}<br>Role: {r}<br>Status: {s}"
+            f"Drift: {d:+.3f} s<br>Bounds: [{lo:.3f}, {hi:.3f}]<br>Phase: {p}<br>Role: {r}<br>Status: {s}"
             for d, lo, hi, p, r, s in zip(
                 drift_y,
                 valid_drift["drift_lo"],
                 valid_drift["drift_hi"],
-                peds,
+                phases,
                 roles,
                 statuses,
             )
@@ -196,10 +196,10 @@ def plot_clock_drift(
         )
         symbols = ["triangle-up" if b >= 0 else "triangle-down" for b in finite_bound]
         sat_hover = [
-            f"Saturated (bound only)<br>Bound: {b:+.2f} s<br>Ped: {p}<br>Role: {r}"
+            f"Saturated (bound only)<br>Bound: {b:+.2f} s<br>Phase: {p}<br>Role: {r}"
             for b, p, r in zip(
                 finite_bound,
-                sat_rows["ped"] if "ped" in sat_rows.columns else [""] * len(sat_rows),
+                sat_rows["phase"] if "phase" in sat_rows.columns else [""] * len(sat_rows),
                 sat_rows["role"] if "role" in sat_rows.columns else [""] * len(sat_rows),
             )
         ]

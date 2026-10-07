@@ -117,9 +117,9 @@ class TestPlot:
         assert not fig.layout.shapes  # sets drawn as traces, not layout shapes
 
     def test_empty_frames_still_make_a_figure(self):
-        from atspm.analysis.clock_marks import decode_clock_marks, MarkerPeds
+        from atspm.analysis.clock_marks import decode_clock_marks, MarkerPhases
         empty = pd.DataFrame(columns=["timestamp", "event_code", "parameter"])
-        drift, sets = decode_clock_marks(empty, MarkerPeds(15, 16, 14))
+        drift, sets = decode_clock_marks(empty, MarkerPhases(15, 16, 14))
         fig = plot_clock_drift(drift, sets, metadata={}, timezone=TZ)
         assert isinstance(fig, go.Figure)
 

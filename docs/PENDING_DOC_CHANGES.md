@@ -18,3 +18,5 @@ See CLAUDE.md "Documentation Workflow" for the rules.
 - [src/atspm/analysis/__init__.py] export parse_lane_config; phase_demand gains lanes=, outputs n_lanes/lane_source
 - [src/atspm/cli.py] critical --basis per_lane divides by Lanes config lanes (detector proxy fallback)
 - [src/atspm/analysis/true_time.py] drift_model interpolates hourly samples; MODEL_COLUMNS gains `segment`, rows are pieces
+- [src/atspm/analysis/__init__.py] MarkerPeds -> MarkerPhases, marker_peds_from_config -> marker_phases_from_config
+- [src/atspm/analysis/clock_marks.py] decodes phase-hold marks (41/42) as well as ped calls; Clk_* name marker phases; drift frame column ped -> phase, + mark

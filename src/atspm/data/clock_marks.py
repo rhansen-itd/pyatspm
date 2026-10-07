@@ -18,13 +18,17 @@ import pandas as pd
 
 from .manager import DatabaseManager, db_timezone
 from ..analysis.clock_marks import (
+    MARKER_CODES,
+    MARKER_ON_CODES,
     decode_clock_marks,
-    marker_peds_from_config,
+    marker_phases_from_config,
     send_log_pulses,
 )
 from ..plotting.clock_marks import plot_clock_drift
 from .true_time import load_drift_model
 from ..utils.timezone import to_epoch
+
+_CODES_SQL = ", ".join(str(c) for c in MARKER_CODES)
 
 # Window around requested range to catch pulses & brackets spanning window edges
 _FETCH_MARGIN: float = 300.0
@@ -107,12 +111,12 @@ class ClockMarkEngine:
 
         config = self._get_config(start_dt)
         try:
-            peds = marker_peds_from_config(config)
+            phases = marker_phases_from_config(config)
         except ValueError as exc:
             print(f"  ⚠️  ClockMark: {exc} (Clk_* config invalid)")
             return None if output_dir is not None else {}
 
-        if peds is None:
+        if phases is None:
             print("  ⚠️  ClockMark: no Clk_* config — no clock marks to decode")
             return None if output_dir is not None else {}
 
@@ -123,7 +127,7 @@ class ClockMarkEngine:
             sql = (
                 "SELECT timestamp, event_code, parameter FROM events "
                 "WHERE timestamp >= ? AND timestamp < ? "
-                "AND event_code IN (-1, 89, 90) "
+                f"AND event_code IN (-1, {_CODES_SQL}) "
                 "ORDER BY timestamp, event_code, parameter"
             )
             events_df = pd.read_sql_query(sql, mgr.conn, params=(fetch_start, fetch_end))
@@ -147,7 +151,7 @@ class ClockMarkEngine:
                         records.append(json.loads(line))
             send_log_df = send_log_pulses(records)
 
-        drift_df, sets_df = decode_clock_marks(events_df, peds, send_log_df)
+        drift_df, sets_df = decode_clock_marks(events_df, phases, send_log_df)
 
         drift_time = drift_df["ts"].fillna(drift_df["off"])
         drift_mask = (drift_time >= start_epoch) & (drift_time < end_epoch)
