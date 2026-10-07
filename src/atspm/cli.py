@@ -2718,6 +2718,7 @@ def _clock_drift_single_intersection(target_name: str, args: argparse.Namespace)
             end=args.end,
             send_log_path=send_log_path,
             output_dir=output_dir,
+            true_time=args.true_time,
         )
     except Exception as exc:
         if args.verbose:
@@ -6176,6 +6177,16 @@ def _add_clock_drift_parser(subs: argparse._SubParsersAction) -> None:
         default=None,
         metavar="PATH",
         help="The head unit's eos-time.jsonl send log file.",
+    )
+    p_clk.add_argument(
+        "--true-time",
+        dest="true_time",
+        action="store_true",
+        default=False,
+        help=(
+            "Also fit the drift model behind the true-time axis: writes "
+            "Clock_Model_*.csv and draws it on the plot."
+        ),
     )
     p_clk.add_argument(
         "--timezone",

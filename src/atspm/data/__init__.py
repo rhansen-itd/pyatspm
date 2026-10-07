@@ -124,6 +124,7 @@ from .clock_marks import (
     ClockMarkEngine,
     get_clock_marks,
 )
+from .true_time import load_drift_model
 
 from .preempt import (
     PreemptEngine,
@@ -252,6 +253,7 @@ __all__ = [
     # Clock marks
     'ClockMarkEngine',
     'get_clock_marks',
+    'load_drift_model',
     # Preemption
     'PreemptEngine',
     'get_preempt',

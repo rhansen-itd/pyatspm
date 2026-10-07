@@ -10,3 +10,7 @@ See CLAUDE.md "Documentation Workflow" for the rules.
 
 - [src/atspm/cli.py] new pack-raw subcommand (--target/--targetid/--all, --include-current, --keep-loose, --dry-run, --verbose); sync push gains --pack
 - [src/atspm/data/__init__.py] export DatzSource, PackResult, parse_datz_month, list_monthly_candidates, verify_archive, pack_monthly_archive, pack_intersection_raw
+- [src/atspm/cli.py] clock-drift gains --true-time (writes Clock_Model_*.csv, draws drift model)
+- [src/atspm/data/reader.py] get_events_with_cycles_df gains true_time= (drift-corrected axis, needs Clk_* config)
+- [src/atspm/analysis/__init__.py] export drift_model, to_true_time, apply_true_time
+- [src/atspm/data/__init__.py] export load_drift_model

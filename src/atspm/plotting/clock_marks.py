@@ -31,6 +31,7 @@ def plot_clock_drift(
     sets_df: pd.DataFrame,
     metadata: Optional[Dict[str, Any]] = None,
     timezone: Optional[str] = None,
+    model_df: Optional[pd.DataFrame] = None,
 ) -> go.Figure:
     """Build an interactive Plotly figure displaying controller clock drift and clock sets.
 
@@ -41,6 +42,8 @@ def plot_clock_drift(
             shift, status]``.
         metadata: Optional dictionary of intersection metadata.
         timezone: Local timezone string for timestamp conversion (e.g. 'US/Mountain').
+        model_df: Optional drift model segments (``analysis.true_time``),
+            drawn as one line per segment; the gaps between are dead zones.
 
     Returns:
         Plotly Figure object.
@@ -208,6 +211,43 @@ def plot_clock_drift(
                 name="Saturated (bound only)",
                 marker=dict(symbol=symbols, size=10, color="#ff7f0e"),
                 hovertext=sat_hover,
+                hoverinfo="text+x",
+            )
+        )
+
+    # Drift model: one [start, end, None] line per segment
+    if model_df is not None and not model_df.empty:
+        seg_t = model_df[["seg_start", "seg_end"]].to_numpy(dtype=float)
+        seg_d = (
+            model_df["intercept"].to_numpy(dtype=float)[:, None]
+            + model_df["slope"].to_numpy(dtype=float)[:, None]
+            * (seg_t - model_df["t_ref"].to_numpy(dtype=float)[:, None])
+        )
+        n_seg = len(model_df)
+        x_model = np.empty(n_seg * 3, dtype=object)
+        x_model[0::3] = _epoch_to_dt(pd.Series(seg_t[:, 0]), timezone).to_numpy()
+        x_model[1::3] = _epoch_to_dt(pd.Series(seg_t[:, 1]), timezone).to_numpy()
+        x_model[2::3] = None
+        y_model = np.empty(n_seg * 3, dtype=object)
+        y_model[0::3] = seg_d[:, 0]
+        y_model[1::3] = seg_d[:, 1]
+        y_model[2::3] = None
+        model_hover = [
+            f"Model: {r * 1e6:+.1f} ppm, {n} samples, MAD {m:.3f} s"
+            for r, n, m in zip(model_df["slope"], model_df["n_samples"], model_df["resid_mad"])
+        ]
+        hover_model = np.empty(n_seg * 3, dtype=object)
+        hover_model[0::3] = model_hover
+        hover_model[1::3] = model_hover
+        hover_model[2::3] = None
+        fig.add_trace(
+            go.Scatter(
+                x=x_model,
+                y=y_model,
+                mode="lines",
+                name="Drift model",
+                line=dict(color="#2ca02c", width=2),
+                hovertext=hover_model,
                 hoverinfo="text+x",
             )
         )
