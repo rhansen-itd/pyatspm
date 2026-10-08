@@ -98,11 +98,23 @@ _RUN_CHAIN_GAP: float = 5.0
 _SHIFT_TOLERANCE: float = 1.0
 
 # Send-log pulses match logged ONs within this many seconds of label time.
-_SEND_LOG_MATCH_TOL: float = 1.0
+# The send log's label estimate (host ON + panel drift) inherits any panel
+# misread (~1.1 s twice in 62 field pulses, 2026-10-07/08); same-phase pulses
+# of one run are >= 10 s apart.
+_SEND_LOG_MATCH_TOL: float = 3.0
+
+# Edge-timed drift: a matched pulse's ON label minus its host ON epoch is
+# drift plus a constant send-to-log latency.  The latency is calibrated per
+# decode as the median of (edge - panel drift) over matched drift pulses, so
+# a panel misread cannot move it; field head units ran 0.06-0.07 s (MAD
+# 0.01-0.02, 62 holds/peds at 313 and 701), the bench ~0.17.  Below this
+# many matched pulses the median can't outvote a misread, so the panel
+# reading is kept as is.
+_MIN_LATENCY_PULSES: int = 3
 
 _DRIFT_COLUMNS = [
     "ts", "off", "phase", "mark", "width", "drift", "drift_lo", "drift_hi",
-    "saturated", "role", "drift_host", "status",
+    "saturated", "role", "drift_host", "drift_panel", "status",
 ]
 _SET_COLUMNS = [
     "bracket_on", "bracket_off", "width", "drift_pre", "shift_est",
@@ -205,9 +217,11 @@ def send_log_pulses(records: Iterable[Dict[str, Any]]) -> pd.DataFrame:
         records: Parsed JSONL objects, one per run.
 
     Returns:
-        DataFrame ``[phase, role, on_label, drift_host, shift_host]``; empty
-        when no record carries pulses.  A pulse names its marker as
-        ``phase`` (holds, from 2026-10-07) or ``ped`` (earlier records).
+        DataFrame ``[phase, role, on_label, on_host, drift_panel,
+        shift_host]``; empty when no record carries pulses.  ``on_host`` is
+        the host ON epoch and ``drift_panel`` the head unit's front-panel
+        drift reading.  A pulse names its marker as ``phase`` (holds, from
+        2026-10-07) or ``ped`` (earlier records).
     """
     rows = []
     for rec in records:
@@ -226,11 +240,12 @@ def send_log_pulses(records: Iterable[Dict[str, Any]]) -> pd.DataFrame:
                 "phase": int(marker),
                 "role": p["role"],
                 "on_label": float(p["on_epoch"]) + float(drift),
-                "drift_host": float(p["drift_s"]) if p.get("drift_s") is not None else np.nan,
+                "on_host": float(p["on_epoch"]),
+                "drift_panel": float(p["drift_s"]) if p.get("drift_s") is not None else np.nan,
                 "shift_host": float(shift) if shift is not None else np.nan,
             })
     return pd.DataFrame(
-        rows, columns=["phase", "role", "on_label", "drift_host", "shift_host"]
+        rows, columns=["phase", "role", "on_label", "on_host", "drift_panel", "shift_host"]
     )
 
 
@@ -330,13 +345,20 @@ def decode_clock_marks(
     ``shift = round(w - L)`` (positive = set forward).  The step itself lies
     in ``[step_lo, step_hi]``, in pre-step label time.
 
-    The send log, when given, is matched by phase and label time.  It fills
-    only what the pulses cannot decide and is otherwise kept for comparison
-    in ``drift_host`` / ``shift_host``: a saturated drift pulse takes the
-    logged drift, which then serves as ``drift_pre`` so the bracket still
-    yields the shift; a set with no usable pre-set pulse takes the logged
-    shift.  A set the bracket decodes but the
-    send log contradicts is flagged rather than resolved either way.
+    The send log, when given, is matched by phase and label time.  A matched
+    pulse's ON edge is timed against its host ON epoch:
+    ``drift_host = on - on_host - latency``, with the latency the median of
+    ``on - on_host - drift_panel`` over the matched drift pulses (below
+    ``_MIN_LATENCY_PULSES`` of them, ``drift_host = drift_panel``).  This is
+    tighter than the width (~0.02 s against ~0.1 s) and, unlike the panel
+    reading ``drift_panel`` that the width also encodes, immune to the head
+    unit's occasional ~1 s misread of the controller's clock.  The send log
+    fills only what the pulses cannot decide and is otherwise kept for
+    comparison: a saturated drift pulse takes ``drift_host``, which then
+    serves as ``drift_pre`` so the bracket still yields the shift; a set
+    with no usable pre-set pulse takes the logged shift.  A set the bracket
+    decodes but the send log contradicts is flagged rather than resolved
+    either way.
 
     Args:
         events_df: Events ``[timestamp, event_code, parameter]`` (UTC epoch
@@ -356,8 +378,9 @@ def decode_clock_marks(
             drift_lo/hi  : bounds on drift (one side +/-inf when saturated)
             saturated    : bool
             role         : 'pre_set', 'residual' or 'check'
-            drift_host   : the send log's measurement, if matched
-            status       : 'ok', 'saturated', 'send_log', 'unpaired_on',
+            drift_host   : edge-timed drift against the send log, if matched
+            drift_panel  : the head unit's panel reading, if matched
+            status      : 'ok', 'saturated', 'send_log', 'unpaired_on',
                            'unpaired_off'
 
         **sets_df** - one row per set bracket::
@@ -377,9 +400,9 @@ def decode_clock_marks(
     """
     pulses = pair_marker_pulses(events_df, phases)
     if send_log is not None and not send_log.empty and not pulses.empty:
-        pulses = _match_send_log(pulses, send_log)
+        pulses = _match_send_log(pulses, send_log, phases)
     else:
-        pulses = pulses.assign(drift_host=np.nan, shift_host=np.nan)
+        pulses = pulses.assign(drift_host=np.nan, drift_panel=np.nan, shift_host=np.nan)
 
     is_set = pulses["phase"] == phases.set
     drift_df = _decode_drift(pulses.loc[~is_set], phases)
@@ -392,20 +415,37 @@ def decode_clock_marks(
 # Internals
 # ---------------------------------------------------------------------------
 
-def _match_send_log(pulses: pd.DataFrame, send_log: pd.DataFrame) -> pd.DataFrame:
-    """Attach ``drift_host`` / ``shift_host`` from the nearest sent pulse."""
+def _match_send_log(
+    pulses: pd.DataFrame, send_log: pd.DataFrame, phases: MarkerPhases
+) -> pd.DataFrame:
+    """Attach the nearest sent pulse and time each matched ON edge.
+
+    Adds ``drift_panel`` / ``shift_host`` from the send log and the
+    edge-timed ``drift_host`` (see ``decode_clock_marks``).
+    """
     keyed = pulses.assign(_key=pulses["on"].fillna(pulses["off"]), _row=np.arange(len(pulses)))
     has_on = keyed["on"].notna()
     left = keyed.loc[has_on].sort_values("_key")
-    right = send_log.sort_values("on_label")[["phase", "on_label", "drift_host", "shift_host"]]
+    right = send_log.sort_values("on_label")[
+        ["phase", "on_label", "on_host", "drift_panel", "shift_host"]
+    ]
     matched = pd.merge_asof(
         left, right, left_on="_key", right_on="on_label", by="phase",
         direction="nearest", tolerance=_SEND_LOG_MATCH_TOL,
     )
     out = keyed.merge(
-        matched[["_row", "drift_host", "shift_host"]], on="_row", how="left"
+        matched[["_row", "on_host", "drift_panel", "shift_host"]], on="_row", how="left"
     )
-    return out.drop(columns=["_key", "_row"])
+
+    edge = (out["on"] - out["on_host"]).to_numpy(dtype=float)
+    panel = out["drift_panel"].to_numpy(dtype=float)
+    is_drift = (out["phase"] != phases.set).to_numpy()
+    offsets = (edge - panel)[is_drift & np.isfinite(edge) & np.isfinite(panel)]
+    if len(offsets) >= _MIN_LATENCY_PULSES:
+        out["drift_host"] = np.where(is_drift, edge - float(np.median(offsets)), np.nan)
+    else:
+        out["drift_host"] = panel
+    return out.drop(columns=["_key", "_row", "on_host"])
 
 
 def _decode_drift(pulses: pd.DataFrame, phases: MarkerPhases) -> pd.DataFrame:
@@ -445,6 +485,7 @@ def _decode_drift(pulses: pd.DataFrame, phases: MarkerPhases) -> pd.DataFrame:
         "saturated": saturated,
         "segment": pulses["segment"].to_numpy(),
         "drift_host": host,
+        "drift_panel": pulses["drift_panel"].to_numpy(dtype=float),
         "status": status,
     })
 

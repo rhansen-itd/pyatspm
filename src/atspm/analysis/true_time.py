@@ -122,7 +122,7 @@ def drift_model(
     Args:
         drift_df: Drift samples from ``decode_clock_marks`` (label time).
             Rows with status ``'ok'`` or ``'send_log'`` are used; the send
-            log's ``drift_host`` is preferred where present.
+            log's edge-timed ``drift_host`` is preferred where present.
         sets_df: Clock sets from ``decode_clock_marks``.
         gaps_df: Gap-marker rows ``[timestamp, parameter]`` (``event_code =
             -1``) over the same window.

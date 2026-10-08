@@ -106,7 +106,9 @@ class TestBenchDrift:
         drift, _ = decode_clock_marks(bench_events, MARKS, bench_log)
         sat = drift.loc[drift["saturated"]]
         assert sat["status"].tolist() == ["send_log", "send_log"]
-        assert sat["drift"].tolist() == pytest.approx([-39.633, 40.291])
+        assert sat["drift"].tolist() == sat["drift_host"].tolist()
+        # Edge-timed, so within the latency spread of the panel readings.
+        assert sat["drift"].tolist() == pytest.approx([-39.633, 40.291], abs=0.1)
 
     def test_saturated_pulses_without_the_log_are_bounds_only(self, bench_events):
         drift, _ = decode_clock_marks(bench_events, MARKS)
@@ -195,7 +197,7 @@ class TestSyntheticSets:
         rows, b_on, _ = _set_run(T0, drift_pre=-4.3, shift=4, period=10)
         rows = [r for r in rows if r[2] != MARKS.behind]
         log = pd.DataFrame([{"phase": MARKS.set, "role": "set", "on_label": b_on + 0.3,
-                             "drift_host": np.nan, "shift_host": 4.0}])
+                             "on_host": np.nan, "drift_panel": np.nan, "shift_host": 4.0}])
         _, sets = decode_clock_marks(_frame(rows), MARKS, log)
         assert sets["status"].tolist() == ["send_log"]
         assert sets["shift"].tolist() == [4]
@@ -203,7 +205,7 @@ class TestSyntheticSets:
     def test_send_log_contradicting_a_decoded_set_is_flagged(self):
         rows, b_on, _ = _set_run(T0, drift_pre=-4.3, shift=4, period=10)
         log = pd.DataFrame([{"phase": MARKS.set, "role": "set", "on_label": b_on,
-                             "drift_host": np.nan, "shift_host": 5.0}])
+                             "on_host": np.nan, "drift_panel": np.nan, "shift_host": 5.0}])
         _, sets = decode_clock_marks(_frame(rows), MARKS, log)
         assert sets["status"].tolist() == ["send_log_conflict"]
         assert sets["shift"].isna().all()
@@ -370,3 +372,53 @@ class TestPhaseHolds:
         rows = _hold(T0, 1.0, MARKS.ahead) + _hold(T0, 1.0, 2)
         kept = drop_marker_events(_frame(rows), MARKS)
         assert kept["parameter"].tolist() == [2, 2]
+
+
+# ---------------------------------------------------------------------------
+# Edge-timed drift against the send log
+# ---------------------------------------------------------------------------
+
+def _hourly_holds(true_drift, latency, panel_error=None):
+    """Hourly behind-holds at host :37:09 and their send-log records.
+
+    Each pulse logs at ``host + drift + latency`` with the width the head
+    unit sent, ``|panel reading|``; ``panel_error`` adds a misread to chosen
+    readings (and so to their widths), as seen at 313 23:37 and 701 02:37
+    on 2026-10-07/08.
+    """
+    panel_error = panel_error or {}
+    rows, records = [], []
+    for k, d in enumerate(true_drift):
+        host = T0 + 3600.0 * k
+        panel = d + panel_error.get(k, 0.0)
+        rows += _hold(round(host + d + latency, 1), round(abs(panel), 1), MARKS.behind)
+        records.append({"mode": "drift-check", "before": {"drift": panel}, "pulses": [{
+            "role": "drift", "mark": "hold", "phase": MARKS.behind,
+            "on_epoch": host, "drift_s": panel,
+        }]})
+    return _frame(rows), send_log_pulses(records)
+
+
+class TestEdgeTimedDrift:
+
+    TRUE = [-3.30, -3.47, -4.40, -6.41, -5.85, -4.91, -5.18, -4.93, -4.82, -4.94]
+
+    def test_a_panel_misread_does_not_reach_drift_host(self):
+        events, log = _hourly_holds(self.TRUE, latency=0.065, panel_error={8: -1.15})
+        drift, _ = decode_clock_marks(events, MARKS, log)
+        assert drift["drift_host"].notna().all()  # the misread pulse still matches
+        assert drift["drift_host"].tolist() == pytest.approx(self.TRUE, abs=0.1)
+        assert drift["drift_panel"].iloc[8] == pytest.approx(-5.97)
+        # The width encodes the misread too, so only the edge recovers it.
+        assert drift["drift"].iloc[8] == pytest.approx(-6.05, abs=0.06)
+
+    @pytest.mark.parametrize("latency", [0.065, 0.17])
+    def test_latency_is_calibrated_from_the_panel_median(self, latency):
+        events, log = _hourly_holds(self.TRUE, latency=latency)
+        drift, _ = decode_clock_marks(events, MARKS, log)
+        assert drift["drift_host"].tolist() == pytest.approx(self.TRUE, abs=0.1)
+
+    def test_too_few_pulses_keep_the_panel_reading(self):
+        events, log = _hourly_holds(self.TRUE[:2], latency=0.17)
+        drift, _ = decode_clock_marks(events, MARKS, log)
+        assert drift["drift_host"].tolist() == drift["drift_panel"].tolist()

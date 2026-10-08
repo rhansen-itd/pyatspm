@@ -20,3 +20,5 @@ See CLAUDE.md "Documentation Workflow" for the rules.
 - [src/atspm/analysis/true_time.py] drift_model interpolates hourly samples; MODEL_COLUMNS gains `segment`, rows are pieces
 - [src/atspm/analysis/__init__.py] MarkerPeds -> MarkerPhases, marker_peds_from_config -> marker_phases_from_config
 - [src/atspm/analysis/clock_marks.py] decodes phase-hold marks (41/42) as well as ped calls; Clk_* name marker phases; drift frame column ped -> phase, + mark
+- [src/atspm/data/retrieval.py] retrieve merges head unit's eos-time.jsonl into intersection folder; devices.json gains optional `send_log` (secondary default eos_set_time_standalone/eos-time.jsonl, null = off)
+- [src/atspm/analysis/clock_marks.py] drift_host now edge-timed; drift_df/Clock_Drift CSV gain `drift_panel`; send_log_pulses columns on_host/drift_panel

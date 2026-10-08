@@ -33,6 +33,9 @@ _CODES_SQL = ", ".join(str(c) for c in MARKER_CODES)
 # Window around requested range to catch pulses & brackets spanning window edges
 _FETCH_MARGIN: float = 300.0
 
+# A panel reading this far off its pulse's edge timing is reported as a misread
+_PANEL_MISREAD: float = 0.5
+
 # Accepted --start/--end string formats (date-only end extends to end-of-day)
 _DATETIME_FORMATS = (
     "%Y-%m-%d %H:%M:%S",
@@ -169,6 +172,12 @@ class ClockMarkEngine:
             f"  Clock marks: {n_drift} drift samples ({n_drift_flagged} flagged), "
             f"{n_sets} clock sets ({n_sets_flagged} flagged)."
         )
+        misread = (drift_df["drift_host"] - drift_df["drift_panel"]).abs() > _PANEL_MISREAD
+        if misread.any():
+            print(
+                f"  Send log: {int(misread.sum())} panel reading(s) off the pulse edge by "
+                f"> {_PANEL_MISREAD} s; edge timing used."
+            )
 
         model_df = None
         if true_time:
