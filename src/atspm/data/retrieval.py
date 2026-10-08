@@ -24,6 +24,17 @@ role (``secondary`` and beyond) must set ``host`` explicitly, since a
 secondary device isn't necessarily the detection system and there's no
 other metadata.json field that could stand in for it.
 
+Clock-mark send log
+===================
+A head unit running ``eos_set_time`` keeps its send log, ``eos-time.jsonl``,
+in its own home directory.  Each device may name it with ``send_log`` (a
+path relative to the login's home, or absolute); a ``secondary`` device
+defaults to ``eos_set_time_standalone/eos-time.jsonl``, and ``"send_log":
+null`` turns the fetch off.  New records are merged into the intersection's
+``eos-time.jsonl``, where ``clock-drift`` and the true-time reader look for
+it.  Merging rather than overwriting keeps history across a rotated or
+replaced head-unit log.  A missing remote log is noted, not an error.
+
 Package Location: src/atspm/data/retrieval.py
 """
 
@@ -39,6 +50,10 @@ from scp import SCPClient
 # Pull order by role: secondary (long-term storage) before controller
 # (short FIFO window) -- see module docstring.
 _ROLE_ORDER = {"secondary": 0, "controller": 1}
+
+# eos_set_time's send log: remote default per role, local name beside the DB.
+_SEND_LOG_DEFAULT = {"secondary": "eos_set_time_standalone/eos-time.jsonl"}
+SEND_LOG_NAME = "eos-time.jsonl"
 
 
 def _parse_generic_filename(filename: str) -> Optional[datetime]:
@@ -112,7 +127,8 @@ class RetrievalEngine:
 
         Returns:
             List of per-device result dicts: ``role``, ``host``,
-            ``downloaded`` (file count), ``error`` (``None`` on success).
+            ``downloaded`` (file count), ``send_log`` (new send-log records),
+            ``error`` (``None`` on success).
         """
         self.raw_dir.mkdir(parents=True, exist_ok=True)
         ordered = sorted(
@@ -170,7 +186,7 @@ class RetrievalEngine:
             remote_folder = device["remote_folder"]
         except (ValueError, KeyError) as exc:
             print(f"  Skipping device (role={role}): {exc}")
-            return {"role": role, "host": host, "downloaded": 0, "error": str(exc)}
+            return {"role": role, "host": host, "downloaded": 0, "send_log": 0, "error": str(exc)}
 
         last_retrieved = _parse_iso(device.get("last_retrieved"))
         parser = _get_filename_parser(device.get("device_type"))
@@ -181,6 +197,7 @@ class RetrievalEngine:
         ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         try:
             ssh.connect(host, port=port, username=user, password=password, timeout=15)
+            n_log = self._pull_send_log(ssh, device)
 
             # grep exits 1 on no matches, so an empty folder must not read as
             # a failure; only a missing folder is an error.
@@ -207,7 +224,7 @@ class RetrievalEngine:
 
             if not to_fetch:
                 print(f"  No new files (last_retrieved={last_retrieved}).")
-                return {"role": role, "host": host, "downloaded": 0, "error": None}
+                return {"role": role, "host": host, "downloaded": 0, "send_log": n_log, "error": None}
 
             # Another device for this intersection (e.g. an EVO mirroring the
             # controller via its own cron job) may have already landed some
@@ -228,18 +245,66 @@ class RetrievalEngine:
                 f"  Downloaded {downloaded} file(s) ({len(to_fetch) - downloaded} already on disk); "
                 f"bookmark advanced to {last_retrieved}."
             )
-            return {"role": role, "host": host, "downloaded": downloaded, "error": None}
+            return {"role": role, "host": host, "downloaded": downloaded, "send_log": n_log, "error": None}
 
         except paramiko.AuthenticationException:
             msg = f"Authentication failed for {user}@{host}"
             print(f"  Error: {msg}")
-            return {"role": role, "host": host, "downloaded": 0, "error": msg}
+            return {"role": role, "host": host, "downloaded": 0, "send_log": 0, "error": msg}
         except (paramiko.SSHException, OSError, RuntimeError) as exc:
             msg = f"Connection error: {exc}"
             print(f"  Error: {msg}")
-            return {"role": role, "host": host, "downloaded": 0, "error": msg}
+            return {"role": role, "host": host, "downloaded": 0, "send_log": 0, "error": msg}
         finally:
             ssh.close()
+
+    def _pull_send_log(self, ssh: paramiko.SSHClient, device: Dict[str, Any]) -> int:
+        """Merge the device's ``eos-time.jsonl`` into the local copy.
+
+        Returns:
+            Number of new records added (0 when the device has no send log).
+        """
+        remote = device.get("send_log", _SEND_LOG_DEFAULT.get(device.get("role")))
+        if not remote:
+            return 0
+        try:
+            with ssh.open_sftp() as sftp, sftp.open(remote, "r") as fh:
+                remote_lines = fh.read().decode("utf-8").splitlines()
+        except IOError:
+            print(f"  No send log at {remote}.")
+            return 0
+        added = merge_send_log(self.target_dir / SEND_LOG_NAME, remote_lines)
+        print(f"  Send log: {added} new record(s) from {remote}.")
+        return added
+
+
+def merge_send_log(local_path: Path, remote_lines: List[str]) -> int:
+    """Append remote send-log records the local copy doesn't have yet.
+
+    Records are matched as whole lines, so each one is kept once and the
+    local file's order (append order, i.e. chronological) is preserved.
+    The file is rewritten atomically.
+
+    Args:
+        local_path:   The intersection's ``eos-time.jsonl`` (may not exist).
+        remote_lines: The head unit's log, one JSON record per line.
+
+    Returns:
+        Number of records appended.
+    """
+    local_lines = local_path.read_text(encoding="utf-8").splitlines() if local_path.exists() else []
+    seen = set(local_lines)
+    new = []
+    for line in remote_lines:
+        line = line.strip()
+        if line and line not in seen:
+            seen.add(line)
+            new.append(line)
+    if new:
+        tmp_path = local_path.with_suffix(".jsonl.tmp")
+        tmp_path.write_text("".join(l + "\n" for l in local_lines + new), encoding="utf-8")
+        tmp_path.replace(local_path)
+    return len(new)
 
 
 # ---------------------------------------------------------------------------
@@ -280,7 +345,7 @@ def run_retrieval(
 
     Returns:
         List of per-device result dicts (``role``, ``host``, ``downloaded``,
-        ``error``).
+        ``send_log``, ``error``).
     """
     devices = _load_devices(devices_path)
     if not devices:
@@ -291,8 +356,11 @@ def run_retrieval(
     _save_devices(devices_path, devices)
 
     total = sum(r["downloaded"] for r in results)
+    n_log = sum(r.get("send_log", 0) for r in results)
     failed = [r for r in results if r["error"]]
     print(f"\nRetrieval complete: {total} file(s) downloaded across {len(devices)} device(s).")
+    if n_log:
+        print(f"  {n_log} new send-log record(s) merged into {SEND_LOG_NAME}.")
     if failed:
         print(
             f"  {len(failed)} device(s) failed: "
