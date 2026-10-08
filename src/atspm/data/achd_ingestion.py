@@ -7,12 +7,13 @@ into a normalised pyATSPM database, the CSV analogue of the ``.datZ`` path in
 connection, metadata, gap insertion, and span bookkeeping; all parsing is
 delegated to the functional core :mod:`atspm.analysis.achd`.
 
-Scope (first pass)
-==================
+Scope
+=====
 Populates ``events`` (with comms-gap markers), ``ingestion_log`` spans, and
-``metadata`` (id / name / timezone / agency).  Cycle and config derivation are
-deliberately out of scope — ACHD intersections ship no ``int_cfg.csv`` — and
-are left to a separate pass.
+``metadata`` (id / name / timezone / agency).  Config import and cycle
+derivation run afterwards in the CLI shell (``atspm ingest-achd``) through the
+same :func:`~atspm.data.import_config` and
+:class:`~atspm.data.processing.CycleProcessor` as the ``.datZ`` path.
 
 File discovery and ordering
 ===========================

@@ -75,6 +75,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+import numpy as np
 import pandas as pd
 import pytz
 
@@ -85,6 +86,12 @@ from ..analysis.cycles import (
     assign_ring_phases,
     calculate_cycles,
 )
+
+# Event codes calculate_cycles reads: gap markers (-1), green starts (1),
+# barrier pulses (31) and coordination plan changes (131).  Fetching only
+# these keeps a multi-month window (an ACHD year is ~120M events, most of
+# them detector on/off) within memory.
+_CYCLE_EVENT_CODES: List[int] = [-1, 1, 31, 131]
 
 
 # ---------------------------------------------------------------------------
@@ -364,7 +371,10 @@ class CycleProcessor:
 
             # Extend to the absolute end of the events table so
             # calculate_cycles sees all available context.
-            events_df = m.query_events(start_time=fetch_start)
+            events_df = m.query_events(
+                start_time=fetch_start,
+                event_codes=_CYCLE_EVENT_CODES,
+            )
             configs = m.get_configs_for_range(
                 datetime.fromtimestamp(fetch_start, self.tz),
                 datetime.fromtimestamp(t_end, self.tz),
@@ -373,7 +383,9 @@ class CycleProcessor:
         if events_df.empty or not configs:
             return
 
-        fetch_end = events_df["timestamp"].max()
+        # Segments are half-open, so end the open tail just past the last
+        # event; ending at it would drop the events that close the final cycle.
+        fetch_end = float(np.nextafter(events_df["timestamp"].max(), np.inf))
         segments = self._build_rb_segments(configs, fetch_start, fetch_end)
         all_cycles = self._run_segments(segments, events_df)
 
@@ -443,6 +455,7 @@ class CycleProcessor:
             events_df = m.query_events(
                 start_time=fetch_start,
                 end_time=fetch_end,
+                event_codes=_CYCLE_EVENT_CODES,
             )
             # Use T_end as a proxy upper bound for the config range when
             # fetch_end is open-ended, so we still pull the right configs.
@@ -457,7 +470,10 @@ class CycleProcessor:
         if events_df.empty or not configs:
             return
 
-        seg_end = fetch_end if fetch_end is not None else events_df["timestamp"].max()
+        seg_end = (
+            fetch_end if fetch_end is not None
+            else float(np.nextafter(events_df["timestamp"].max(), np.inf))
+        )
         segments = self._build_rb_segments(configs, fetch_start, seg_end)
         all_cycles = self._run_segments(segments, events_df)
 

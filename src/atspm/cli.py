@@ -771,13 +771,30 @@ def _ingest_achd_single(int_id: str, source_dir: Path, args: argparse.Namespace)
     # if an int_cfg.csv sits beside the DB, mirroring 'atspm process'. Non-fatal:
     # a missing or malformed config must not fail an otherwise good ingest.
     config_csv = target_dir / "int_cfg.csv"
+    config_ok = False
     if config_csv.exists():
         try:
             import_config(config_csv, db_path)
+            config_ok = True
         except Exception as exc:  # noqa: BLE001
             print(f"    ⚠️   Config import warning (non-fatal): {exc}")
     else:
         print("    ⚠️   int_cfg.csv not found beside DB — skipping config import")
+
+    # Derive cycles over every ingested span.  ACHD runs both controller
+    # families: Econolite tags each Code 31 with the barrier number, while
+    # Trafficware emits one Code 31 per active ring at the same instant (at
+    # yellow onset), which calculate_cycles routes to the ring-barrier path.
+    # Both paths start a cycle at the first green of the RB_R1/RB_R2 lead
+    # group, so a site that changed controllers keeps one cycle definition.
+    if getattr(args, "no_cycles", False):
+        print("    ⏭️   Cycle derivation skipped (--no-cycles)")
+    elif not config_ok:
+        print("    ⚠️   No config imported — skipping cycle derivation")
+    else:
+        from atspm.data.processing import CycleProcessor
+        print("    🔄  Deriving cycles…")
+        CycleProcessor(db_path, timezone).run()
 
     # Drop a metadata.json so other subcommands can resolve this DB by
     # --target achd/<id>; the authoritative metadata already lives in the DB.
@@ -807,7 +824,8 @@ def handle_ingest_achd(args: argparse.Namespace) -> None:
     Reads ``{id}_Events_*.csv`` exports from ``--source`` and writes one
     normalised database per intersection under ``intersections/achd/<id>/``.
     Populates ``events`` (with comms-gap markers), ``ingestion_log`` spans and
-    ``metadata``; cycle/config derivation is a separate pass.
+    ``metadata``, imports ``int_cfg.csv`` when present, then derives
+    ``cycles`` unless ``--no-cycles`` is given.
 
     Target selection mirrors the other subcommands' mutually-exclusive group:
     ``--targetid <id>`` for one intersection, or ``--all`` for every id found
@@ -6722,8 +6740,9 @@ def _add_ingest_achd_parser(subs: argparse._SubParsersAction) -> None:
             "intersections/achd/<id>/<id>_data.db.\n\n"
             "Populates events (with comms-gap markers), ingestion_log spans and\n"
             "metadata (id/name/timezone/agency). ACHD ids are namespaced under\n"
-            "achd/ so they never collide with the ITD intersections. Cycle and\n"
-            "config derivation are a separate pass (ACHD ships no int_cfg.csv).\n\n"
+            "achd/ so they never collide with the ITD intersections. An\n"
+            "int_cfg.csv beside the DB (intersections/achd/<id>/) is imported,\n"
+            "then cycles are derived from it unless --no-cycles is given.\n\n"
             "Point --source at the directory of raw CSV exports (e.g. the\n"
             "SPM_Data_Archive/ACHD_Data/Archive folder on the external SSD)."
         ),
@@ -6749,6 +6768,10 @@ def _add_ingest_achd_parser(subs: argparse._SubParsersAction) -> None:
     p_achd.add_argument(
         "--rebuild", action="store_true",
         help="Clear existing events/cycles/ingestion_log before ingesting.",
+    )
+    p_achd.add_argument(
+        "--no-cycles", action="store_true",
+        help="Skip cycle derivation; only ingest events, config and metadata.",
     )
     p_achd.add_argument(
         "--verbose", action="store_true",
