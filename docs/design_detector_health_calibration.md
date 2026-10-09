@@ -74,8 +74,9 @@ the choice of default and the verdict stay with Opus.
 1. **"Same unit" is an `int_cfg` grouping**, like other config-driven ideas
    in the roadmap: one row per detection unit, listing its channels (e.g.
    unit 1 → `[33, 34, …]`). The unit *type* is part of the config, keyed by
-   BIU. For example, at 201 BIU 2 is a Thunder unit, BIU 3 an Evo and
-   BIU 4 a Currux; elsewhere BIUs 2, 3 and 4 may all be Evo.
+   BIU. For example, at 201 BIU 1 is a Currux video unit, BIU 2 a Currux Thunder
+   and BIU 3 an Evo, with BIU 4 switched off (it was once in use, so older
+   `int_cfg`s still assign detectors 49+); elsewhere BIUs 2, 3 and 4 may all be Evo.
    - **Settings can depend on the unit type** more often than on the
      intersection: reboot window, normal burst release time, and
      chatter/short-pulse norms (radar, video and loops behave differently).
